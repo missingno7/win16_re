@@ -312,46 +312,42 @@ def install(api: ApiRegistry) -> None:
         clr_used = struct.unpack_from("<I", hdr, 32)[0] or 256
 
         # Build a 256-entry index -> (r,g,b) LUT from the DIB colour table.
+        # The table is RGBQUAD (B,G,R,0) — the standard 8bpp DIB format that
+        # both microman and ppython ship.  NOTE: microman passes
+        # fuColorUse=DIB_PAL_COLORS(1) yet still supplies an RGBQUAD table (its
+        # entries decode to the exact 16-colour VGA palette), so we trust the
+        # data format, not the flag.  A DIB that genuinely uses PAL_COLORS
+        # (WORD indices into dc.palette) is not proven by any game yet; add it
+        # (fail-loud detected) when one appears.
         ctoff = (boff + size) & 0xFFFF
-        pal = dc.palette
-        # fuColorUse can lie (microman passes DIB_PAL_COLORS but ships an RGBQUAD
-        # table).  Trust the DATA: it's PAL_COLORS only if the words are valid
-        # indices into the selected palette; otherwise it's RGBQUAD.
-        use_pal = coloruse == 1 and pal is not None
-        if use_pal:
-            sample = [ctx.mem.rw(bseg, (ctoff + i * 2) & 0xFFFF)
-                      for i in range(min(clr_used, 16))]
-            if any(v >= len(pal.entries) for v in sample):
-                use_pal = False
         lut = []
         for i in range(256):
             if i >= clr_used:
                 lut.append((0, 0, 0))
                 continue
-            if use_pal:                         # DIB_PAL_COLORS: WORD pal indices
-                pidx = ctx.mem.rw(bseg, (ctoff + i * 2) & 0xFFFF)
-                lut.append(pal.entries[pidx] if pidx < len(pal.entries) else (0, 0, 0))
-            else:                               # DIB_RGB_COLORS: RGBQUAD (B,G,R,0)
-                b = (ctoff + i * 4) & 0xFFFF
-                lut.append((ctx.mem.rb(bseg, (b + 2) & 0xFFFF),
-                            ctx.mem.rb(bseg, (b + 1) & 0xFFFF),
-                            ctx.mem.rb(bseg, b)))
+            b = (ctoff + i * 4) & 0xFFFF
+            lut.append((ctx.mem.rb(bseg, (b + 2) & 0xFFFF),
+                        ctx.mem.rb(bseg, (b + 1) & 0xFFFF),
+                        ctx.mem.rb(bseg, b)))
 
         stride = ((w * 8 + 31) // 32) * 4
-        vseg, voff = (bits >> 16) & 0xFFFF, bits & 0xFFFF
+        # The bits buffer can exceed 64K (microman: 512x320 = 160KB), so use
+        # LINEAR addressing from the far pointer — segment-relative offsets
+        # would wrap at 64K and tile/garble the image.
+        base_lin = ((bits >> 16) & 0xFFFF) * 16 + (bits & 0xFFFF)
+        mem_data = ctx.mem.data
         top0 = h - ys - cy                      # top-down y of the source region top
         for j in range(cy):
             ty = top0 + j                       # DIB top-down row
             r = (h - 1) - start - ty            # buffer row for that DIB scanline
             if not (0 <= r) or not (0 <= yd + j < dst.h):
                 continue
-            src_row = (voff + r * stride) & 0xFFFF
+            row_lin = base_lin + r * stride + xs
             dbase = ((yd + j) * dst.w + xd) * 3
             for i in range(cx):
-                sx = xs + i
-                if not (0 <= sx < w) or not (0 <= xd + i < dst.w):
+                if not (0 <= xs + i < w) or not (0 <= xd + i < dst.w):
                     continue
-                px = ctx.mem.rb(vseg, (src_row + sx) & 0xFFFF)
+                px = mem_data[row_lin + i]
                 rr, gg, bb = lut[px]
                 o = dbase + i * 3
                 dst.pixels[o] = rr; dst.pixels[o + 1] = gg; dst.pixels[o + 2] = bb

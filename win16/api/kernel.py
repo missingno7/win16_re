@@ -184,7 +184,13 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("KERNEL", 63, args="word")            # FreeResource(hGlobal)
     def FreeResource(ctx: CallContext) -> int:
-        return 0                    # 0 = freed (block retained; bump allocator)
+        sys: Win16System = ctx.registry.services["system"]
+        loaded = ctx.registry.services.get("loaded_resources", {})
+        for key, seg in list(loaded.items()):
+            if seg == ctx.args[0]:
+                del loaded[key]
+        sys.global_free(ctx.args[0])
+        return 0                    # 0 = freed
 
     @api.register("KERNEL", 85, args="str word")        # _lopen(name, mode)
     def _lopen(ctx: CallContext) -> int:
@@ -214,7 +220,10 @@ def install(api: ApiRegistry) -> None:
             return 0xFFFF
         chunk = bytes(vf.data[vf.pos:vf.pos + ctx.args[2]])
         if chunk:
-            ctx.mem.load((ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF, chunk)
+            # Linear write: a read that ends near the segment's 64K boundary
+            # must continue into the next paragraphs, not wrap (huge buffers).
+            lin = ((ctx.args[1] >> 16) & 0xFFFF) * 16 + (ctx.args[1] & 0xFFFF)
+            ctx.mem.data[lin:lin + len(chunk)] = chunk
         vf.pos += len(chunk)
         return len(chunk)
 
@@ -224,8 +233,8 @@ def install(api: ApiRegistry) -> None:
         vf = sys.files.get(ctx.args[0])
         if vf is None or not vf.writable:
             return 0xFFFF
-        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
-        data = bytes(ctx.mem.rb(seg, (off + i) & 0xFFFF) for i in range(ctx.args[2]))
+        lin = ((ctx.args[1] >> 16) & 0xFFFF) * 16 + (ctx.args[1] & 0xFFFF)
+        data = bytes(ctx.mem.data[lin:lin + ctx.args[2]])
         end = vf.pos + len(data)
         if end > len(vf.data):
             vf.data.extend(b"\x00" * (end - len(vf.data)))
@@ -275,7 +284,7 @@ def install(api: ApiRegistry) -> None:
     @api.register("KERNEL", 17, args="word")            # GlobalFree(handle)
     def GlobalFree(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
-        sys.global_blocks.pop(ctx.args[0], None)         # not reclaimed (bump alloc)
+        sys.global_free(ctx.args[0])                     # reclaim the paragraphs
         return 0                    # 0 = freed
 
     @api.register("KERNEL", 20, args="word")            # GlobalSize(handle)

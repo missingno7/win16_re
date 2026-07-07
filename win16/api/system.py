@@ -247,20 +247,52 @@ class Win16System:
         return self.machine.seg_bases[self.machine.exe.header.auto_data_seg]
 
     global_blocks: dict[int, int] = field(default_factory=dict)   # seg -> size
+    _global_paras: dict[int, int] = field(default_factory=dict)    # seg -> #paras
+    _global_free: list[tuple[int, int]] = field(default_factory=list)  # (base, n)
 
     def global_alloc(self, size: int, *, zero: bool = False) -> int:
         """Allocate a global block; the segment value IS the handle (flat model:
-        selectors are paragraph bases).  Returns 0 on failure."""
+        selectors are paragraph bases).  Reuses freed blocks (first-fit) before
+        bumping the frontier — a game that loads/frees hundreds of temp buffers
+        would otherwise exhaust the VM.  Returns 0 on failure."""
         paras = max((size + 15) >> 4, 1)
-        try:
-            seg = self.machine.alloc_paragraphs(paras)
-        except Exception:  # noqa: BLE001 — out of VM memory -> API failure
-            return 0
+        seg = None
+        for i, (base, n) in enumerate(self._global_free):
+            if n >= paras:
+                seg = base
+                if n == paras:
+                    del self._global_free[i]
+                else:
+                    self._global_free[i] = (base + paras, n - paras)
+                break
+        if seg is None:
+            try:
+                seg = self.machine.alloc_paragraphs(paras)
+            except Exception:  # noqa: BLE001 — out of VM memory -> API failure
+                return 0
         self.global_blocks[seg] = size
+        self._global_paras[seg] = paras
         if zero:
             for i in range(size):
                 self.machine.mem.wb(seg, i, 0)
         return seg
+
+    def global_free(self, seg: int) -> bool:
+        """Return a global block's paragraphs to the free list (coalescing)."""
+        paras = self._global_paras.pop(seg, None)
+        self.global_blocks.pop(seg, None)
+        if paras is None:
+            return False
+        self._global_free.append((seg, paras))
+        self._global_free.sort()
+        merged: list[tuple[int, int]] = []
+        for base, n in self._global_free:
+            if merged and merged[-1][0] + merged[-1][1] == base:
+                merged[-1] = (merged[-1][0], merged[-1][1] + n)
+            else:
+                merged.append((base, n))
+        self._global_free = merged
+        return True
 
     def ensure_psp(self) -> int:
         """Allocate a PSP-style paragraph block holding the command tail."""
