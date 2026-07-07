@@ -213,13 +213,23 @@ def install(api: ApiRegistry) -> None:
         dc = sys.handles.require(ctx.args[0], DC)
         font = dc.selected.get("font")
         kind = getattr(font, "kind", None)
-        if kind not in ("ANSI_FIXED_FONT", "SYSTEM_FIXED_FONT", "OEM_FIXED_FONT"):
+        # (height, ascent, descent, avewidth, maxwidth) per stock font.  The
+        # text renderer treats everything as an 8x13 cell; these are the
+        # documented Win3.1 VGA metrics apps query for layout.
+        fixed = (13, 11, 2, 8, 8)
+        metrics = {
+            "ANSI_FIXED_FONT": fixed, "SYSTEM_FIXED_FONT": fixed,
+            "OEM_FIXED_FONT": fixed,
+            "SYSTEM_FONT": (16, 12, 3, 7, 14),      # proportional system font
+            "ANSI_VAR_FONT": (13, 11, 2, 6, 12),
+            "DEVICE_DEFAULT_FONT": (16, 12, 3, 7, 14),
+        }.get(kind)
+        if metrics is None:
             raise NotImplementedError(f"GetTextMetrics for font {kind!r}")
-        # Classic Win3.1 VGA fixed font: 8x13, ascent 11.  The text renderer
-        # must stay consistent with these numbers.
+        height, ascent, descent, avew, maxw = metrics
         seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
-        words = [13, 11, 2, 3, 0, 8, 8, 400]     # height ascent descent intlead
-        for i, v in enumerate(words):            # extlead avewidth maxwidth weight
+        words = [height, ascent, descent, 3, 0, avew, maxw, 400]
+        for i, v in enumerate(words):            # height ascent descent intlead...
             ctx.mem.ww(seg, (off + 2 * i) & 0xFFFF, v)
         tail = [0, 0, 0, 0x20, 0xFF, 0x2E, 0x20, 0x31, 0]  # italic..charset
         for i, v in enumerate(tail):
@@ -258,6 +268,34 @@ def install(api: ApiRegistry) -> None:
                     dst.pixels[doff + col * 3:doff + col * 3 + 3] = \
                         src.pixels[soff:soff + 3]
         return 1
+
+    @api.register("GDI", 80, args="word s_word")        # GetDeviceCaps(hdc, index)
+    def GetDeviceCaps(ctx: CallContext) -> int:
+        # A 256-colour palettised VGA (640x480), the display Win3.1 games target.
+        caps = {
+            4: 208, 6: 156,             # HORZSIZE/VERTSIZE (mm)
+            8: 640, 10: 480,            # HORZRES / VERTRES
+            12: 8, 14: 1,               # BITSPIXEL / PLANES
+            16: -1, 18: -1, 22: -1,     # NUMBRUSHES/PENS/FONTS (device: unlimited)
+            24: 20,                     # NUMCOLORS (static system colours)
+            26: 0,                      # DEVICESIZE
+            38: 0x0100,                 # RASTERCAPS: RC_PALETTE
+            40: 8, 42: 8,               # ASPECTX / ASPECTY
+            88: 96, 90: 96,             # LOGPIXELSX / LOGPIXELSY
+            104: 256, 106: 20, 108: 8,  # SIZEPALETTE / NUMRESERVED / COLORRES
+        }
+        idx = _signed(ctx.args[1])
+        if idx not in caps:
+            raise NotImplementedError(f"GetDeviceCaps index {idx}")
+        return caps[idx] & 0xFFFF
+
+    @api.register("GDI", 3, args="word word")           # SetMapMode(hdc, mode)
+    def SetMapMode(ctx: CallContext) -> int:
+        # Only MM_TEXT (1:1 device units) is modelled; anything else would need
+        # a coordinate transform the renderer doesn't do.
+        if ctx.args[1] != 1:
+            raise NotImplementedError(f"SetMapMode {ctx.args[1]} (only MM_TEXT)")
+        return 1                    # previous mode = MM_TEXT
 
     @api.register("GDI", 69, args="word")               # DeleteObject(handle)
     def DeleteObject(ctx: CallContext) -> int:

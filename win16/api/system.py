@@ -246,6 +246,22 @@ class Win16System:
     def h_instance(self) -> int:
         return self.machine.seg_bases[self.machine.exe.header.auto_data_seg]
 
+    global_blocks: dict[int, int] = field(default_factory=dict)   # seg -> size
+
+    def global_alloc(self, size: int, *, zero: bool = False) -> int:
+        """Allocate a global block; the segment value IS the handle (flat model:
+        selectors are paragraph bases).  Returns 0 on failure."""
+        paras = max((size + 15) >> 4, 1)
+        try:
+            seg = self.machine.alloc_paragraphs(paras)
+        except Exception:  # noqa: BLE001 — out of VM memory -> API failure
+            return 0
+        self.global_blocks[seg] = size
+        if zero:
+            for i in range(size):
+                self.machine.mem.wb(seg, i, 0)
+        return seg
+
     def ensure_psp(self) -> int:
         """Allocate a PSP-style paragraph block holding the command tail."""
         if not self.psp_seg:

@@ -1,6 +1,15 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
+- **win16 is now game-agnostic; multi-game testing.** `win16/app.py create_machine(exe,
+  winflags)` boots ANY NE. `scripts/games.py` = the test-game registry (ppython is the
+  RE target; microman/bangbang/kye/skifree are fixtures to harden win16).
+  `scripts/boot.py <game> [steps]` = generic frontier probe. `ppython/runtime.py` is now
+  a thin adapter. Ordinal names for KERNEL/USER/GDI/MMSYSTEM extended so ANY import
+  fails loud WITH its name. **MICROMAN status:** boots ~1.7M instructions (full startup
+  + file loads + game init) to the frontier GDI.360:CreatePalette (the 256-colour
+  palette subsystem — CreatePalette/SelectPalette/RealizePalette/GetPaletteEntries/
+  GetNearestPaletteIndex/SetDIBitsToDevice + MMSYSTEM.2 sndPlaySound are its open APIs).
 - **Snapshot at an event:** `play.py --snapshot-on-box Collision` saves an INSPECTION
   snapshot whenever a MessageBox whose caption/text matches appears (the crash box is
   "Ughhh!"/"Collision!"). CPU is parked in the modal handler so memory+CPU+pixels are
@@ -60,6 +69,24 @@
 - **Menu commands** (from the MENU resource): 1050 New(F2), 1100 Sound(F3),
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
+
+## 2026-07-07 — win16_re: game-agnostic launcher + MICROMAN as a hardening fixture
+- Owner reorganized assets into per-game subfolders (assets/PPYTHON, MICROMAN,
+  BANGBANG, KYE, SKIFREE) and reframed the project as win16_re: win16/ is the
+  framework, ppython is the RE target, other games are test fixtures. Refactored:
+  `win16/app.py` (generic create_machine for any NE), `scripts/games.py` (registry),
+  `scripts/boot.py` (frontier probe); ppython/runtime.py → thin adapter (path fixed to
+  assets/PPYTHON/PYTHON.EXE). CLAUDE.md reframed.
+- **MICROMAN bring-up** (fixture): resolved all its new ordinal names (KERNEL/USER/GDI/
+  MMSYSTEM, incl. __AHSHIFT/__AHINCR equates); added dos_re CPU **ENTER (0xC8)** frame
+  op (committed there w/ test); implemented the KERNEL string/global-mem/_l* file batch
+  (lstrcpy, GlobalAlloc/Lock/Unlock/Free/Size, GetWinFlags, GetWindowsDirectory,
+  _lopen/_lcreat/_lclose/_lread/_lwrite/_llseek), USER batch (GetDesktopWindow +
+  GetDC(NULL)=screen, GetTickCount, GetCursorPos, SetRect, SendMessage,
+  GetAsyncKeyState), GDI GetDeviceCaps (VGA-256 profile) + SetMapMode + GetTextMetrics
+  generalized to all stock fonts. Result: microman 433 instr → 1.7M instr, deep in its
+  own code. These all live in the shared layer → they benefit ppython too.
+- ppython unaffected (still boots both windows). Suite: 33 (+microman boot test).
 
 ## 2026-07-07 — bitmap menu items (ScreenSculptor ▸ Shape shows real icons)
 - Owner: the Shape menu should show shape ICONS, not text names. Confirmed the game

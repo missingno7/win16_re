@@ -1,9 +1,16 @@
-# CLAUDE.md — Paulie Python (Win16) oracle-driven recovery
+# CLAUDE.md — win16_re: oracle-driven Win16 recovery (target: Paulie Python)
 
-Evidence-driven reverse-engineering of **Paulie Python 1.0** (Way Out West-ware), a
-**16-bit Windows 3.x** game (`assets/PYTHON.EXE`, NE executable). This is the first
-**Win16** application of the oracle-driven method proven on DOS games by the
-[`dos_re`](D:/Games/DOS/dos_re) framework (Prehistorik 2, Overkill).
+A **16-bit Windows 3.x (NE)** recovery framework, applying the oracle-driven method
+proven on DOS games by [`dos_re`](D:/Games/DOS/dos_re) (Prehistorik 2, Overkill).
+`win16/` is the **game-agnostic** layer (NE loader + the Windows API surface + demos/
+snapshots/audio); it is the Win16 analogue of dos_re itself.
+
+**The RE target is Paulie Python 1.0** (Way Out West-ware, `assets/PPYTHON/PYTHON.EXE`);
+its adapter is `ppython/`. Other games under `assets/` (MICROMAN, BANGBANG, KYE,
+SKIFREE) are **test fixtures only** — we boot them through the shared `win16/` layer
+(`scripts/boot.py <game>`) to exercise and harden it, never to fully recover them.
+Stay focused on PPYTHON for recovery; use the others to find gaps in `win16/`.
+(Repo dir is still `ppython_re/`; rename to `win16_re/` is cosmetic and pending.)
 
 **The method is dos_re's** — read `D:/Games/DOS/dos_re/START_HERE.md` and
 `docs/ai_porting_charter.md` there. This repo is a game-port repo that *uses* the

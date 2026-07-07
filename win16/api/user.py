@@ -27,6 +27,21 @@ def _sys(ctx: CallContext) -> Win16System:
     return ctx.registry.services["system"]
 
 
+def _desktop_window(sys: Win16System) -> Window:
+    """The screen/desktop pseudo-window (GetDesktopWindow / GetDC(NULL))."""
+    win = sys.machine.api.services.get("desktop_window")
+    if win is None:
+        cls = WndClass(name="#desktop", style=0, wndproc=(0, 0), cls_extra=0,
+                       wnd_extra=0, h_instance=0, h_icon=0, h_cursor=0,
+                       h_background=0, menu_name=None)
+        sys.handles.add(cls)
+        win = Window(wndclass=cls, title="", style=0, x=0, y=0,
+                     w=SYSTEM_METRICS[0], h=SYSTEM_METRICS[1], parent=0, menu=0)
+        sys.handles.add(win)
+        sys.machine.api.services["desktop_window"] = win
+    return win
+
+
 def _geom(sysobj, handle: int) -> tuple[int, int, int, int]:
     """Resolve any window-like handle (Window, Dialog, control) to its
     (x, y, w, h) geometry — they are all windows in Win16."""
@@ -629,6 +644,42 @@ def install(api: ApiRegistry) -> None:
         _sys(ctx).handles.require(ctx.args[0], Window)
         return 0                    # minimization is host-side UI; never iconic
 
+    @api.register("USER", 286)                          # GetDesktopWindow()
+    def GetDesktopWindow(ctx: CallContext) -> int:
+        return _desktop_window(_sys(ctx)).handle
+
+    @api.register("USER", 13, ret="long")               # GetTickCount()
+    def GetTickCount(ctx: CallContext) -> int:
+        return _sys(ctx).clock_ms & 0xFFFFFFFF
+
+    @api.register("USER", 17, args="ptr")               # GetCursorPos(lpPoint)
+    def GetCursorPos(ctx: CallContext) -> int:
+        x, y = _sys(ctx).machine.api.services.get("cursor_pos", (0, 0))
+        seg, off = (ctx.args[0] >> 16) & 0xFFFF, ctx.args[0] & 0xFFFF
+        ctx.mem.ww(seg, off, x & 0xFFFF)
+        ctx.mem.ww(seg, (off + 2) & 0xFFFF, y & 0xFFFF)
+        return 1
+
+    @api.register("USER", 249, args="word")             # GetAsyncKeyState(vk)
+    def GetAsyncKeyState(ctx: CallContext) -> int:
+        keys = _sys(ctx).machine.api.services.get("async_keys", set())
+        return 0x8000 if ctx.args[0] in keys else 0
+
+    @api.register("USER", 72, args="ptr s_word s_word s_word s_word")
+    def SetRect(ctx: CallContext) -> int:               # (rc, l, t, r, b)
+        seg, off = (ctx.args[0] >> 16) & 0xFFFF, ctx.args[0] & 0xFFFF
+        for i, v in enumerate(ctx.args[1:]):
+            ctx.mem.ww(seg, (off + 2 * i) & 0xFFFF, v & 0xFFFF)
+        return 1
+
+    @api.register("USER", 111, args="word word word long", ret="long")
+    def SendMessage(ctx: CallContext) -> int:           # (hwnd, msg, wp, lp)
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        return sys.call_wndproc(win, ctx.args[1], ctx.args[2], ctx.args[3])
+
     @api.register("USER", 125, args="word ptr word")    # InvalidateRect(hwnd, rc, erase)
     def InvalidateRect(ctx: CallContext) -> int:
         sys = _sys(ctx)
@@ -672,7 +723,8 @@ def install(api: ApiRegistry) -> None:
     @api.register("USER", 66, args="word")              # GetDC(hwnd)
     def GetDC(ctx: CallContext) -> int:
         sys = _sys(ctx)
-        win = sys.handles.require(ctx.args[0], Window)
+        hwnd = ctx.args[0]
+        win = _desktop_window(sys) if hwnd == 0 else sys.handles.require(hwnd, Window)
         return sys.new_dc(window=win)
 
     @api.register("USER", 68, args="word word")         # ReleaseDC(hwnd, hdc)

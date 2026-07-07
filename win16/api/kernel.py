@@ -143,6 +143,114 @@ def install(api: ApiRegistry) -> None:
         sys: Win16System = ctx.registry.services["system"]
         return sys.ensure_environment() << 16            # seg:0000 far pointer
 
+    @api.register("KERNEL", 85, args="str word")        # _lopen(name, mode)
+    def _lopen(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        name = ctx.read_string(ctx.args[0]).decode("latin-1")
+        writable = bool(ctx.args[1] & 0x0003)            # OF_WRITE | OF_READWRITE
+        h = sys.file_open(name, writable=writable)
+        return h if h >= 0 else 0xFFFF                    # HFILE_ERROR
+
+    @api.register("KERNEL", 83, args="str word")        # _lcreat(name, attr)
+    def _lcreat(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        name = ctx.read_string(ctx.args[0]).decode("latin-1")
+        h = sys.file_open(name, writable=True, create=True)
+        return h if h >= 0 else 0xFFFF
+
+    @api.register("KERNEL", 81, args="word")            # _lclose(hf)
+    def _lclose(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        return 0 if sys.file_close(ctx.args[0]) else 0xFFFF
+
+    @api.register("KERNEL", 82, args="word segptr word")  # _lread(hf, buf, count)
+    def _lread(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        vf = sys.files.get(ctx.args[0])
+        if vf is None:
+            return 0xFFFF
+        chunk = bytes(vf.data[vf.pos:vf.pos + ctx.args[2]])
+        if chunk:
+            ctx.mem.load((ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF, chunk)
+        vf.pos += len(chunk)
+        return len(chunk)
+
+    @api.register("KERNEL", 86, args="word ptr word")   # _lwrite(hf, buf, count)
+    def _lwrite(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        vf = sys.files.get(ctx.args[0])
+        if vf is None or not vf.writable:
+            return 0xFFFF
+        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
+        data = bytes(ctx.mem.rb(seg, (off + i) & 0xFFFF) for i in range(ctx.args[2]))
+        end = vf.pos + len(data)
+        if end > len(vf.data):
+            vf.data.extend(b"\x00" * (end - len(vf.data)))
+        vf.data[vf.pos:end] = data
+        vf.pos = end
+        vf.dirty = True
+        return len(data)
+
+    @api.register("KERNEL", 84, args="word long word", ret="long")  # _llseek
+    def _llseek(ctx: CallContext) -> int:               # (hf, offset, origin)
+        sys: Win16System = ctx.registry.services["system"]
+        vf = sys.files.get(ctx.args[0])
+        if vf is None:
+            return 0xFFFFFFFF
+        offset = ctx.args[1]
+        if offset & 0x80000000:
+            offset -= 1 << 32
+        base = {0: 0, 1: vf.pos, 2: len(vf.data)}.get(ctx.args[2])
+        if base is None:
+            raise NotImplementedError(f"_llseek origin {ctx.args[2]}")
+        vf.pos = max(base + offset, 0)
+        return vf.pos & 0xFFFFFFFF
+
+    @api.register("KERNEL", 88, args="segptr str", ret="long")   # lstrcpy(dst, src)
+    def lstrcpy(ctx: CallContext) -> int:
+        dst, src = ctx.args
+        data = ctx.read_string(src)
+        ctx.mem.load((dst >> 16) & 0xFFFF, dst & 0xFFFF, data + b"\x00")
+        return dst
+
+    @api.register("KERNEL", 15, args="word long")       # GlobalAlloc(flags, size)
+    def GlobalAlloc(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        flags, size = ctx.args
+        return sys.global_alloc(size, zero=bool(flags & 0x0040))   # GMEM_ZEROINIT
+
+    @api.register("KERNEL", 18, args="word", ret="long")  # GlobalLock(handle)
+    def GlobalLock(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        h = ctx.args[0]
+        return (h << 16) if h in sys.global_blocks else 0     # far ptr seg:0000
+
+    @api.register("KERNEL", 19, args="word")            # GlobalUnlock(handle)
+    def GlobalUnlock(ctx: CallContext) -> int:
+        return 0                    # nothing moves; unlock is a no-op success
+
+    @api.register("KERNEL", 17, args="word")            # GlobalFree(handle)
+    def GlobalFree(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        sys.global_blocks.pop(ctx.args[0], None)         # not reclaimed (bump alloc)
+        return 0                    # 0 = freed
+
+    @api.register("KERNEL", 20, args="word")            # GlobalSize(handle)
+    def GlobalSize(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        return sys.global_blocks.get(ctx.args[0], 0)
+
+    @api.register("KERNEL", 132, ret="long")            # GetWinFlags()
+    def GetWinFlags(ctx: CallContext) -> int:
+        return ctx.registry.equates.get(("KERNEL", 178), 0)
+
+    @api.register("KERNEL", 134, args="ptr word")       # GetWindowsDirectory(buf, n)
+    def GetWindowsDirectory(ctx: CallContext) -> int:
+        buf, cap = ctx.args
+        path = b"C:\\WINDOWS"[:max(cap - 1, 0)]
+        ctx.mem.load((buf >> 16) & 0xFFFF, buf & 0xFFFF, path + b"\x00")
+        return len(path)
+
     @api.register("KERNEL", 49, args="word ptr word")   # GetModuleFileName(h, buf, n)
     def GetModuleFileName(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
