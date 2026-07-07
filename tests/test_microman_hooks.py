@@ -36,7 +36,7 @@ def _drive(hooked: bool):
     machine = create_machine(MICROMAN, winflags=game_winflags("microman"))
     machine.cpu.trace_enabled = False
     if hooked:
-        assert install_game_hooks("microman", machine) == 2
+        assert install_game_hooks("microman", machine) == 17
     sysobj = machine.api.services["system"]
     hashes = []
     for _ in range(BATCHES):
@@ -64,9 +64,11 @@ def test_islands_are_pixel_exact_and_engaged():
 
 
 def test_install_refuses_wrong_code():
+    """A binary whose code segment lacks the WAP loop bodies must be refused
+    (an island landing on different code corrupts silently)."""
     machine = create_machine(MICROMAN, winflags=game_winflags("microman"))
     from gamehooks import microman as mm
     cs = machine.seg_bases[mm.CODE_SEG_INDEX]
-    machine.mem.wb(cs, mm.FILL_IP, 0x90)        # patch one byte
+    machine.mem.data[cs << 4:(cs << 4) + 0x10000] = bytes(0x10000)
     with pytest.raises(AssertionError):
         mm.install(machine)

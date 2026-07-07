@@ -26,7 +26,10 @@ class InteractiveDriver:
         self.running = True
         self._input: list[tuple[int, int, int, int]] = []
         self._cond = threading.Condition()
-        self._t0 = time.monotonic()
+        # Resume the system's virtual clock (nonzero when the machine was
+        # restored from a snapshot): now_ms() must continue from clock_ms or
+        # every armed timer sits "in the future" for that many REAL seconds.
+        self._t0 = time.monotonic() - sysobj.clock_ms / 1000.0 / max(speed, 1e-9)
         self._pause_requested = False
         self.paused = threading.Event()     # set while the CPU thread is
         self._resume = threading.Event()    # parked at the message boundary

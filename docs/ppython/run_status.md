@@ -83,6 +83,32 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — snapshot resume from play.py + SND_MEMORY SFX + islands scan-all
+- **Resume a session from a snapshot** (owner asked, to profile gameplay itself):
+  `play.py --resume <snap_dir>` boots straight from an F9 snapshot instead of cold.
+  Two selector-era fixes were needed: (1) `load_snapshot` re-wires the VM Memory's
+  `sel_base`/`sel_min` to the RESTORED huge heap (the pickle copied the dict, so the
+  fresh boot's empty map would leave every global selector unmapped → instant
+  divergence); (2) the InteractiveDriver seeds its wall-clock epoch from the restored
+  `clock_ms`, else every armed timer sits `clock_ms` ms in the future and the game
+  looks frozen for ~45 s.  Snapshot format v2 also carries the polled key state
+  (`async_keys`).  Gate: `tests/test_microman_snapshot.py` (bit-exact resume, plain
+  AND hooked).
+- **SFX now audible**: microman plays fire/hit sounds via `sndPlaySound(ptr,
+  SND_MEMORY)` — a RIFF/WAV image it builds in a global buffer (NOT a disk file; only
+  the looping title music is MICROMAN.WAV).  The SND_MEMORY branch was log-only; now
+  `_read_wav_image` copies the blob out by its RIFF size and hands it to the backend.
+  SquareWaveBackend separates looping MUSIC (replace-on-new) from one-shot SFX (mix on
+  any of 16 channels, decoded-Sound cache so a rapid-fire SFX decodes once, live-ref
+  ring so pygame doesn't GC a still-playing one-shot).  Pinned by
+  `tests/test_sndplaysound.py`.  Owner sound bug fixed.
+- **Islands scan-all**: `gamehooks/microman.py` now signature-scans the code segment
+  for every clone of the WAP loop bodies (ascending fill, descending fill, dword copy)
+  instead of two hand-picked addresses — 17 clones hooked.  Gameplay from the level-1
+  snapshot: 4.1→7.1 fps (the fill loops appear at 8 more sites used by sprite draw).
+  Remaining gameplay hot spots (post-hook resample): seg2:6Axx 18%, 6Exx 11%, 72xx
+  10% — the WAP sprite compositor's per-pixel plotting; next islands.
+
 ## 2026-07-07 — GAME-SIDE HOOKS PROVEN: the WAP lifted islands (per-game, oracle-gated)
 - **The dos_re method now works on win16 games.**  New `gamehooks/` package: per-game
   hook modules (`gamehooks/<name>.py`, `install(machine)`), kept OUT of the

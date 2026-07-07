@@ -57,12 +57,16 @@ def save_snapshot(machine, out_dir: str | Path, *, note: str = "") -> Path:
 
     meta = {
         "kind": "win16-snapshot",
-        "version": 1,
+        "version": 2,
         "note": note,
         "exe": machine.exe.path.name,
         "cpu": asdict(machine.cpu.s),
         "instruction_count": machine.cpu.instruction_count,
         "free_para": machine.free_para,
+        # Game-observable polled input (GetAsyncKeyState reads these).
+        "async_keys": sorted(machine.api.services.get("async_keys", set())),
+        "async_keys_tapped": sorted(
+            machine.api.services.get("async_keys_tapped", set())),
         "digest": digest(machine),
     }
     (out / "state.json").write_text(json.dumps(meta, indent=1))
@@ -100,6 +104,18 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     sysobj = pickle.loads((snap / "system.pickle").read_bytes())
     sysobj.machine = machine
     machine.api.services["system"] = sysobj
+
+    # Re-wire the selector heap: the VM Memory must consult the RESTORED
+    # heap's selector->linear map (the pickle made a copy; the fresh boot's
+    # dict knows nothing of the snapshot's allocations).
+    if sysobj.huge_heap is not None:
+        machine.mem.sel_base = sysobj.huge_heap.sel_base
+        machine.mem.sel_min = sysobj.huge_heap.first_selector
+
+    # Polled key state (game-observable via GetAsyncKeyState).
+    machine.api.services["async_keys"] = set(meta.get("async_keys", []))
+    machine.api.services["async_keys_tapped"] = set(
+        meta.get("async_keys_tapped", []))
 
     got = digest(machine)
     if got != meta["digest"]:

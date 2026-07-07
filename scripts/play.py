@@ -562,10 +562,18 @@ class PlayApp:
     def __init__(self, exe_path, winflags: int, speed: float, scale: int,
                  record: str | None = None, mute: bool = False,
                  snapshot_on_box: str | None = None,
-                 game_name: str = "", hooks: bool = True) -> None:
+                 game_name: str = "", hooks: bool = True,
+                 resume: str | None = None) -> None:
         self.scale = scale
         self.origin_x, self.origin_y = 60, 60
-        self.machine = create_machine(exe_path, winflags=winflags)
+        if resume:
+            from win16.vmsnap import load_snapshot
+            self.machine = load_snapshot(
+                resume, lambda: create_machine(exe_path, winflags=winflags))
+            print(f"[play] resumed from snapshot {resume} "
+                  f"(instruction {self.machine.cpu.instruction_count})", flush=True)
+        else:
+            self.machine = create_machine(exe_path, winflags=winflags)
         if hooks and game_name:
             from gamehooks import install_game_hooks
             n = install_game_hooks(game_name, self.machine)
@@ -806,6 +814,9 @@ def main() -> None:
                          "caption/text contains TEXT appears (e.g. 'Collision')")
     ap.add_argument("--no-hooks", action="store_true",
                     help="run pure ASM (skip the game's lifted-island hooks)")
+    ap.add_argument("--resume", metavar="SNAP_DIR", default=None,
+                    help="start from a snapshot directory (taken with F9) "
+                         "instead of a cold boot — exact same state")
     args = ap.parse_args()
     exe = game_exe(args.game)
     if not exe.exists():
@@ -813,7 +824,8 @@ def main() -> None:
     PlayApp(exe, game_winflags(args.game), args.speed, args.scale,
             record=args.record, mute=args.mute,
             snapshot_on_box=args.snapshot_on_box,
-            game_name=args.game, hooks=not args.no_hooks).run()
+            game_name=args.game, hooks=not args.no_hooks,
+            resume=args.resume).run()
 
 
 if __name__ == "__main__":

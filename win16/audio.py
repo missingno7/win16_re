@@ -31,6 +31,8 @@ class SquareWaveBackend:
             init = pygame.mixer.get_init()
             if init:
                 self.rate, _fmt, self.channels = init
+            # Room for the looping music plus several overlapping SFX voices.
+            pygame.mixer.set_num_channels(16)
             self.ok = True
             print(f"[audio] square-wave output @ {self.rate}Hz, "
                   f"{self.channels}ch", flush=True)
@@ -75,25 +77,58 @@ class SquareWaveBackend:
         self._playing = self._pg.sndarray.make_sound(buf)
         self._playing.play()
 
+    def _decode(self, data: bytes):
+        """Decode a RIFF/WAV image to a pygame Sound, cached by content so a
+        rapidly-fired SFX (microman shoots on every Ins press) is decoded
+        once, not per shot."""
+        import hashlib
+        import io
+        key = hashlib.sha1(data).digest()
+        cache = getattr(self, "_wav_cache", None)
+        if cache is None:
+            cache = self._wav_cache = {}
+        snd = cache.get(key)
+        if snd is None:
+            snd = self._pg.mixer.Sound(file=io.BytesIO(data))
+            cache[key] = snd
+        return snd
+
     def play_wav(self, data: bytes, *, loop: bool = False) -> None:
-        """Play a RIFF/WAV image (MMSYSTEM sndPlaySound path).  pygame parses
-        the WAV and the mixer resamples to the open output format."""
+        """Play a RIFF/WAV image (MMSYSTEM sndPlaySound path).  Looping sounds
+        are treated as background MUSIC (a new one replaces the old); one-shots
+        are SFX that mix on any free channel.  pygame resamples to the open
+        output format."""
         if not self.ok or not data:
             return
-        import io
         try:
-            snd = self._pg.mixer.Sound(file=io.BytesIO(data))
+            snd = self._decode(data)
         except Exception as exc:  # noqa: BLE001 — a bad WAV is not a game bug
             print(f"[audio] WAV decode failed: {type(exc).__name__}: {exc}",
                   flush=True)
             return
-        self._wav_playing = snd         # keep alive while it plays
-        snd.play(loops=-1 if loop else 0)
+        if loop:
+            music = getattr(self, "_music", None)
+            if music is not None:
+                music.stop()
+            self._music = snd
+            snd.play(loops=-1)
+        else:
+            # Keep the last few SFX referenced so pygame doesn't stop a sound
+            # whose only Python reference was dropped while it still plays.
+            live = getattr(self, "_sfx_live", None)
+            if live is None:
+                live = self._sfx_live = []
+            live.append(snd)
+            del live[:-8]
+            snd.play()
 
     def stop_wav(self) -> None:
-        snd = getattr(self, "_wav_playing", None)
-        if self.ok and snd is not None:
-            snd.stop()
+        """sndPlaySound(NULL) — stop the background music (SFX are one-shots
+        that finish on their own)."""
+        music = getattr(self, "_music", None)
+        if self.ok and music is not None:
+            music.stop()
+            self._music = None
 
     def stop(self) -> None:
         if self.ok:
