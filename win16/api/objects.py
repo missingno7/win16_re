@@ -123,17 +123,25 @@ class Icon:
 
 @dataclass
 class Surface:
-    """Top-down RGB pixel buffer, 3 bytes per pixel."""
+    """Top-down RGB pixel buffer, 3 bytes per pixel.
+
+    `version` increments on every mutation — hosts use it to redraw only
+    when pixels actually changed (flicker-free presentation)."""
     w: int
     h: int
     pixels: bytearray = field(default_factory=bytearray)
+    version: int = 0
 
     def __post_init__(self) -> None:
         if not self.pixels:
             self.pixels = bytearray(self.w * self.h * 3)
 
+    def touch(self) -> None:
+        self.version += 1
+
     def fill(self, rgb: tuple[int, int, int]) -> None:
         self.pixels[:] = bytes(rgb) * (self.w * self.h)
+        self.touch()
 
 
 @dataclass
@@ -173,6 +181,7 @@ def blit(dst: Surface, dx: int, dy: int, src: Surface, sx: int, sy: int,
     h = min(h, dst.h - dy, src.h - sy)
     if w <= 0 or h <= 0:
         return
+    dst.touch()
     for row in range(h):
         soff = ((sy + row) * src.w + sx) * 3
         doff = ((dy + row) * dst.w + dx) * 3

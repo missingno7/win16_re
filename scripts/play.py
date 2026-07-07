@@ -71,8 +71,11 @@ class WindowView:
         self.win = win
         self.scale = app.scale
         self._photo = None
+        self._img_item = None
+        self._last_version = -1
         self._menu_entries: list[tuple[tk.Menu, int, int, int]] = []
         #                    (menu widget, entry index, item id, initial flags)
+        self._menu_applied: dict[tuple[str, int], tuple[str, str]] = {}
         self._last_geo = None
 
         self.top = tk.Toplevel(app.root)
@@ -130,18 +133,25 @@ class WindowView:
 
     def _sync_menu_state(self) -> None:
         """Mirror the game's menu state: grayed items are unclickable (real
-        USER never delivers WM_COMMAND for them) and checks show live."""
+        USER never delivers WM_COMMAND for them) and checks show live.
+
+        Only entries whose computed state CHANGED are reconfigured —
+        reconfiguring an open tkinter menu every tick makes it flicker and
+        fight the user's selection."""
         flags_now = {}
         if self.win.menu_obj is not None:
             flags_now = self.win.menu_obj.item_flags
         for menu, index, cmd_id, initial in self._menu_entries:
             flags = flags_now.get(cmd_id, initial)
             state = "disabled" if flags & (MF_GRAYED | MF_DISABLED) else "normal"
-            label = menu.entrycget(index, "label").lstrip("✓ ")
-            if flags & MF_CHECKED:
-                label = "✓ " + label
+            check = "✓ " if flags & MF_CHECKED else ""
+            key = (str(menu), index)
+            if self._menu_applied.get(key) == (state, check):
+                continue
             try:
+                label = check + menu.entrycget(index, "label").lstrip("✓ ")
                 menu.entryconfig(index, state=state, label=label)
+                self._menu_applied[key] = (state, check)
             except tk.TclError:
                 pass
 
@@ -176,8 +186,17 @@ class WindowView:
         win = self.win
         if (win.x, win.y) != self._last_geo:
             self._place()
-        w, h = win.client_size
         surf = win.surface
+        if surf.version != self._last_version:
+            self._last_version = surf.version
+            self._redraw(surf)
+        if self.top.title() != (win.title or win.wndclass.name):
+            self.top.title(win.title or win.wndclass.name)
+        if self.is_main:
+            self._sync_menu_state()
+
+    def _redraw(self, surf) -> None:
+        w, h = self.win.client_size
         if surf.w == w and surf.h == h and int(self.canvas["width"]) != w * self.scale:
             self.canvas.config(width=w * self.scale, height=h * self.scale)
         try:
@@ -187,13 +206,14 @@ class WindowView:
         if self.scale != 1:
             img = img.resize((surf.w * self.scale, surf.h * self.scale),
                              Image.NEAREST)
+        # Update the one canvas image in place — deleting and recreating it
+        # every tick is what caused visible flicker.
         self._photo = ImageTk.PhotoImage(img)
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
-        if self.top.title() != (win.title or win.wndclass.name):
-            self.top.title(win.title or win.wndclass.name)
-        if self.is_main:
-            self._sync_menu_state()
+        if self._img_item is None:
+            self._img_item = self.canvas.create_image(0, 0, image=self._photo,
+                                                      anchor="nw")
+        else:
+            self.canvas.itemconfig(self._img_item, image=self._photo)
 
     def destroy(self) -> None:
         try:

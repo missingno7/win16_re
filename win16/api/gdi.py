@@ -31,6 +31,7 @@ def _fill_rect(dst: Surface, x: int, y: int, w: int, h: int,
     x1, y1 = min(x + w, dst.w), min(y + h, dst.h)
     if x0 >= x1 or y0 >= y1:
         return
+    dst.touch()
     row = bytes(rgb) * (x1 - x0)
     for yy in range(y0, y1):
         off = (yy * dst.w + x0) * 3
@@ -176,6 +177,7 @@ def install(api: ApiRegistry) -> None:
         # Fixed 8x13 cell (the metrics contract); the 8x8 glyph sits 2 rows
         # below the cell top.  Presentation-layer approximation of the real
         # Windows raster fonts.
+        dst.touch()
         for i, ch in enumerate(text):
             cx = x + i * 8
             if dc.bk_mode == 2:                          # OPAQUE
@@ -226,6 +228,7 @@ def install(api: ApiRegistry) -> None:
         # Nearest-neighbour sampling (COLORONCOLOR semantics).  The GDI
         # default mode is BLACKONWHITE (AND-combining dropped pixels) — if
         # radar pixel evidence ever disagrees, honour dc.stretch_mode here.
+        dst.touch()
         for row in range(dh):
             syy = sy + row * sh // dh
             if not (0 <= dy + row < dst.h and 0 <= syy < src.h):
