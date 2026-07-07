@@ -216,6 +216,14 @@ class WindowView:
         if self.is_main:
             self._sync_menu_state()
 
+    def force_render(self) -> None:
+        """Redraw the current surface regardless of the version gate — used to
+        flush the very last frame (e.g. the crash frame) onto the screen just
+        before a modal box/dialog blocks further ticks."""
+        surf = self.win.surface
+        self._last_version = surf.version
+        self._redraw(surf)
+
     def _redraw(self, surf) -> None:
         w, h = self.win.client_size
         if surf.w == w and surf.h == h and int(self.canvas["width"]) != w * self.scale:
@@ -433,7 +441,8 @@ class DialogView:
 
 class PlayApp:
     def __init__(self, speed: float, scale: int,
-                 record: str | None = None, mute: bool = False) -> None:
+                 record: str | None = None, mute: bool = False,
+                 snapshot_on_box: str | None = None) -> None:
         self.scale = scale
         self.origin_x, self.origin_y = 60, 60
         self.machine = create_machine()
@@ -441,6 +450,7 @@ class PlayApp:
         self.driver = InteractiveDriver(self.sys, speed=speed)
         self.status = "running"
         self.stopped = False
+        self.snapshot_on_box = snapshot_on_box and snapshot_on_box.lower()
         self.recorder = None
         if record:
             from win16.demo import DemoRecorder
@@ -528,12 +538,46 @@ class PlayApp:
         finally:
             self.driver.resume()
 
+    def _flush_windows(self) -> None:
+        """Force the latest game frame onto the screen (e.g. the crash frame)
+        before a modal blocks further rendering."""
+        for view in self.views.values():
+            try:
+                view.force_render()
+            except tk.TclError:
+                pass
+        self.root.update_idletasks()
+
+    def _snapshot_inspection(self, tag: str) -> None:
+        """Save an INSPECTION snapshot with the CPU parked in a modal handler.
+        Memory + CPU + pixels are consistent (the worker is blocked); it is not
+        resumable (the native modal call stack is not captured) — use it to
+        examine state, and demos (--record) for reproducible replay."""
+        from win16.vmsnap import SnapshotError, save_snapshot
+        stamp = time.strftime("%H%M%S")
+        out = Path("artifacts") / "snapshots" / f"box_{tag}_{stamp}"
+        try:
+            save_snapshot(self.machine, out,
+                          note=f"inspection snapshot at MessageBox {tag!r} "
+                               "(mid-modal; not resumable)")
+            print(f"[play] inspection snapshot at {tag!r} box -> {out}\n"
+                  f"       memory+CPU+pixels valid; load with "
+                  f"win16.vmsnap.load_snapshot for inspection.", flush=True)
+        except SnapshotError as exc:
+            print(f"[play] snapshot-on-box failed: {exc}", file=sys.stderr)
+
     def _show_pending_box(self) -> None:
         with self._box_lock:
             pending, self._pending_box = self._pending_box, None
         if pending is None:
             return
         caption, text, mtype, done, result = pending
+        # Flush the crash/last frame to screen BEFORE the modal blocks ticks.
+        self._flush_windows()
+        if self.snapshot_on_box and (self.snapshot_on_box in caption.lower()
+                                     or self.snapshot_on_box in text.lower()):
+            self._snapshot_inspection("".join(c for c in caption if c.isalnum())[:16]
+                                      or "box")
         icon = mtype & 0xF0
         if icon == 0x30:                        # MB_ICONEXCLAMATION
             tk_messagebox.showwarning(caption, text)
@@ -564,6 +608,7 @@ class PlayApp:
             reqs, self._dialog_reqs = self._dialog_reqs, []
         for kind, dlg in reqs:
             if kind == "show" and dlg.handle not in self.dialog_views:
+                self._flush_windows()          # show the last game frame behind it
                 self.dialog_views[dlg.handle] = DialogView(self, dlg)
             elif kind == "close":
                 view = self.dialog_views.pop(dlg.handle, None)
@@ -633,10 +678,14 @@ def main() -> None:
     ap.add_argument("--record", metavar="FILE", default=None,
                     help="record a demo (message + dialog event stream) to FILE")
     ap.add_argument("--mute", action="store_true", help="disable host audio output")
+    ap.add_argument("--snapshot-on-box", metavar="TEXT", default=None,
+                    help="save an inspection snapshot whenever a MessageBox whose "
+                         "caption/text contains TEXT appears (e.g. 'Collision')")
     args = ap.parse_args()
     if not assets_present():
         raise SystemExit("assets/PYTHON.EXE not found — put the game files in assets/")
-    PlayApp(args.speed, args.scale, record=args.record, mute=args.mute).run()
+    PlayApp(args.speed, args.scale, record=args.record, mute=args.mute,
+            snapshot_on_box=args.snapshot_on_box).run()
 
 
 if __name__ == "__main__":

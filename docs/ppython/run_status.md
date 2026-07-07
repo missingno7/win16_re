@@ -1,6 +1,14 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
+- **Snapshot at an event:** `play.py --snapshot-on-box Collision` saves an INSPECTION
+  snapshot whenever a MessageBox whose caption/text matches appears (the crash box is
+  "Ughhh!"/"Collision!"). CPU is parked in the modal handler so memory+CPU+pixels are
+  consistent (the crash frame is captured); NOT resumable (native modal stack not
+  saved) — inspect with `win16.vmsnap.load_snapshot`, use demos for reproducible
+  replay. F9 still takes a resumable boundary snapshot during normal play. Before any
+  modal blocks the GUI, `_flush_windows` force-renders the latest frame (else the
+  version-gated renderer races and drops the final pre-modal frame, e.g. the crash).
 - **Demos (record/replay):** `win16/demo.py` — the frame boundary is GetMessage, so a
   demo is the exact stream of returned messages + consumed dialog events (virtual-clock
   stamped). Record: `play.py --record FILE`, or set `services["demo_recorder"]`. Replay:
@@ -52,6 +60,20 @@
 - **Menu commands** (from the MENU resource): 1050 New(F2), 1100 Sound(F3),
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
+
+## 2026-07-07 — crash-frame regression fixed + snapshot-on-event
+- Owner: the crashed-snake frame stopped showing after the flicker fix. Root cause
+  confirmed by instrumenting: the game DOES draw the crash frame before the
+  "Collision!" box (surface version 58/114/170, non-blank pixels), but the
+  version-gated renderer races — a tick can render the pre-crash frame, then the
+  modal blocks before the next tick renders the crash frame. Fix: `_flush_windows`
+  force-renders every window right before a MessageBox/dialog blocks (verified it
+  flushes exactly versions 58/114). No re-introduction of flicker (only fires at
+  modals, not per tick).
+- **`--snapshot-on-box TEXT`**: answer to "snapshot right before the crash" — saves
+  an inspection snapshot at the matching box (crash frame + memory), digest-verified
+  on load. Mid-modal so not resumable; demos give reproducible replay.
+- Suite: 32.
 
 ## 2026-07-07 — audio stereo fix + dialog fidelity (font base units, icons)
 - **Audio crash fixed** (owner traceback, console-first paid off): SDL opened a
