@@ -75,6 +75,26 @@ class SquareWaveBackend:
         self._playing = self._pg.sndarray.make_sound(buf)
         self._playing.play()
 
+    def play_wav(self, data: bytes, *, loop: bool = False) -> None:
+        """Play a RIFF/WAV image (MMSYSTEM sndPlaySound path).  pygame parses
+        the WAV and the mixer resamples to the open output format."""
+        if not self.ok or not data:
+            return
+        import io
+        try:
+            snd = self._pg.mixer.Sound(file=io.BytesIO(data))
+        except Exception as exc:  # noqa: BLE001 — a bad WAV is not a game bug
+            print(f"[audio] WAV decode failed: {type(exc).__name__}: {exc}",
+                  flush=True)
+            return
+        self._wav_playing = snd         # keep alive while it plays
+        snd.play(loops=-1 if loop else 0)
+
+    def stop_wav(self) -> None:
+        snd = getattr(self, "_wav_playing", None)
+        if self.ok and snd is not None:
+            snd.stop()
+
     def stop(self) -> None:
         if self.ok:
             self._pg.mixer.stop()

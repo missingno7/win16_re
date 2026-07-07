@@ -17,8 +17,9 @@ SND_NOSTOP = 0x0010
 def install(api: ApiRegistry) -> None:
     @api.register("MMSYSTEM", 2, args="ptr word")       # sndPlaySound(lpszSound, flags)
     def sndPlaySound(ctx: CallContext) -> int:
-        # Event-exact audio model (mirrors SOUND.DRV): log the request; host
-        # WAV output is a later, separable slice.  NULL ptr == stop sound.
+        # Event-exact audio model (mirrors SOUND.DRV): every request is logged
+        # (the authoritative record); host WAV output happens when a backend is
+        # installed.  NULL ptr == stop the current sound.
         flags = ctx.args[1]
         sysobj = ctx.registry.services["system"]
         name = None
@@ -26,4 +27,16 @@ def install(api: ApiRegistry) -> None:
             name = ctx.read_string(ctx.args[0]).decode("latin-1")
         ctx.registry.services.setdefault("sound_log", []).append(
             (sysobj.clock_ms, "wav", (name, flags)))
+        backend = ctx.registry.services.get("sound_backend")
+        if backend is not None and hasattr(backend, "play_wav"):
+            if not ctx.args[0]:
+                backend.stop_wav()
+            elif name is not None:
+                handle = sysobj.file_open(name)
+                if handle >= 0:
+                    data = bytes(sysobj.files[handle].data)
+                    sysobj.file_close(handle)
+                    backend.play_wav(data, loop=bool(flags & SND_LOOP))
+            # SND_MEMORY (WAV image in VM memory) stays log-only until a game
+            # proves it; the request is captured in sound_log either way.
         return 1                    # TRUE — sound "played"

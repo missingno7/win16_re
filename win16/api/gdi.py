@@ -290,11 +290,20 @@ def install(api: ApiRegistry) -> None:
             raise NotImplementedError(f"GetDeviceCaps index {idx}")
         return caps[idx] & 0xFFFF
 
+    # index -> (256,3) uint8 numpy LUT, keyed on the raw colour-table bytes +
+    # palette identity.  A game blits dozens of times per frame with the SAME
+    # table (microman: ~40 tile blits/frame); rebuilding the LUT per call was
+    # the profiled hot spot (256 mem.rw per blit).  NOTE: if SetPaletteEntries/
+    # AnimatePalette are ever implemented they must invalidate this cache
+    # (key on a palette version, not just identity).
+    _dib_lut_cache: dict = {}
+
     @api.register("GDI", 443,                           # SetDIBitsToDevice
                   args="word s_word s_word s_word s_word s_word s_word "
                        "word word ptr ptr word")
     def SetDIBitsToDevice(ctx: CallContext) -> int:
         import struct
+        import numpy as np
         sys = _sys(ctx)
         (hdc, xd, yd, cx, cy, xs, ys, start, lines, bits, bmi, coloruse) = ctx.args
         cx, cy, xs, ys = _signed(cx), _signed(cy), _signed(xs), _signed(ys)
@@ -304,16 +313,14 @@ def install(api: ApiRegistry) -> None:
         dc = sys.handles.require(hdc, DC)
 
         bseg, boff = (bmi >> 16) & 0xFFFF, bmi & 0xFFFF
-        hdr = bytes(ctx.mem.rb(bseg, (boff + i) & 0xFFFF) for i in range(40))
+        hdr = ctx.mem.block(bseg, boff, 40)
         size, w, h, _pl, bpp, comp = struct.unpack_from("<IiiHHI", hdr, 0)
         if comp != 0 or bpp != 8:
             raise NotImplementedError(
                 f"SetDIBitsToDevice bpp={bpp} comp={comp} (only 8bpp BI_RGB)")
-        clr_used = struct.unpack_from("<I", hdr, 32)[0] or 256
+        clr_used = min(struct.unpack_from("<I", hdr, 32)[0] or 256, 256)
 
-        # Build a 256-entry index -> (r,g,b) LUT from the DIB colour table.
-        ctoff = (boff + size) & 0xFFFF
-        lut = []
+        # 256-entry index -> (r,g,b) LUT from the DIB colour table (cached).
         if coloruse == 1:
             # DIB_PAL_COLORS: the table is 16-bit WORD indices into the DC's
             # selected logical palette.  Microman's WAP pages use exactly this
@@ -328,24 +335,30 @@ def install(api: ApiRegistry) -> None:
                     "SetDIBitsToDevice DIB_PAL_COLORS with no palette "
                     "selected into the DC — map through the system palette "
                     "when a real program exercises this")
-            entries = dc_pal.entries
-            n = len(entries)
-            for i in range(256):
-                if i >= clr_used:
-                    lut.append((0, 0, 0))
-                    continue
-                word = ctx.mem.rw(bseg, (ctoff + i * 2) & 0xFFFF)
-                lut.append(entries[word] if word < n else (0, 0, 0))
+            table = ctx.mem.block(bseg, (boff + size) & 0xFFFF, clr_used * 2)
+            key = (1, table, id(dc_pal.entries), len(dc_pal.entries))
+            lut = _dib_lut_cache.get(key)
+            if lut is None:
+                entries = dc_pal.entries
+                n = len(entries)
+                lut = np.zeros((256, 3), dtype=np.uint8)
+                words = struct.unpack_from("<%dH" % clr_used, table, 0)
+                for i, word in enumerate(words):
+                    if word < n:
+                        lut[i] = entries[word]
+                _dib_lut_cache[key] = lut
         else:
             # DIB_RGB_COLORS: RGBQUAD (B,G,R,0) — the standard 8bpp table.
-            for i in range(256):
-                if i >= clr_used:
-                    lut.append((0, 0, 0))
-                    continue
-                b = (ctoff + i * 4) & 0xFFFF
-                lut.append((ctx.mem.rb(bseg, (b + 2) & 0xFFFF),
-                            ctx.mem.rb(bseg, (b + 1) & 0xFFFF),
-                            ctx.mem.rb(bseg, b)))
+            table = ctx.mem.block(bseg, (boff + size) & 0xFFFF, clr_used * 4)
+            key = (0, table)
+            lut = _dib_lut_cache.get(key)
+            if lut is None:
+                quads = np.frombuffer(table, dtype=np.uint8).reshape(-1, 4)
+                lut = np.zeros((256, 3), dtype=np.uint8)
+                lut[:clr_used, 0] = quads[:, 2]                 # R
+                lut[:clr_used, 1] = quads[:, 1]                 # G
+                lut[:clr_used, 2] = quads[:, 0]                 # B
+                _dib_lut_cache[key] = lut
 
         stride = ((w * 8 + 31) // 32) * 4
         # The bits buffer can exceed 64K (microman: 512x320 = 160KB).  Resolve
@@ -353,22 +366,25 @@ def install(api: ApiRegistry) -> None:
         # whole (contiguous) block linearly — segment-relative offsets would
         # wrap at 64K and tile/garble the image.
         base_lin = ctx.mem._xlat((bits >> 16) & 0xFFFF, bits & 0xFFFF)
-        mem_data = ctx.mem.data
+        mem_np = np.frombuffer(ctx.mem.data, dtype=np.uint8)
+        dst3d = np.frombuffer(dst.pixels, dtype=np.uint8).reshape(dst.h, dst.w, 3)
+
+        # Clipping is analytic on both axes (the region is a rectangle), so
+        # the whole blit is a handful of numpy ops — a per-row Python loop
+        # cost 278k tiny array calls per profiled second on microman's ~40
+        # small tile blits per frame.
+        # x: keep i in [i_lo, i_hi) with xs+i (source) and xd+i (dest) valid.
+        i_lo = max(0, -xs, -xd)
+        i_hi = min(cx, w - xs, dst.w - xd)
+        # y: source buffer row r(j) = r0 - j must be >= 0; dest row yd+j in range.
         top0 = h - ys - cy                      # top-down y of the source region top
-        for j in range(cy):
-            ty = top0 + j                       # DIB top-down row
-            r = (h - 1) - start - ty            # buffer row for that DIB scanline
-            if not (0 <= r) or not (0 <= yd + j < dst.h):
-                continue
-            row_lin = base_lin + r * stride + xs
-            dbase = ((yd + j) * dst.w + xd) * 3
-            for i in range(cx):
-                if not (0 <= xs + i < w) or not (0 <= xd + i < dst.w):
-                    continue
-                px = mem_data[row_lin + i]
-                rr, gg, bb = lut[px]
-                o = dbase + i * 3
-                dst.pixels[o] = rr; dst.pixels[o + 1] = gg; dst.pixels[o + 2] = bb
+        r0 = (h - 1) - start - top0
+        j_lo = max(0, -yd)
+        j_hi = min(cy, r0 + 1, dst.h - yd)
+        if i_hi > i_lo and j_hi > j_lo:
+            rows = base_lin + xs + (r0 - np.arange(j_lo, j_hi)) * stride
+            src = mem_np[rows[:, None] + np.arange(i_lo + 0, i_hi)]
+            dst3d[yd + j_lo:yd + j_hi, xd + i_lo:xd + i_hi] = lut[src]
         dst.touch()
         return cy
 

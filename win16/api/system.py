@@ -166,6 +166,18 @@ class Win16System:
         recorder = self.machine.api.services.get("demo_recorder")
         if recorder is not None:
             recorder.message(msg)
+        if msg is not None:
+            # Key state is DERIVED from the message stream (not host polling),
+            # so GetAsyncKeyState sees the same state on live play and demo
+            # replay.  Games that poll instead of handling WM_KEYDOWN
+            # (microman steers with GetAsyncKeyState) read this set.
+            if msg[1] == 0x0100:                                  # WM_KEYDOWN
+                services = self.machine.api.services
+                services.setdefault("async_keys", set()).add(msg[2] & 0xFFFF)
+                services.setdefault("async_keys_tapped", set()).add(msg[2] & 0xFFFF)
+            elif msg[1] == 0x0101:                                # WM_KEYUP
+                self.machine.api.services.get(
+                    "async_keys", set()).discard(msg[2] & 0xFFFF)
         return msg
 
     def next_message(self):

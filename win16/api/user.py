@@ -703,8 +703,18 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 249, args="word")             # GetAsyncKeyState(vk)
     def GetAsyncKeyState(ctx: CallContext) -> int:
-        keys = _sys(ctx).machine.api.services.get("async_keys", set())
-        return 0x8000 if ctx.args[0] in keys else 0
+        # Bit 15: key is down NOW.  Bit 0: key went down since the last call
+        # for this vk (the latch that catches a tap shorter than one poll
+        # interval).  Both sets are fed from the message stream in
+        # Win16System.get_message, so demo replay sees identical state.
+        services = _sys(ctx).machine.api.services
+        vk = ctx.args[0]
+        result = 0x8000 if vk in services.get("async_keys", set()) else 0
+        tapped = services.get("async_keys_tapped", set())
+        if vk in tapped:
+            tapped.discard(vk)
+            result |= 0x0001
+        return result
 
     @api.register("USER", 72, args="ptr s_word s_word s_word s_word")
     def SetRect(ctx: CallContext) -> int:               # (rc, l, t, r, b)
