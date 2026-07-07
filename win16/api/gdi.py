@@ -312,23 +312,40 @@ def install(api: ApiRegistry) -> None:
         clr_used = struct.unpack_from("<I", hdr, 32)[0] or 256
 
         # Build a 256-entry index -> (r,g,b) LUT from the DIB colour table.
-        # The table is RGBQUAD (B,G,R,0) — the standard 8bpp DIB format that
-        # both microman and ppython ship.  NOTE: microman passes
-        # fuColorUse=DIB_PAL_COLORS(1) yet still supplies an RGBQUAD table (its
-        # entries decode to the exact 16-colour VGA palette), so we trust the
-        # data format, not the flag.  A DIB that genuinely uses PAL_COLORS
-        # (WORD indices into dc.palette) is not proven by any game yet; add it
-        # (fail-loud detected) when one appears.
         ctoff = (boff + size) & 0xFFFF
         lut = []
-        for i in range(256):
-            if i >= clr_used:
-                lut.append((0, 0, 0))
-                continue
-            b = (ctoff + i * 4) & 0xFFFF
-            lut.append((ctx.mem.rb(bseg, (b + 2) & 0xFFFF),
-                        ctx.mem.rb(bseg, (b + 1) & 0xFFFF),
-                        ctx.mem.rb(bseg, b)))
+        if coloruse == 1:
+            # DIB_PAL_COLORS: the table is 16-bit WORD indices into the DC's
+            # selected logical palette.  Microman's WAP pages use exactly this
+            # (an identity table 0..255 into the 256-entry palette created
+            # from the page BMP's colour table).  An earlier revision decoded
+            # the table as RGBQUAD regardless of the flag — an artifact of
+            # observing blits while the page LOAD was failing (SelectPalette
+            # returned 0), before any real PAL_COLORS table existed.
+            dc_pal = dc.palette
+            if dc_pal is None:
+                raise NotImplementedError(
+                    "SetDIBitsToDevice DIB_PAL_COLORS with no palette "
+                    "selected into the DC — map through the system palette "
+                    "when a real program exercises this")
+            entries = dc_pal.entries
+            n = len(entries)
+            for i in range(256):
+                if i >= clr_used:
+                    lut.append((0, 0, 0))
+                    continue
+                word = ctx.mem.rw(bseg, (ctoff + i * 2) & 0xFFFF)
+                lut.append(entries[word] if word < n else (0, 0, 0))
+        else:
+            # DIB_RGB_COLORS: RGBQUAD (B,G,R,0) — the standard 8bpp table.
+            for i in range(256):
+                if i >= clr_used:
+                    lut.append((0, 0, 0))
+                    continue
+                b = (ctoff + i * 4) & 0xFFFF
+                lut.append((ctx.mem.rb(bseg, (b + 2) & 0xFFFF),
+                            ctx.mem.rb(bseg, (b + 1) & 0xFFFF),
+                            ctx.mem.rb(bseg, b)))
 
         stride = ((w * 8 + 31) // 32) * 4
         # The bits buffer can exceed 64K (microman: 512x320 = 160KB).  Resolve
@@ -399,16 +416,23 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("GDI", 375, args="word word word ptr")  # GetSystemPaletteEntries
     def GetSystemPaletteEntries(ctx: CallContext) -> int:  # (hdc, start, count, lppe)
-        # Report a plain grayscale system palette; games usually only read the
-        # count.  Enough to satisfy palette setup.
-        count, ptr = ctx.args[2], ctx.args[3]
+        # The REAL system palette of the static single-app model: whatever the
+        # app last realized (RealizePalette copies its logical palette here).
+        # Microman's WAP builds its DIB_PAL_COLORS word table by nearest-
+        # matching these entries into its logical palette — an earlier
+        # grayscale-ramp stub made that remap collapse every page to grays.
+        sys = _sys(ctx)
+        start, count, ptr = ctx.args[1], ctx.args[2], ctx.args[3]
+        entries = sys.system_palette
         if ptr:
             seg, off = (ptr >> 16) & 0xFFFF, ptr & 0xFFFF
             for i in range(count):
-                v = (i * 255 // max(count - 1, 1)) & 0xFF
+                idx = start + i
+                r, g, b = entries[idx] if idx < len(entries) else (0, 0, 0)
                 base = (off + i * 4) & 0xFFFF
-                for k in range(3):
-                    ctx.mem.wb(seg, (base + k) & 0xFFFF, v)
+                ctx.mem.wb(seg, base, r)                       # PALETTEENTRY:
+                ctx.mem.wb(seg, (base + 1) & 0xFFFF, g)        # R, G, B, flags
+                ctx.mem.wb(seg, (base + 2) & 0xFFFF, b)
                 ctx.mem.wb(seg, (base + 3) & 0xFFFF, 0)
         return count
 

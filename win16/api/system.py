@@ -27,6 +27,19 @@ INSTANCE_STACK_TOP = 0x0A     # lowest stack address (stack grows down)
 INSTANCE_STACK_MIN = 0x0C     # lowest SP observed
 INSTANCE_STACK_BOT = 0x0E     # initial SP (bottom of the stack)
 
+# The Windows 3.x default system palette: the 20 static colours (10 at each
+# end), everything between black until an app realizes a logical palette.
+_STATIC_LOW = [(0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
+               (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
+               (192, 220, 192), (166, 202, 240)]
+_STATIC_HIGH = [(255, 251, 240), (160, 160, 164), (128, 128, 128),
+                (255, 0, 0), (0, 255, 0), (255, 255, 0), (0, 0, 255),
+                (255, 0, 255), (0, 255, 255), (255, 255, 255)]
+
+
+def _default_system_palette() -> list:
+    return _STATIC_LOW + [(0, 0, 0)] * 236 + _STATIC_HIGH
+
 
 @dataclass
 class Win16System:
@@ -58,6 +71,10 @@ class Win16System:
     message_source: object = None       # optional: callable(sys) -> msg | None
     #   When set, GetMessage delegates to it (an interactive/real-time driver);
     #   otherwise the deterministic next_message() drives (headless replay).
+    system_palette: list = field(default_factory=lambda: _default_system_palette())
+    #   The display's hardware palette in the static single-app model:
+    #   RealizePalette copies the realized logical palette here and
+    #   GetSystemPaletteEntries reports it (games nearest-match against it).
 
     def ensure_environment(self) -> int:
         """DOS environment block: ASCIIZ vars, double zero, WORD 1, exe path."""

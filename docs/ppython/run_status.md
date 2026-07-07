@@ -83,6 +83,32 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — MICROMAN pixel-correct: the palette chain root-caused (3 fixes)
+- The owner's playtest still showed `LoadPage Error = 9` + wrong colours.  A full-API
+  ring-buffer trace dumped at the moment the game called MessageBox found the real
+  chain (three defects hiding behind one symptom):
+  1. **SelectPalette returned 0 on a fresh DC** (`dc.palette is None` → "prev = 0").
+     Real GDI has the stock DEFAULT_PALETTE selected, so success never returns 0 —
+     WAP treats 0 as failure and aborts LoadPage with error 9, so its page BMPs
+     (MICROMAN.PG1/PG2 — plain 8bpp BMP files) never loaded and every page rendered
+     from an uninitialised buffer.  Fix: report/accept the stock handle.
+  2. **DIB_PAL_COLORS decode**: with pages actually loading, SetDIBitsToDevice gets a
+     16-bit WORD-index table into the DC's logical palette (identity 0..255), NOT an
+     RGBQUAD table.  The old "RGBQUAD despite fuColorUse=1" pin was an artifact of
+     observing blits only while LoadPage was failing.  Both modes now implemented +
+     pinned (`test_dib_render.py`: 3 tests incl. fail-loud PAL_COLORS-without-palette).
+  3. **GetSystemPaletteEntries returned a grayscale ramp** (stub).  WAP builds its blit
+     table by nearest-matching the SYSTEM palette into its logical palette, so the ramp
+     collapsed every page to grays.  Now RealizePalette copies the realized logical
+     palette into `Win16System.system_palette` (static single-app display model — no
+     other app competes for slots) and GetSystemPaletteEntries reports it (R,G,B order).
+- Verified against the owner's real-Windows screenshot: the info page (gray bg, magenta
+  contact text, yellow "Press SPACE-BAR to Play!", colour photo) and the DEMO playfield
+  (green circuit bg, red sprite) match.  `messagebox_log` empty over 19M instr.
+- **Instrument lesson**: headless MessageBox only appends to `services["messagebox_log"]`
+  — `messagebox_ui` is a WinHelp-only service, so a probe lambda there never fires.
+  Every earlier "boxes=0" claim came from that wrong channel; read messagebox_log.
+
 ## 2026-07-07 — MICROMAN runs: reaches its message loop + renders (palette/DIB path)
 - Pushed the microman fixture from the CreatePalette frontier all the way into its
   running game: implemented the **palette subsystem** (CreatePalette/GetPaletteEntries/

@@ -654,18 +654,40 @@ def install(api: ApiRegistry) -> None:
         sys = _sys(ctx)
         dc = sys.handles.get(ctx.args[0])
         pal = sys.handles.get(ctx.args[1])
-        if not isinstance(dc, DC) or not isinstance(pal, Palette):
+        if not isinstance(dc, DC):
             return 0
+        # A fresh DC has the stock DEFAULT_PALETTE selected, so a successful
+        # SelectPalette NEVER returns 0 — programs (microman's WAP LoadPage)
+        # treat 0 as failure and abort.  Report the stock handle as "previous"
+        # when no logical palette was explicitly selected yet, and accept the
+        # stock handle back as a valid restore target.
         prev = dc.palette
-        dc.palette = pal
-        return prev.handle if prev is not None else 0
+        prev_handle = prev.handle if prev is not None else sys.stock_object(15)
+        if isinstance(pal, Palette):
+            dc.palette = pal
+        elif ctx.args[1] == sys.stock_object(15):
+            dc.palette = None                   # restored to the default palette
+        else:
+            return 0
+        return prev_handle
 
     @api.register("USER", 283, args="word")             # RealizePalette(hdc)
     def RealizePalette(ctx: CallContext) -> int:
         from .objects import DC
-        dc = _sys(ctx).handles.get(ctx.args[0])
-        # Static system palette in our model: nothing to map, report 0 changed.
-        return 0 if isinstance(dc, DC) else 0
+        sys = _sys(ctx)
+        dc = sys.handles.get(ctx.args[0])
+        if not isinstance(dc, DC) or dc.palette is None:
+            return 0
+        # Static single-app model: the realized logical palette BECOMES the
+        # system palette (no other app competes for slots).  Programs that
+        # then read GetSystemPaletteEntries to build an index remap (microman's
+        # WAP identity-palette dance) see their own colours back, so the remap
+        # is the identity instead of collapsing to the old grayscale stub.
+        entries = list(dc.palette.entries[:256])
+        pal = entries + [(0, 0, 0)] * (256 - len(entries))
+        changed = sum(1 for a, b in zip(pal, sys.system_palette) if a != b)
+        sys.system_palette = pal
+        return changed
 
     @api.register("USER", 13, ret="long")               # GetTickCount()
     def GetTickCount(ctx: CallContext) -> int:
