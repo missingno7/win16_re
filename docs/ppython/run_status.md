@@ -1,14 +1,19 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
-- **Interactive player:** `python scripts/play.py [--speed N] [--scale N]` — a real
-  tkinter window (worker thread runs the VM, GUI thread renders every Win16 window
-  onto a 640×480 virtual desktop + forwards keyboard/mouse). **Native menu bar** built
-  from the MENU resource (`win16/menu.py`, `parse_menu`) → clicking Game/Options/etc.
-  posts WM_COMMAND to the main window; arrows steer; F2/F3/F4/F5/F10 via the real
-  accelerator table. Runs until the DialogBox frontier (shown in the status bar).
-  Pacing lives in `win16/interactive.py` (`InteractiveDriver`, game-agnostic, GUI-free)
-  installed as `Win16System.message_source`; headless replay leaves it None.
+- **Interactive player:** `python scripts/play.py [--speed N] [--scale N]` — **each
+  Win16 window is its own real tkinter window** (WindowView per handle; created/
+  destroyed as the game creates/destroys windows). The Paulie Python window carries
+  the game's real menu bar (from the MENU resource via `win16/menu.py`), with
+  **live grayed/checked sync** from the game's EnableMenuItem/CheckMenuItem state —
+  disabled items are unclickable, exactly like real USER (delivering WM_COMMAND for
+  a grayed item crashes the game: Pause = idiv-by-zero). Game MessageBoxes appear
+  as real modal boxes (`services["messagebox_ui"]`, CPU thread blocks until
+  dismissed). DialogBox/WinHelp are logged-and-skipped stopgaps
+  (`services["skipped_ui"]`, shown in the status bar) until the dialog engine
+  lands. VM death shows a red banner, never silence. Pacing:
+  `win16/interactive.py` installed as `Win16System.message_source`; headless
+  replay leaves it None (auto-OK MessageBoxes, deterministic clock).
 - **Interpreter speed:** ~300k instr/s standalone; a gameplay frame is heavy, so play
   is choppy (a few fps) — cProfile confirms it's ALL VM stepping (execute_opcode/
   fetch8/rb), NOT the Python GDI. Real fix = the dos_re method (hook hot routines →
@@ -20,6 +25,23 @@
 - **Menu commands** (from the MENU resource): 1050 New(F2), 1100 Sound(F3),
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
+
+## 2026-07-07 — PLAYER v2: one real OS window per Win16 window; menu-state faithfulness
+- Owner feedback: the menu belonged on the game's own window, and menu clicks died.
+  Root causes found: (1) clicking DialogBox-backed items (About/High Scores) killed
+  the worker silently; (2) **delivering WM_COMMAND for a GRAYED item is a real
+  crash** — Pause while no game runs = idiv-by-zero at seg1:1F72; real USER blocks
+  grayed items, so the UI must too. Both fixed: WindowView-per-handle architecture,
+  menu on the PYTHON window with live grayed/checked sync (the game actively
+  manages it: enables Pause during play, grays Options, checks Sound/attitude/
+  shape), modal MessageBox bridge (player sees "Next Screen:"/"Collision!"/"GAME
+  OVER!" boxes for real), DialogBox/WinHelp logged-skip stopgaps, red stop banner.
+- Verified headless: Pause disabled→enabled by the game, menu-click New starts the
+  game, collision box shows, High Scores skips without killing the VM, Pause during
+  a game works. Suite: 18 passed (slower now — gameplay tests run their full budget
+  since DialogBox no longer raises).
+- The DialogBox engine (real dialogs: high scores, about, screen-set picker) is the
+  next faithfulness slice; the skip-stub is temporary and loudly logged.
 
 ## 2026-07-07 — INTERACTIVE: scripts/play.py — a real controllable window
 - Real-time play harness: worker thread runs the CPU; a tkinter/PIL GUI renders

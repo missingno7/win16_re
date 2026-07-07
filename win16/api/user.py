@@ -502,7 +502,30 @@ def install(api: ApiRegistry) -> None:
         caption = ctx.read_string(ctx.args[2]).decode("latin-1") if ctx.args[2] else ""
         ctx.registry.services.setdefault("messagebox_log", []).append(
             (sys.clock_ms, caption, text, ctx.args[3]))
-        return 1                    # IDOK — modal UI auto-dismissed
+        ui = ctx.registry.services.get("messagebox_ui")
+        if ui is not None:
+            # An interactive host shows the real modal box; this blocks the
+            # CPU thread until the user answers — faithful modal semantics.
+            return ui(caption, text, ctx.args[3]) & 0xFFFF
+        return 1                    # headless: IDOK — modal UI auto-dismissed
+
+    @api.register("USER", 87, args="word str word segptr")
+    def DialogBox(ctx: CallContext) -> int:             # (hInst, template, parent, proc)
+        # STOPGAP until the dialog engine lands: skip the dialog, tell the
+        # host, and return -1 (the real API's failure value, which apps
+        # handle).  Logged loudly — never silently.
+        name = _resource_name(ctx, ctx.args[1])
+        _sys(ctx)  # ensure system exists
+        ctx.registry.services.setdefault("skipped_ui", []).append(
+            ("DialogBox", name))
+        return 0xFFFF                                    # -1: dialog not shown
+
+    @api.register("USER", 171, args="word str word long")
+    def WinHelp(ctx: CallContext) -> int:                # (hwnd, file, cmd, data)
+        helpfile = ctx.read_string(ctx.args[1]).decode("latin-1") if ctx.args[1] else ""
+        ctx.registry.services.setdefault("skipped_ui", []).append(
+            ("WinHelp", helpfile))
+        return 0                                         # help engine unavailable
 
     @api.register("USER", 69, args="word")              # SetCursor(hcursor)
     def SetCursor(ctx: CallContext) -> int:
