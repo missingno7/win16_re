@@ -26,6 +26,17 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — PLAYER: flicker fixed by change-detection, not a new backend
+- Owner reported menu flicker while the game runs. Cause was churn, not tkinter
+  itself: the canvas image was rebuilt every 33 ms tick and all 44 menu entries
+  were entryconfig'd every tick (reconfiguring an OPEN Windows menu redraws it
+  and fights selection). Fix: `Surface.version` (bumped by every mutating GDI
+  op) gates in-place canvas updates; menu states are cached and reconfigured
+  only when the game changes them. Measured: 0 redraws + 0 menu reconfigs at
+  idle; ~9 repaints/s per window in game (the game's own paint rate). A pygame
+  presentation backend stays the fallback if tkinter still misbehaves on real
+  hardware. Suite: 18 passed.
+
 ## 2026-07-07 — PLAYER v2: one real OS window per Win16 window; menu-state faithfulness
 - Owner feedback: the menu belonged on the game's own window, and menu clicks died.
   Root causes found: (1) clicking DialogBox-backed items (About/High Scores) killed
