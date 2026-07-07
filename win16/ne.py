@@ -122,6 +122,10 @@ class NEExecutable:
     entry_points: tuple[EntryPoint, ...]
     resident_names: tuple[tuple[str, int], ...]
     resources: tuple[Resource, ...]
+    resource_name_map: dict[tuple[int, str], int]
+    # (type_id, NAME) -> numeric resource id, from the Win3.x NAMETABLE
+    # resource (type 15) that rc.exe emits when named resources are stored
+    # under numeric ids.
 
     def segment_bytes(self, seg: Segment) -> bytes:
         """The segment's file image, zero-padded to its allocation size."""
@@ -138,6 +142,24 @@ class NEExecutable:
 
     def find_resources(self, type_name: str) -> list[Resource]:
         return [r for r in self.resources if r.type_name == type_name]
+
+    def lookup_resource(self, type_name: str, name: int | str) -> Resource | None:
+        """Resolve a LoadBitmap/LoadIcon-style name: integer atom, direct
+        string name, or a NAMETABLE-mapped name."""
+        pool = self.find_resources(type_name)
+        if isinstance(name, int):
+            return next((r for r in pool if r.res_id == name), None)
+        upper = name.upper()
+        direct = next((r for r in pool if r.res_name.upper() == upper), None)
+        if direct is not None:
+            return direct
+        type_id = next((r.type_id for r in pool if r.type_id is not None), None)
+        if type_id is None:
+            return None
+        mapped = self.resource_name_map.get((type_id, upper))
+        if mapped is None:
+            return None
+        return next((r for r in pool if r.res_id == mapped), None)
 
 
 def _pascal_string(raw: bytes, off: int) -> str:
@@ -277,6 +299,24 @@ def parse_ne(path: str | Path) -> NEExecutable:
                 data = raw[r_off << rshift:(r_off << rshift) + (r_len << rshift)]
                 resources.append(Resource(tid, tname, rid, rname, r_flags, data))
 
+    # --- NAMETABLE (type 15): (type, id) -> name entries ---
+    name_map: dict[tuple[int, str], int] = {}
+    for res in resources:
+        if res.type_id != 15:
+            continue
+        p = 0
+        data = res.data
+        while p + 6 <= len(data):
+            (esize,) = struct.unpack_from("<H", data, p)
+            if esize == 0:
+                break
+            type_id, res_id = struct.unpack_from("<HH", data, p + 2)
+            # After the header: a zero byte (no type name), then the ASCIIZ name.
+            name = data[p + 7:p + esize].split(b"\x00")[0].decode("latin-1")
+            if res_id & 0x8000 and name:
+                name_map[(type_id & 0x7FFF, name.upper())] = res_id & 0x7FFF
+            p += esize
+
     return NEExecutable(
         path=path,
         raw=raw,
@@ -287,4 +327,5 @@ def parse_ne(path: str | Path) -> NEExecutable:
         entry_points=tuple(entry_points),
         resident_names=tuple(resident),
         resources=tuple(resources),
+        resource_name_map=name_map,
     )

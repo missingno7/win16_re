@@ -5,7 +5,7 @@ from pathlib import Path
 
 from . import _env  # noqa: F401
 
-from win16.api import kernel, user, win87em
+from win16.api import gdi, kernel, user, win87em
 from win16.api.core import ApiRegistry
 from win16.api.system import Win16System
 from win16.loader import Win16Machine, load_ne
@@ -34,6 +34,7 @@ def create_registry() -> ApiRegistry:
     api.register_equate("KERNEL", 178, WINFLAGS_NO_FPU)
     kernel.install(api)
     user.install(api)
+    gdi.install(api)
     win87em.install(api)
     return api
 

@@ -16,3 +16,12 @@ in code — they come from `Win16Machine.seg_bases`).
 | seg2:007C | crt0: DOS version (DOS3Call AH=30h AX) | `mov [007C],ax` |
 | seg2:0324 | import slot: `__fpMath` far pointer | `call far ds:[0324]` |
 | seg2:0000 | DGROUP instance data (16 reserved bytes) | Win16 convention; stack words at 0x0A/0x0C/0x0E written by our InitTask |
+| seg1:5EF9 | WinMain: LoadCursor(IDC_ARROW) call | first USER call in WinMain |
+| seg1:0033 | crt0→WinMain near thunk | `call near -> 0100:5EB0` |
+| seg1:4E89, 4F04 | main WndProc paint path / DefWindowProc forward | BeginPaint at 4E89; DefWindowProc call at 4F04 |
+| seg1:4AA2..4AFC | Paulie-O-Meter text renderer | IntersectRect → wsprintf → SetTextColor → TextOut chain |
+| seg1:1A5D/1A86 | intro teardown / IsIconic check in timer handler | KillTimer(3)+DestroyWindow at 1A5D |
+| seg1:32D2 | level-file loader (OpenFile call site) | OpenFile(...,OF_READ) during WM_CREATE |
+| — | window classes: "PYTHON" (main, 448×358), "PaulieOMeter" (184×270) | RegisterClass x2; CreateWindow evidence |
+| — | timers: id2=140ms gameplay tick, id1=250ms, id3=4000ms intro | SetTimer calls in WM_CREATE |
+| — | offscreen: 1344×960 playfield (84×60 16px tiles), 168×120 radar (1:8) | CreateCompatibleBitmap calls |

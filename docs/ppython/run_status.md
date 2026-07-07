@@ -9,6 +9,41 @@
   `@api.register(mod, ordinal, args="word str long", ret="word|long|void")`;
   unregistered imports fail loud (`Win16ApiGap`) naming MODULE.ord:Name + call site.
 
+## 2026-07-07 — THE GAME RUNS: full boot → intro → idle loop, Paulie-O-Meter renders
+- **PYTHON.EXE now runs indefinitely in the VM with zero gaps** (5M+ steps): crt0 →
+  WinMain → WM_CREATE (level file read via OpenFile+DOS handle calls, 26 LoadBitmaps,
+  1344×960 playfield + 168×120 radar offscreen buffers, timers 140/250/4000 ms) →
+  intro window (4 s timer) → DestroyWindow → the idle message loop with WM_TIMER +
+  WM_PAINT flowing. `python -m ppython.probes.screenshot` dumps window PNGs:
+  the Paulie-O-Meter shows SCORE/LIVES/BONUS/LEVEL/MICE TO GO/SCREEN SET in colour.
+  Main window black = correct (no game started; needs menu WM_COMMAND input).
+- **The frame boundary is `GetMessage`** (the Win16 analogue of overkill's 1010:9B2E):
+  `Win16System.next_message()` is the deterministic pump — posted msgs > WM_PAINT
+  (dirty windows) > WM_TIMER (virtual clock jumps to earliest due timer). Timers:
+  id2 @140ms = the gameplay tick, id1 @250ms, id3 @4000ms (intro).
+- USER/GDI object model landed (`win16/api/objects.py`): HandleTable (recycling —
+  DC churn exhausted 16 bits once), WndClass/Window/DC/Bitmap/Surface (RGB,
+  3B/px)/Menu/AccelTable; `win16/callback.py` `call_far` = nested-interpreter
+  callbacks INTO VM code (WndProc); WM_CREATE/SIZE/MOVE/DESTROY/PAINT/TIMER live.
+- GDI: BitBlt (SRCCOPY/AND/PAINT/INVERT + BLACK/WHITENESS), PatBlt, text pipeline
+  (SetBkMode/SetTextColor/GetTextMetrics 8×13 fixed + TextOut over the embedded
+  public-domain font8x8 — presentation-only approximation), CreateCompatibleDC/
+  Bitmap with real GDI default-object semantics (first SelectObject returns the
+  default 1×1 bitmap handle, DCs pre-seed stock brush/pen/font — the game VERIFIES
+  SelectObject returns, an error path caught this).
+- **NAMETABLE (resource type 15) decoded** — the game loads bitmaps by NAME
+  (PPINTRO, PPWALL1..10, PPBODY, PPHEAD*, PPICON1-4, KBCURSOR); the map lives in
+  `NEExecutable.resource_name_map`, consumed by `lookup_resource`. All 26
+  LoadBitmaps resolve (a spy probe caught them all returning 0 before this).
+- wsprintf = CDECL varargs (raw handler + Win16 %-format engine). Two real bugs
+  fixed: GDI draws must NOT dirty windows (WM_PAINT storm), handle recycling.
+- dos_re framework grew (separate commits there): LEAVE (0xC9), CWD (0x99),
+  three-operand IMUL (0x69/0x6B) — each with focused tests, 111 passed.
+- Suite here: 13 passed (boot-to-idle gate: both windows alive, timers armed,
+  meter has rendered pixels, 26 bitmaps resolved).
+- **Next:** input driver (post WM_COMMAND "new game" + WM_KEYDOWN steering) →
+  playfield renders → then the demo/lockstep machinery per the dos_re method.
+
 ## 2026-07-07 — the MSC C startup chain is complete; frontier is inside WinMain
 - Implemented, one observed call at a time (each verified in the boot trace):
   `InitTask` (full register contract: AX=1 BX=81 CX=stack DX=nCmdShow SI=hPrev

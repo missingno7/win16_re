@@ -47,18 +47,28 @@ def test_osfixups_left_unapplied(machine):
     assert len(machine.osfixups) == 82
 
 
-def test_boot_reaches_winmain(machine):
-    """The whole MSC C startup chain (InitTask -> DOS3Call -> __fpMath ->
-    InitApp -> heap/env/argv) runs to completion; the frontier must be inside
-    WinMain (seg1:5EB0) — currently its first USER call, LoadCursor.  Any
-    unimplemented API beyond it must still fail loud, never silently stub."""
-    from win16.api.core import Win16ApiGap
-    with pytest.raises(Win16ApiGap, match=r"USER\.173:LoadCursor"):
-        machine.cpu.run(2000)
-    assert machine.cpu.instruction_count > 500
+def test_boot_runs_to_idle(machine):
+    """The full boot arc: crt0 -> WinMain -> WM_CREATE (level data, bitmaps,
+    timers) -> intro window (4s timer) -> teardown -> the idle message loop.
+    Must run a big step budget with no gap, leaving both game windows alive
+    and the Paulie-O-Meter actually rendered (text pixels present)."""
+    machine.cpu.trace_enabled = False
+    machine.cpu.run(1_500_000)          # any Win16ApiGap/opcode gap raises
+
+    sys_obj = machine.api.services["system"]
+    names = [w.wndclass.name for w in sys_obj.windows]
+    assert names == ["PYTHON", "PaulieOMeter"]
+    assert all(w.visible for w in sys_obj.windows)
+    assert sys_obj.timers, "game heartbeat timers must stay armed"
+
+    meter = sys_obj.windows[1].surface
+    assert any(meter.pixels), "scoreboard must have rendered non-black pixels"
+
     called = [c.split("(")[0] for c in machine.api.call_log]
-    for expected in ("KERNEL.91:InitTask", "KERNEL.3:GetVersion",
-                     "KERNEL.30:WaitEvent", "USER.5:InitApp",
-                     "WIN87EM.1:__fpMath", "KERNEL.131:GetDOSEnvironment",
-                     "KERNEL.49:GetModuleFileName"):
+    for expected in ("KERNEL.91:InitTask", "USER.41:CreateWindow",
+                     "USER.108:GetMessage", "USER.114:DispatchMessage",
+                     "USER.39:BeginPaint", "GDI.34:BitBlt", "GDI.33:TextOut",
+                     "USER.420:wsprintf", "USER.53:DestroyWindow"):
         assert expected in called, expected
+    # All 26 LoadBitmap calls must resolve through the NAMETABLE (no zeros).
+    assert called.count("USER.175:LoadBitmap") == 26
