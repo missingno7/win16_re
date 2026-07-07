@@ -27,6 +27,16 @@ def _sys(ctx: CallContext) -> Win16System:
     return ctx.registry.services["system"]
 
 
+def _vk_to_char(vk: int) -> int | None:
+    """ASCII character a virtual key produces with no shift state, or None.
+    (A minimal US-layout subset — enough for typed input; grows if needed.)"""
+    if 0x41 <= vk <= 0x5A:              # 'A'-'Z' VKs -> lowercase
+        return vk + 0x20
+    if 0x30 <= vk <= 0x39:              # '0'-'9'
+        return vk
+    return {0x20: 0x20, 0x0D: 0x0D, 0x1B: 0x1B, 0x08: 0x08, 0x09: 0x09}.get(vk)
+
+
 # Windows 3.1 on standard VGA 640x480: the documented metric values.
 # Filled per observed index — extend from the same reference when a new
 # index is requested (fail loud otherwise).
@@ -329,7 +339,7 @@ def install(api: ApiRegistry) -> None:
         lpmsg, hwnd_filter, lo, hi = ctx.args
         if hwnd_filter or lo or hi:
             raise NotImplementedError("GetMessage with hwnd/range filter")
-        msg = sys.next_message()
+        msg = sys.get_message()
         if msg is None:
             _write_msg(ctx, lpmsg, (0, 0x0012, sys.quit_posted or 0, 0,
                                     sys.clock_ms, 0))    # WM_QUIT
@@ -339,14 +349,41 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 113, args="ptr")              # TranslateMessage(lpmsg)
     def TranslateMessage(ctx: CallContext) -> int:
-        # Generates WM_CHAR from WM_KEYDOWN; no keyboard input exists yet, so
-        # nothing to translate.  Grows with the input driver.
-        return 0
+        # Post a WM_CHAR for a WM_KEYDOWN whose virtual key has an ASCII form
+        # (real USER does this via the keyboard layout); arrows/F-keys produce
+        # no character.
+        sys = _sys(ctx)
+        hwnd, message, wparam, lparam, _t, _pt = _read_msg(ctx, ctx.args[0])
+        if message != 0x0100:                            # WM_KEYDOWN
+            return 0
+        ch = _vk_to_char(wparam)
+        if ch is None:
+            return 0
+        sys.post_message(hwnd, 0x0102, ch, lparam)       # WM_CHAR
+        return 1
 
     @api.register("USER", 178, args="word word ptr")    # TranslateAccelerator
-    def TranslateAccelerator(ctx: CallContext) -> int:
-        # Matches WM_KEYDOWN/WM_CHAR against the accel table -> WM_COMMAND.
-        # No keyboard input exists yet; nothing can match.
+    def TranslateAccelerator(ctx: CallContext) -> int:   # (hwnd, haccel, lpmsg)
+        from .objects import AccelTable
+        sys = _sys(ctx)
+        hwnd, haccel, lpmsg = ctx.args
+        accel = sys.handles.get(haccel)
+        if not isinstance(accel, AccelTable):
+            return 0
+        _hmsg, message, wparam, _lp, _t, _pt = _read_msg(ctx, lpmsg)
+        if message not in (0x0100, 0x0102):              # WM_KEYDOWN / WM_CHAR
+            return 0
+        win = sys.handles.get(hwnd)
+        if not isinstance(win, Window):
+            return 0
+        for flags, event, cmd_id in accel.entries:
+            fvirt = flags & 0x01
+            want = 0x0100 if fvirt else 0x0102           # virtkey vs ASCII char
+            if message != want or event != wparam:
+                continue
+            # WM_COMMAND from an accelerator: HIWORD(lParam)=1, LOWORD=0.
+            sys.call_wndproc(win, 0x0111, cmd_id, 0x00010000)
+            return 1
         return 0
 
     @api.register("USER", 114, args="ptr", ret="long")  # DispatchMessage(lpmsg)

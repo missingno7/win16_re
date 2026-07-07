@@ -31,3 +31,22 @@ def test_new_game_reaches_playfield_and_music():
     # The level-start jingle went through SOUND.DRV.
     slog = m.api.services.get("sound_log", [])
     assert any(e[1] == "note" for e in slog), "no SetVoiceNote events recorded"
+
+
+def test_f2_accelerator_starts_new_game():
+    """Deterministic proof the interactive input path works: a WM_KEYDOWN for
+    VK_F2 must, via TranslateAccelerator + the accel table, become a New Game
+    WM_COMMAND — exactly what pressing F2 in the real window does."""
+    m = runtime.create_machine()
+    m.cpu.trace_enabled = False
+    m.cpu.run(1_500_000)                    # boot -> idle message loop
+    sysobj = m.api.services["system"]
+    main = sysobj.windows[0]
+    sysobj.post_message(main.handle, 0x0100, 0x71, 0x0001)  # WM_KEYDOWN VK_F2
+    try:
+        m.cpu.run(6_000_000)
+    except Exception as exc:  # noqa: BLE001 — frontier may be DialogBox on game-over
+        assert "DialogBox" in str(exc), f"unexpected gap: {exc!r}"
+    boxes = m.api.services.get("messagebox_log", [])
+    assert any(b[1] == "Next Screen:" for b in boxes), \
+        "F2 accelerator did not start a new game"

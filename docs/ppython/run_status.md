@@ -1,12 +1,36 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
+- **Interactive player:** `python scripts/play.py [--speed N] [--scale N]` — a real
+  tkinter window (worker thread runs the VM, GUI thread renders every Win16 window
+  onto a 640×480 virtual desktop + forwards keyboard/mouse). Arrows steer; F2 new
+  game / F3 sound / F4 pause / F5 scores / F10 exit (via the real accelerator table).
+  Runs until it hits the DialogBox frontier (shown in the status bar), not a crash.
+  Pacing lives in `win16/interactive.py` (`InteractiveDriver`, game-agnostic, GUI-free)
+  installed as `Win16System.message_source`; headless replay leaves it None.
 - **Gameplay gate:** `tests/test_gameplay.py` — boot→idle→WM_COMMAND(1050 New Game)→
   level intro msgbox + painted playfield + SOUND notes. The msgbox/sound logs are
   `api.services["messagebox_log"|"sound_log"]` (virtual-clock-stamped evidence).
 - **Menu commands** (from the MENU resource): 1050 New(F2), 1100 Sound(F3),
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
+
+## 2026-07-07 — INTERACTIVE: scripts/play.py — a real controllable window
+- Real-time play harness: worker thread runs the CPU; a tkinter/PIL GUI renders
+  the windows and forwards live input. `GetMessage` now delegates to an optional
+  `message_source` (`Win16System.get_message()`); `win16/interactive.py` paces
+  timers to wall-clock time (drops missed ticks, blocks the CPU thread on a
+  condition until input/next-timer). `--speed` scales time; `--scale` zooms.
+- Faithful input path landed: **TranslateAccelerator** (matches WM_KEYDOWN/WM_CHAR
+  against the accel table → WM_COMMAND; F2→New, F3→Sound, F4→Pause, F5→Scores,
+  F1→Help, F8→Radar, F10→Exit) and **TranslateMessage** (WM_KEYDOWN→WM_CHAR for
+  ASCII VKs). Mouse move/click → WM_MOUSEMOVE/L/RBUTTON in client coords to the
+  window under the pointer. Verified: a synthesized VK_F2 WM_KEYDOWN starts a new
+  game through the accelerator (deterministic test) and the threaded harness paints
+  the playfield + responds to arrow steering.
+- Suite: 15 passed (added the F2-accelerator gate).
+- **Next unchanged:** DialogBox (high-score/about) is still the frontier — the
+  player stops there gracefully; implementing it unlocks full game-over/menus.
 
 ## 2026-07-07 — GAMEPLAY: New Game plays itself blind — level, music, collisions, game over
 - x87 landed in dos_re (ESC D8-DF subset per static census: 59 FWAIT+ESC sites;

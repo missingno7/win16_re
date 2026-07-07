@@ -55,6 +55,9 @@ class Win16System:
     profiles: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     #          file -> section -> key -> value   (all keys canonical lower-case)
     stock_handles: dict[int, int] = field(default_factory=dict)
+    message_source: object = None       # optional: callable(sys) -> msg | None
+    #   When set, GetMessage delegates to it (an interactive/real-time driver);
+    #   otherwise the deterministic next_message() drives (headless replay).
 
     def ensure_environment(self) -> int:
         """DOS environment block: ASCIIZ vars, double zero, WORD 1, exe path."""
@@ -99,6 +102,13 @@ class Win16System:
 
     def post_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> None:
         self.msg_queue.append((hwnd, msg, wparam, lparam, self.clock_ms, 0))
+
+    def get_message(self):
+        """What GetMessage returns: delegate to an interactive driver when one
+        is installed, else the deterministic pump."""
+        if self.message_source is not None:
+            return self.message_source(self)
+        return self.next_message()
 
     def next_message(self):
         """The message-pump core (GetMessage order: posted > paint > timer).
