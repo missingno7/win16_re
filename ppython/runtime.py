@@ -5,7 +5,9 @@ from pathlib import Path
 
 from . import _env  # noqa: F401
 
+from win16.api import kernel, user, win87em
 from win16.api.core import ApiRegistry
+from win16.api.system import Win16System
 from win16.loader import Win16Machine, load_ne
 from win16.ne import NEExecutable, parse_ne
 
@@ -30,8 +32,13 @@ def load_exe() -> NEExecutable:
 def create_registry() -> ApiRegistry:
     api = ApiRegistry()
     api.register_equate("KERNEL", 178, WINFLAGS_NO_FPU)
+    kernel.install(api)
+    user.install(api)
+    win87em.install(api)
     return api
 
 
 def create_machine() -> Win16Machine:
-    return load_ne(load_exe(), create_registry())
+    machine = load_ne(load_exe(), create_registry())
+    Win16System(machine)
+    return machine

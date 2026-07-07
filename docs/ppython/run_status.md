@@ -9,6 +9,24 @@
   `@api.register(mod, ordinal, args="word str long", ret="word|long|void")`;
   unregistered imports fail loud (`Win16ApiGap`) naming MODULE.ord:Name + call site.
 
+## 2026-07-07 — the MSC C startup chain is complete; frontier is inside WinMain
+- Implemented, one observed call at a time (each verified in the boot trace):
+  `InitTask` (full register contract: AX=1 BX=81 CX=stack DX=nCmdShow SI=hPrev
+  DI=hInst ES=PSP; instance-data stack words in DGROUP), `WaitEvent`,
+  `GetVersion` (0x05000A03), `DOS3Call` AH=30h/35h/25h (version + Python-side
+  interrupt-vector table), `InitApp`, `__fpMath` BX=0/2/3 (install/deinstall/
+  set-error-handler — handler seg1:8310 recorded), `LockSegment`/`UnlockSegment`
+  (identity in the flat mapping), `LocalAlloc`/`LocalFree`/`LocalSize` over a real
+  first-fit DGROUP heap allocator (`win16/api/localheap.py`),
+  `GetModuleFileName` (virtual DOS path C:\PYTHON.EXE), `GetDOSEnvironment`
+  (PATH= block + WORD 1 + exe path).
+- **545 instructions of crt0 run clean; WinMain = seg1:5EB0** (near-called from
+  the seg1:0033 thunk). Frontier: USER.173:LoadCursor from seg1:5EF9 — the app's
+  window-class setup. Next: the USER windowing model (class/window objects,
+  message queue, WndProc far-callbacks into VM code), then CreateWindow →
+  message loop → first paintable frame.
+- Suite: 13 passed.
+
 ## 2026-07-07 — bring-up: NE loader boots PYTHON.EXE to the first API frontier
 - Target identified: **Paulie Python 1.0** (Way Out West-ware), Win 3.x NE app.
   2 segments (CODE 0x8C91 @seg1, DATA/DGROUP 0x5940 @seg2, stack 0x1400 heap 0x1000),

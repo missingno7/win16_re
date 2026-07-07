@@ -47,10 +47,18 @@ def test_osfixups_left_unapplied(machine):
     assert len(machine.osfixups) == 82
 
 
-def test_boot_reaches_inittask(machine):
-    """The interpreter must run the startup prologue and fail loud at the
-    first unimplemented API — never silently misbehave."""
+def test_boot_reaches_winmain(machine):
+    """The whole MSC C startup chain (InitTask -> DOS3Call -> __fpMath ->
+    InitApp -> heap/env/argv) runs to completion; the frontier must be inside
+    WinMain (seg1:5EB0) — currently its first USER call, LoadCursor.  Any
+    unimplemented API beyond it must still fail loud, never silently stub."""
     from win16.api.core import Win16ApiGap
-    with pytest.raises(Win16ApiGap, match="KERNEL.91:InitTask"):
-        machine.cpu.run(100)
-    assert machine.cpu.instruction_count == 3
+    with pytest.raises(Win16ApiGap, match=r"USER\.173:LoadCursor"):
+        machine.cpu.run(2000)
+    assert machine.cpu.instruction_count > 500
+    called = [c.split("(")[0] for c in machine.api.call_log]
+    for expected in ("KERNEL.91:InitTask", "KERNEL.3:GetVersion",
+                     "KERNEL.30:WaitEvent", "USER.5:InitApp",
+                     "WIN87EM.1:__fpMath", "KERNEL.131:GetDOSEnvironment",
+                     "KERNEL.49:GetModuleFileName"):
+        assert expected in called, expected
