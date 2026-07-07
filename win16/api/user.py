@@ -313,9 +313,14 @@ def install(api: ApiRegistry) -> None:
         sys = _sys(ctx)
         menu = sys.handles.require(ctx.args[0], Menu)
         _pos, flags, new_id, content = ctx.args[1:]
-        # Content is a bitmap handle (MF_BITMAP) or string ptr; stored only —
-        # menu rendering is host-side UI, not game state.
         menu.item_flags[new_id] = flags & 0x000B
+        # MF_BITMAP (0x0004): content is a bitmap handle in the low word — the
+        # game replaces a text item with a bitmap (the ScreenSculptor Shape
+        # menu).  Record it so the host can render the real icon.
+        if flags & 0x0004:
+            menu.item_bitmaps[new_id] = content & 0xFFFF
+        else:
+            menu.item_bitmaps.pop(new_id, None)
         return 1
 
     @api.register("USER", 250, args="word word word")   # GetMenuState(menu, id, flags)

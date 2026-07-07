@@ -105,6 +105,7 @@ class Window:
 class Menu:
     name: int | str | None
     item_flags: dict[int, int] = field(default_factory=dict)   # id -> MF_* state
+    item_bitmaps: dict[int, int] = field(default_factory=dict)  # id -> bitmap handle
     handle: int = 0
 
 

@@ -61,6 +61,17 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — bitmap menu items (ScreenSculptor ▸ Shape shows real icons)
+- Owner: the Shape menu should show shape ICONS, not text names. Confirmed the game
+  converts all 16 shape items (ids 3101-3116: PPMOUSE, PPWALL1-10, PPHEAD R/D/L/U,
+  PPBALL) to bitmap menu items at boot via `ModifyMenu(MF_BITMAP)`, each pointing at
+  the shape's loaded bitmap handle. ModifyMenu now records the handle in
+  `Menu.item_bitmaps`; play.py renders those items as `add_checkbutton` with the
+  decoded 16x16 bitmap image (so the selected-shape checkmark still works) instead of
+  text. Verified all 16 render as image checkbuttons matching the game screenshot
+  (PPWALL1 checked). Menu-state sync handles both text (✓ label) and bitmap (var).
+- Suite: 32.
+
 ## 2026-07-07 — the REAL crash-frame fix: MessageBox must pump WM_PAINT
 - The earlier _flush_windows fix was necessary but not sufficient. Root cause found
   by tracing blits: the game draws the crash head **PPHEADX to the OFFSCREEN

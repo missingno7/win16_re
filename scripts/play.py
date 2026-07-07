@@ -90,9 +90,10 @@ class WindowView:
         self._photo = None
         self._img_item = None
         self._last_version = -1
-        self._menu_entries: list[tuple[tk.Menu, int, int, int]] = []
-        #                    (menu widget, entry index, item id, initial flags)
-        self._menu_applied: dict[tuple[str, int], tuple[str, str]] = {}
+        self._menu_entries: list[tuple] = []
+        #        (menu widget, entry index, item id, initial flags, check-var|None)
+        self._menu_applied: dict[tuple[str, int], tuple] = {}
+        self._menu_images: list = []            # keep PhotoImage refs alive
         self._last_geo = None
 
         self.top = tk.Toplevel(app.root)
@@ -142,11 +143,46 @@ class WindowView:
             return
         text, accel = item.text_and_accel()
         hwnd, cmd_id = self.win.handle, item.item_id
-        parent.add_command(
-            label=text, accelerator=accel or None,
-            command=lambda: self.app.driver.post_input(hwnd, WM_COMMAND, cmd_id, 0))
-        self._menu_entries.append(
-            (parent, parent.index("end"), cmd_id, item.flags))
+        # The game may have replaced this text item with a bitmap (the
+        # ScreenSculptor Shape menu, via ModifyMenu MF_BITMAP) — render the real
+        # icon.  add_checkbutton keeps the selected-shape checkmark working.
+        image = self._menu_image(cmd_id)
+        if image is not None:
+            var = tk.IntVar(value=1 if (item.flags & MF_CHECKED) else 0)
+            parent.add_checkbutton(
+                image=image, variable=var, onvalue=1, offvalue=0,
+                command=lambda: self.app.driver.post_input(hwnd, WM_COMMAND, cmd_id, 0))
+            self._menu_entries.append((parent, parent.index("end"), cmd_id,
+                                       item.flags, var))
+        else:
+            parent.add_command(
+                label=text, accelerator=accel or None,
+                command=lambda: self.app.driver.post_input(hwnd, WM_COMMAND, cmd_id, 0))
+            self._menu_entries.append((parent, parent.index("end"), cmd_id,
+                                       item.flags, None))
+
+    def _menu_image(self, cmd_id: int):
+        """PhotoImage for a menu item the game turned into a bitmap, or None."""
+        from win16.api.objects import Bitmap
+        menu_obj = self.win.menu_obj
+        if menu_obj is None:
+            return None
+        handle = menu_obj.item_bitmaps.get(cmd_id)
+        if not handle:
+            return None
+        bmp = self.app.sys.handles.get(handle)
+        if not isinstance(bmp, Bitmap):
+            return None
+        surf = bmp.surface
+        try:
+            img = Image.frombytes("RGB", (surf.w, surf.h), bytes(surf.pixels))
+        except ValueError:
+            return None
+        if self.scale != 1:
+            img = img.resize((surf.w * self.scale, surf.h * self.scale), Image.NEAREST)
+        photo = ImageTk.PhotoImage(img)
+        self._menu_images.append(photo)
+        return photo
 
     def _sync_menu_state(self) -> None:
         """Mirror the game's menu state: grayed items are unclickable (real
@@ -158,11 +194,21 @@ class WindowView:
         flags_now = {}
         if self.win.menu_obj is not None:
             flags_now = self.win.menu_obj.item_flags
-        for menu, index, cmd_id, initial in self._menu_entries:
+        for menu, index, cmd_id, initial, var in self._menu_entries:
             flags = flags_now.get(cmd_id, initial)
             state = "disabled" if flags & (MF_GRAYED | MF_DISABLED) else "normal"
-            check = "✓ " if flags & MF_CHECKED else ""
+            checked = bool(flags & MF_CHECKED)
             key = (str(menu), index)
+            if var is not None:                 # bitmap item: check via the var
+                if self._menu_applied.get(key) != (state, checked):
+                    var.set(1 if checked else 0)
+                    try:
+                        menu.entryconfig(index, state=state)
+                        self._menu_applied[key] = (state, checked)
+                    except tk.TclError:
+                        pass
+                continue
+            check = "✓ " if checked else ""
             if self._menu_applied.get(key) == (state, check):
                 continue
             try:
