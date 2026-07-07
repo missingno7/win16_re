@@ -78,6 +78,7 @@ class Window:
     extra: bytearray = field(default_factory=bytearray)
     scroll: dict[int, tuple[int, int, int]] = field(default_factory=dict)
     #        bar -> (min, max, pos);  bar: 0=SB_HORZ, 1=SB_VERT
+    props: dict[str, int] = field(default_factory=dict)   # SetProp/GetProp store
     menu_obj: Menu | None = None
     _surface: "Surface" = None
     handle: int = 0
@@ -102,10 +103,20 @@ class Window:
 
 
 @dataclass
+class MenuItem:
+    """One entry in a programmatically built menu (CreateMenu/AppendMenu)."""
+    flags: int                      # MF_* (POPUP / SEPARATOR / string)
+    id: int                         # command id, or submenu handle if POPUP
+    text: str = ""
+    submenu: "Menu | None" = None
+
+
+@dataclass
 class Menu:
     name: int | str | None
     item_flags: dict[int, int] = field(default_factory=dict)   # id -> MF_* state
     item_bitmaps: dict[int, int] = field(default_factory=dict)  # id -> bitmap handle
+    items: list = field(default_factory=list)                  # ordered MenuItem list
     handle: int = 0
 
 
@@ -153,6 +164,17 @@ class Surface:
 @dataclass
 class Bitmap:
     surface: Surface
+    handle: int = 0
+
+
+@dataclass
+class Font:
+    """A logical font from CreateFont.  The text renderer maps every font onto
+    the fixed 8x13 cell, so only the height/face are kept for metrics; `kind`
+    steers GetTextMetrics to the fixed-cell numbers."""
+    height: int
+    facename: str = ""
+    kind: str = "SYSTEM_FIXED_FONT"
     handle: int = 0
 
 

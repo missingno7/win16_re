@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .core import ApiRegistry, CallContext
-from .objects import (DC, Bitmap, Brush, Palette, StockObject, Surface,
+from .objects import (DC, Bitmap, Brush, Font, Palette, StockObject, Surface,
                       _signed, blit)
 from .system import Win16System
 
@@ -44,25 +44,75 @@ def _fill_rect(dst: Surface, x: int, y: int, w: int, h: int,
         dst.pixels[off:off + len(row)] = row
 
 
-def _brush_rgb(sys: Win16System, hdc: int) -> tuple[int, int, int]:
-    dc = sys.handles.require(hdc, DC)
-    brush = dc.selected.get("brush")
+_STOCK_BRUSH_RGB = {
+    "WHITE_BRUSH": (255, 255, 255), "BLACK_BRUSH": (0, 0, 0),
+    "LTGRAY_BRUSH": (192, 192, 192), "GRAY_BRUSH": (128, 128, 128),
+    "DKGRAY_BRUSH": (64, 64, 64), "NULL_BRUSH": None, "HOLLOW_BRUSH": None,
+}
+
+
+def brush_object_rgb(brush) -> tuple[int, int, int] | None:
+    """RGB of a Brush/StockObject (None for a hollow/null brush)."""
     if isinstance(brush, Brush):
         c = brush.color
         return (c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
     kind = getattr(brush, "kind", None)
-    fixed = {"WHITE_BRUSH": (255, 255, 255), "BLACK_BRUSH": (0, 0, 0),
-             "LTGRAY_BRUSH": (192, 192, 192), "GRAY_BRUSH": (128, 128, 128),
-             "DKGRAY_BRUSH": (64, 64, 64)}
-    if kind in fixed:
-        return fixed[kind]
+    if kind in _STOCK_BRUSH_RGB:
+        return _STOCK_BRUSH_RGB[kind]
     raise NotImplementedError(f"brush {kind!r} has no fill colour")
+
+
+def _brush_rgb(sys: Win16System, hdc: int) -> tuple[int, int, int]:
+    dc = sys.handles.require(hdc, DC)
+    return brush_object_rgb(dc.selected.get("brush"))
 
 
 def install(api: ApiRegistry) -> None:
     @api.register("GDI", 66, args="long")               # CreateSolidBrush(color)
     def CreateSolidBrush(ctx: CallContext) -> int:
         return _sys(ctx).handles.add(Brush(ctx.args[0] & 0xFFFFFF))
+
+    @api.register("GDI", 56,                            # CreateFont(...14 params)
+                  args="s_word s_word s_word s_word s_word word word word "
+                       "word word word word word str")
+    def CreateFont(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        height = abs(_signed(ctx.args[0]))
+        face = ctx.read_string(ctx.args[13]).decode("latin-1") if ctx.args[13] else ""
+        font = Font(height=height, facename=face)
+        sys.handles.add(font)
+        return font.handle
+
+    @api.register("GDI", 349, args="word long", ret="long")  # SetMapperFlags(hdc,flag)
+    def SetMapperFlags(ctx: CallContext) -> int:
+        # Controls whether the font mapper matches aspect ratio.  Our renderer
+        # uses one fixed cell, so there is nothing to match — report the
+        # previous flags (0, the default) and change nothing.
+        return 0
+
+    @api.register("GDI", 119, args="str")               # AddFontResource(lpFilename)
+    def AddFontResource(ctx: CallContext) -> int:
+        # The custom raster font (SimAnt's FONTRES.FON) is accepted so its
+        # later CreateFont(faceName) succeeds; our text renderer maps every
+        # font onto the fixed 8x13 cell (a presentation approximation), so
+        # nothing is actually installed.  Report one font added (success).
+        return 1
+
+    @api.register("GDI", 150, args="word")              # UnrealizeObject(hObject)
+    def UnrealizeObject(ctx: CallContext) -> int:
+        # For a palette: reset it so the next RealizePalette fully re-maps it.
+        # Our RealizePalette already re-maps in full every call (static single-
+        # app system palette), so there is nothing to reset — report success.
+        return 1
+
+    @api.register("GDI", 38,                             # Escape(hdc, esc, cb, in, out)
+                  args="word s_word s_word ptr ptr")
+    def Escape(ctx: CallContext) -> int:
+        # Device escapes (printer/plotter control) are not modelled.  The only
+        # one apps call unconditionally is QUERYESCSUPPORT (8), a capability
+        # probe — reporting 0 (unsupported) for every escape is honest and
+        # makes the app take its standard no-escape path.
+        return 0
 
     @api.register("GDI", 87, args="word")               # GetStockObject(index)
     def GetStockObject(ctx: CallContext) -> int:
@@ -92,6 +142,8 @@ def install(api: ApiRegistry) -> None:
             return prev.handle if prev else 0
         if isinstance(obj, Brush):
             kind = "brush"
+        elif isinstance(obj, Font):
+            kind = "font"
         elif isinstance(obj, StockObject):
             kind = ("brush" if "BRUSH" in obj.kind else
                     "pen" if "PEN" in obj.kind else
@@ -208,15 +260,9 @@ def install(api: ApiRegistry) -> None:
                             dst.pixels[o:o + 3] = bytes(fg)
         return 1
 
-    @api.register("GDI", 93, args="word ptr")           # GetTextMetrics(hdc, lptm)
-    def GetTextMetrics(ctx: CallContext) -> int:
-        sys = _sys(ctx)
-        dc = sys.handles.require(ctx.args[0], DC)
-        font = dc.selected.get("font")
-        kind = getattr(font, "kind", None)
-        # (height, ascent, descent, avewidth, maxwidth) per stock font.  The
-        # text renderer treats everything as an 8x13 cell; these are the
-        # documented Win3.1 VGA metrics apps query for layout.
+    def _font_metrics(dc):
+        """(height, ascent, descent, avewidth, maxwidth) for the DC's font."""
+        kind = getattr(dc.selected.get("font"), "kind", None)
         fixed = (13, 11, 2, 8, 8)
         metrics = {
             "ANSI_FIXED_FONT": fixed, "SYSTEM_FIXED_FONT": fixed,
@@ -226,8 +272,25 @@ def install(api: ApiRegistry) -> None:
             "DEVICE_DEFAULT_FONT": (16, 12, 3, 7, 14),
         }.get(kind)
         if metrics is None:
-            raise NotImplementedError(f"GetTextMetrics for font {kind!r}")
-        height, ascent, descent, avew, maxw = metrics
+            raise NotImplementedError(f"font metrics for {kind!r}")
+        return metrics
+
+    @api.register("GDI", 91, args="word ptr word", ret="long")  # GetTextExtent
+    def GetTextExtent(ctx: CallContext) -> int:         # (hdc, lpString, nCount)
+        sys = _sys(ctx)
+        dc = sys.handles.require(ctx.args[0], DC)
+        height, _asc, _desc, avew, _maxw = _font_metrics(dc)
+        count = ctx.args[2] & 0xFFFF
+        # Fixed-cell approximation (as TextOut renders): width = count * avg.
+        return ((height & 0xFFFF) << 16) | ((count * avew) & 0xFFFF)
+
+    @api.register("GDI", 93, args="word ptr")           # GetTextMetrics(hdc, lptm)
+    def GetTextMetrics(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        dc = sys.handles.require(ctx.args[0], DC)
+        # The text renderer treats everything as an 8x13 cell; these are the
+        # documented Win3.1 VGA metrics apps query for layout.
+        height, ascent, descent, avew, maxw = _font_metrics(dc)
         seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
         words = [height, ascent, descent, 3, 0, avew, maxw, 400]
         for i, v in enumerate(words):            # height ascent descent intlead...
@@ -315,10 +378,11 @@ def install(api: ApiRegistry) -> None:
         bseg, boff = (bmi >> 16) & 0xFFFF, bmi & 0xFFFF
         hdr = ctx.mem.block(bseg, boff, 40)
         size, w, h, _pl, bpp, comp = struct.unpack_from("<IiiHHI", hdr, 0)
-        if comp != 0 or bpp != 8:
+        if comp != 0 or bpp not in (4, 8):
             raise NotImplementedError(
-                f"SetDIBitsToDevice bpp={bpp} comp={comp} (only 8bpp BI_RGB)")
-        clr_used = min(struct.unpack_from("<I", hdr, 32)[0] or 256, 256)
+                f"SetDIBitsToDevice bpp={bpp} comp={comp} (only 4/8bpp BI_RGB)")
+        ncolors = 1 << bpp                          # 16 (4bpp) or 256 (8bpp)
+        clr_used = min(struct.unpack_from("<I", hdr, 32)[0] or ncolors, ncolors)
 
         # 256-entry index -> (r,g,b) LUT from the DIB colour table (cached).
         if coloruse == 1:
@@ -360,7 +424,7 @@ def install(api: ApiRegistry) -> None:
                 lut[:clr_used, 2] = quads[:, 0]                 # B
                 _dib_lut_cache[key] = lut
 
-        stride = ((w * 8 + 31) // 32) * 4
+        stride = ((w * bpp + 31) // 32) * 4         # 4bpp packs 2 px/byte
         # The bits buffer can exceed 64K (microman: 512x320 = 160KB).  Resolve
         # the far pointer to a LINEAR base via the selector map, then read the
         # whole (contiguous) block linearly — segment-relative offsets would
@@ -382,9 +446,14 @@ def install(api: ApiRegistry) -> None:
         j_lo = max(0, -yd)
         j_hi = min(cy, r0 + 1, dst.h - yd)
         if i_hi > i_lo and j_hi > j_lo:
-            rows = base_lin + xs + (r0 - np.arange(j_lo, j_hi)) * stride
-            src = mem_np[rows[:, None] + np.arange(i_lo + 0, i_hi)]
-            dst3d[yd + j_lo:yd + j_hi, xd + i_lo:xd + i_hi] = lut[src]
+            rows = base_lin + (r0 - np.arange(j_lo, j_hi)) * stride    # (R,) row bases
+            cols = np.arange(xs + i_lo, xs + i_hi)                     # source columns
+            if bpp == 8:
+                idx = mem_np[rows[:, None] + cols]
+            else:                                # 4bpp: 2 px/byte, high nibble first
+                raw = mem_np[rows[:, None] + (cols >> 1)]
+                idx = np.where(cols & 1, raw & 0x0F, raw >> 4)
+            dst3d[yd + j_lo:yd + j_hi, xd + i_lo:xd + i_hi] = lut[idx]
         dst.touch()
         return cy
 

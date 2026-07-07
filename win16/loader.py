@@ -64,6 +64,20 @@ class Win16Machine:
         return base
 
     def interrupt(self, cpu: CPU8086, num: int) -> None:
+        if num == 0x21:
+            # Windows services INT 21h for apps — the same DOS surface as
+            # KERNEL's DOS3Call (SimAnt's C runtime startup calls DOS raw).
+            from .api.core import CallContext
+            from .api.kernel import DOS_SERVICES
+            ah = (cpu.s.ax >> 8) & 0xFF
+            handler = DOS_SERVICES.get(ah)
+            if handler is None:
+                raise Win16ApiGap(
+                    f"INT 21h AH={ah:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X} — "
+                    f"DOS service not implemented")
+            handler(CallContext(cpu, self.api, "DOS", num,
+                                f"int21_{ah:02X}", args=()))
+            return
         raise Win16ApiGap(
             f"INT {num:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X} — no Win16 service installed")
 

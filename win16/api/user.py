@@ -68,17 +68,43 @@ def _vk_to_char(vk: int) -> int | None:
 SYSTEM_METRICS = {
     0: 640,     # SM_CXSCREEN
     1: 480,     # SM_CYSCREEN
+    2: 16,      # SM_CXVSCROLL
+    3: 16,      # SM_CYHSCROLL
     4: 20,      # SM_CYCAPTION (3.1: 19 + 1 border)
     5: 1,       # SM_CXBORDER
     6: 1,       # SM_CYBORDER
     7: 4,       # SM_CXDLGFRAME
     8: 4,       # SM_CYDLGFRAME
+    9: 16,      # SM_CYVTHUMB
+    10: 16,     # SM_CXHTHUMB
+    11: 32,     # SM_CXICON
+    12: 32,     # SM_CYICON
+    13: 32,     # SM_CXCURSOR
+    14: 32,     # SM_CYCURSOR
     15: 18,     # SM_CYMENU
     16: 640,    # SM_CXFULLSCREEN
     17: 460,    # SM_CYFULLSCREEN
+    18: 18,     # SM_CYKANJIWINDOW
+    19: 0,      # SM_MOUSEPRESENT (set below to 1)
+    20: 16,     # SM_CYVSCROLL
+    21: 16,     # SM_CXHSCROLL
+    22: 0,      # SM_DEBUG
+    23: 0,      # SM_SWAPBUTTON
+    30: 8,      # SM_CXMINTRACK -> use small defaults
+    31: 8,      # SM_CYMINTRACK
     32: 4,      # SM_CXFRAME (sizing border)
     33: 4,      # SM_CYFRAME
+    34: 640,    # SM_CXSCREEN (unused dup guard)
+    36: 32,     # SM_CXDOUBLECLK
+    37: 32,     # SM_CYDOUBLECLK
+    38: 8,      # SM_CXICONSPACING
+    39: 8,      # SM_CYICONSPACING
+    40: 0,      # SM_MENUDROPALIGNMENT
+    41: 0,      # SM_PENWINDOWS
+    42: 0,      # SM_DBCSENABLED
+    43: 3,      # SM_CMOUSEBUTTONS
 }
+SYSTEM_METRICS[19] = 1      # SM_MOUSEPRESENT — a mouse is present
 
 
 def _wsprintf_format(ctx: CallContext, fmt: bytes, next_word) -> bytes:
@@ -221,6 +247,53 @@ def install(api: ApiRegistry) -> None:
         sys.handles.add(cls)
         return 1                    # nonzero = registered (real USER returns an atom)
 
+    # Window properties: a per-window string->handle store (USER 24/25/26).
+    # The name is a far-pointer string (atoms — segment 0 — not seen yet).
+    def _prop_name(ctx: CallContext, ptr: int) -> str | None:
+        if (ptr >> 16) & 0xFFFF == 0:       # atom, not a far string pointer
+            return f"#atom{ptr & 0xFFFF}"
+        return ctx.read_string(ptr).decode("latin-1")
+
+    @api.register("USER", 26, args="word ptr word")     # SetProp(hwnd, name, hData)
+    def SetProp(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        win.props[_prop_name(ctx, ctx.args[1])] = ctx.args[2] & 0xFFFF
+        return 1                            # nonzero = added
+
+    @api.register("USER", 25, args="word ptr")          # GetProp(hwnd, name)
+    def GetProp(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        return win.props.get(_prop_name(ctx, ctx.args[1]), 0)
+
+    @api.register("USER", 24, args="word ptr")          # RemoveProp(hwnd, name)
+    def RemoveProp(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        return win.props.pop(_prop_name(ctx, ctx.args[1]), 0)
+
+    @api.register("USER", 50, args="str str")           # FindWindow(class, title)
+    def FindWindow(ctx: CallContext) -> int:
+        """Locate a top-level window by class name and/or title (NULL = any).
+        Apps use it as a single-instance guard right after InitApp; in the
+        static single-app model there is never a prior instance, so an honest
+        scan of our own window list returns 0 at startup."""
+        sys = _sys(ctx)
+        cls_ptr, title_ptr = ctx.args
+        want_cls = ctx.read_string(cls_ptr).decode("latin-1") if cls_ptr else None
+        want_title = ctx.read_string(title_ptr).decode("latin-1") if title_ptr else None
+        for win in sys.windows:
+            if want_cls is not None and win.wndclass.name != want_cls:
+                continue
+            if want_title is not None and win.title != want_title:
+                continue
+            return win.handle
+        return 0
+
     @api.register("USER", 41,                           # CreateWindow(...)
                   args="str str long s_word s_word s_word s_word word word word segptr")
     def CreateWindow(ctx: CallContext) -> int:
@@ -304,6 +377,81 @@ def install(api: ApiRegistry) -> None:
             win.menu_obj = Menu(win.wndclass.menu_name)
             sys.handles.add(win.menu_obj)
         return win.menu_obj.handle
+
+    # -- programmatic menu construction (SimAnt builds its menus in code) -----
+    MF_GRAYED, MF_DISABLED, MF_CHECKED = 0x0001, 0x0002, 0x0008
+    MF_POPUP, MF_SEPARATOR, MF_BYPOSITION = 0x0010, 0x0800, 0x0400
+
+    def _menu_item(ctx, sys, flags, id_new, content_ptr):
+        from .objects import MenuItem
+        if flags & MF_SEPARATOR:
+            return MenuItem(flags=flags, id=0)
+        if flags & MF_POPUP:
+            sub = sys.handles.get(id_new)
+            text = ctx.read_string(content_ptr).decode("latin-1") if content_ptr else ""
+            return MenuItem(flags=flags, id=id_new, text=text,
+                            submenu=sub if isinstance(sub, Menu) else None)
+        text = ctx.read_string(content_ptr).decode("latin-1") if content_ptr else ""
+        item = MenuItem(flags=flags, id=id_new, text=text)
+        return item
+
+    @api.register("USER", 151)                          # CreateMenu()
+    def CreateMenu(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        menu = Menu(None)
+        sys.handles.add(menu)
+        return menu.handle
+
+    @api.register("USER", 152, args="word")             # DestroyMenu(hMenu)
+    def DestroyMenu(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        if isinstance(sys.handles.get(ctx.args[0]), Menu):
+            sys.handles.remove(ctx.args[0])
+        return 1
+
+    @api.register("USER", 411, args="word word word ptr")  # AppendMenu
+    def AppendMenu(ctx: CallContext) -> int:            # (hMenu, flags, id, content)
+        sys = _sys(ctx)
+        menu = sys.handles.require(ctx.args[0], Menu)
+        item = _menu_item(ctx, sys, ctx.args[1], ctx.args[2], ctx.args[3])
+        menu.items.append(item)
+        if not (item.flags & (MF_POPUP | MF_SEPARATOR)):
+            menu.item_flags[item.id] = item.flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED)
+        return 1
+
+    @api.register("USER", 410, args="word word word word ptr")  # InsertMenu
+    def InsertMenu(ctx: CallContext) -> int:            # (hMenu, pos, flags, id, content)
+        sys = _sys(ctx)
+        menu = sys.handles.require(ctx.args[0], Menu)
+        pos, flags = ctx.args[1], ctx.args[2]
+        item = _menu_item(ctx, sys, flags, ctx.args[3], ctx.args[4])
+        if flags & MF_BYPOSITION:
+            index = pos if 0 <= pos <= len(menu.items) else len(menu.items)
+        else:                                           # insert before the item with this id
+            index = next((i for i, it in enumerate(menu.items) if it.id == pos),
+                         len(menu.items))
+        menu.items.insert(index, item)
+        if not (item.flags & (MF_POPUP | MF_SEPARATOR)):
+            menu.item_flags[item.id] = item.flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED)
+        return 1
+
+    @api.register("USER", 156, args="word word")        # GetSubMenu(hMenu, pos)
+    def GetSubMenu(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        menu = sys.handles.require(ctx.args[0], Menu)
+        pos = ctx.args[1]
+        if 0 <= pos < len(menu.items) and menu.items[pos].submenu is not None:
+            return menu.items[pos].submenu.handle
+        return 0
+
+    @api.register("USER", 158, args="word word")        # SetMenu(hwnd, hMenu)
+    def SetMenu(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        win = sys.handles.require(ctx.args[0], Window)
+        menu = sys.handles.get(ctx.args[1])
+        win.menu_obj = menu if isinstance(menu, Menu) else None
+        win.dirty = True
+        return 1
 
     @api.register("USER", 154, args="word word word")   # CheckMenuItem(menu, id, flags)
     def CheckMenuItem(ctx: CallContext) -> int:
@@ -498,6 +646,31 @@ def install(api: ApiRegistry) -> None:
         if win.visible and not was:
             win.dirty = True
         return 1 if was else 0
+
+    @api.register("USER", 81, args="word ptr word")     # FillRect(hdc, lpRect, hBrush)
+    def FillRect(ctx: CallContext) -> int:
+        from .gdi import _dc_surface, _fill_rect, brush_object_rgb
+        sys = _sys(ctx)
+        hdc, rc_ptr, hbrush = ctx.args
+        dst = _dc_surface(sys, hdc)
+        if dst is None:
+            return 0
+        seg, off = (rc_ptr >> 16) & 0xFFFF, rc_ptr & 0xFFFF
+        r = [_signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF)) for i in range(4)]
+        rgb = brush_object_rgb(sys.handles.get(hbrush))
+        if rgb is not None:                             # hollow brush = no-op
+            _fill_rect(dst, r[0], r[1], r[2] - r[0], r[3] - r[1], rgb)
+        return 1
+
+    @api.register("USER", 124, args="word")             # UpdateWindow(hwnd)
+    def UpdateWindow(ctx: CallContext) -> int:
+        """Flush a pending update: if the window has an invalid region, send
+        WM_PAINT to its proc synchronously (BeginPaint validates it)."""
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if isinstance(win, Window) and win.visible and win.dirty:
+            sys.call_wndproc(win, 0x000F, 0, 0)         # WM_PAINT
+        return 1
 
     @api.register_raw("USER", 420)                      # wsprintf — CDECL varargs
     def wsprintf(ctx: CallContext) -> None:

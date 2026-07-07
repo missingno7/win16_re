@@ -83,6 +83,32 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — SimAnt boots + paints (the big stress target) + project renamed win16_re
+- The repo is now **win16_re** (generic Win16 RE framework, `README.md` added); paths are
+  all relative so the rename was transparent.  New `simant/` package (runtime + boot test),
+  registered `simant` in `scripts/games.py`.
+- **SIMANTW.EXE (Maxis SimAnt) boots through startup and paints its MAXIS splash** — a full
+  commercial Win16 app (6 code segs, KEYBOARD+WIN87EM, raw INT 21h I/O, programmatic menus,
+  16-colour DIBs).  Brought up by the fail-loud frontier loop; ~1k → 3.36M → running once the
+  4bpp blit landed.  APIs/services added (each identified from its call site, not guessed):
+  - **loader**: INT 21h now routes to the KERNEL DOS service table (apps call DOS raw).
+  - **USER**: FindWindow(50, single-instance guard), Get/Set/RemoveProp(24/25/26, window
+    property store on `Window.props`), UpdateWindow(124), FillRect(81), and the **programmatic
+    menu builder** — CreateMenu/DestroyMenu/AppendMenu/InsertMenu/GetSubMenu/SetMenu on a new
+    `Menu.items`/`MenuItem` model (SimAnt builds menus in code, not from a resource).
+  - **GDI**: Escape(38, QUERYESCSUPPORT→0), CreateFont(56, new `Font` object → fixed-cell
+    metrics), GetTextExtent(91), AddFontResource(119), UnrealizeObject(150), SetMapperFlags(349),
+    and **4bpp (16-colour) DIBs** in SetDIBitsToDevice (nibble-unpack in the vectorized path).
+  - **KERNEL**: lstrcat(89)/lstrlen(90), GlobalReAlloc(16, alloc+copy+free), GlobalFlags(22),
+    GlobalCompact(25), GlobalLRUNewest/Oldest(163/164), GetFreeSpace(169) — plus huge-heap
+    `free_bytes`/`largest_free_block`.
+  - **DOS (INT 21h)**: get-drive(19h), create(3Ch), open(3Dh), get/set-attr(43h), IOCTL(44h,
+    isatty), get-cwd(47h).
+  - System-metrics table filled out (icon/cursor/scroll/dbl-click sizes).
+- SimAnt more than doubled the win16 surface; every change is game-agnostic (lives in `win16/`)
+  and the fixtures still pass — full suite **50 green**.  Next: drive past the splash into the
+  menu/first screen (KEYBOARD imports + x87 `fpu.py` are the likely upcoming frontiers).
+
 ## 2026-07-07 — microman package + MessageBox Yes/No + snapshot game-name + 2 more islands
 - **MessageBox button sets** (owner: Restart gave only OK, treated as No).  `win16/
   msgbox.py` maps `mtype & 0x0F` to the real button set + IDs (MB_OK/OKCANCEL/

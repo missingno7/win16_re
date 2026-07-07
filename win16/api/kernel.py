@@ -265,11 +265,77 @@ def install(api: ApiRegistry) -> None:
         ctx.mem.load((dst >> 16) & 0xFFFF, dst & 0xFFFF, data + b"\x00")
         return dst
 
+    @api.register("KERNEL", 89, args="segptr str", ret="long")   # lstrcat(dst, src)
+    def lstrcat(ctx: CallContext) -> int:
+        dst, src = ctx.args
+        dseg, doff = (dst >> 16) & 0xFFFF, dst & 0xFFFF
+        existing = ctx.read_string(dst)
+        add = ctx.read_string(src)
+        ctx.mem.load(dseg, (doff + len(existing)) & 0xFFFF, add + b"\x00")
+        return dst
+
+    @api.register("KERNEL", 90, args="str")             # lstrlen(lpsz)
+    def lstrlen(ctx: CallContext) -> int:
+        return len(ctx.read_string(ctx.args[0]))
+
+    @api.register("KERNEL", 169, args="word", ret="long")  # GetFreeSpace(flags)
+    def GetFreeSpace(ctx: CallContext) -> int:
+        # Available global-heap bytes; apps size buffers/caches from it.
+        sys: Win16System = ctx.registry.services["system"]
+        return sys.huge_heap.free_bytes() & 0xFFFFFFFF
+
+    @api.register("KERNEL", 163, args="word")           # GlobalLRUNewest(handle)
+    def GlobalLRUNewest(ctx: CallContext) -> int:
+        return ctx.args[0]                              # no LRU: identity
+
+    @api.register("KERNEL", 164, args="word")           # GlobalLRUOldest(handle)
+    def GlobalLRUOldest(ctx: CallContext) -> int:
+        # LRU re-ordering only matters for a discardable heap; ours never
+        # discards, so return the handle unchanged.
+        return ctx.args[0]
+
+    @api.register("KERNEL", 22, args="word")            # GlobalFlags(handle)
+    def GlobalFlags(ctx: CallContext) -> int:
+        # Low byte = lock count, high byte = GMEM flags (GMEM_DISCARDABLE 0x01,
+        # GMEM_DISCARDED 0x40).  Every block in the selector heap is fixed,
+        # non-discardable and never discarded, so the flags word is 0.
+        return 0
+
+    @api.register("KERNEL", 25, args="long", ret="long")  # GlobalCompact(minfree)
+    def GlobalCompact(ctx: CallContext) -> int:
+        # Nothing to compact (the selector heap never fragments the way the
+        # real one does); report the largest free block apps can still grab.
+        sys: Win16System = ctx.registry.services["system"]
+        return sys.huge_heap.largest_free_block() & 0xFFFFFFFF
+
     @api.register("KERNEL", 15, args="word long")       # GlobalAlloc(flags, size)
     def GlobalAlloc(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
         flags, size = ctx.args
         return sys.global_alloc(size, zero=bool(flags & 0x0040))   # GMEM_ZEROINIT
+
+    @api.register("KERNEL", 16, args="word long word")  # GlobalReAlloc(h, size, flags)
+    def GlobalReAlloc(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        handle, size, flags = ctx.args
+        hh = sys.huge_heap
+        if flags & 0x0080:                  # GMEM_MODIFY: attributes only
+            return handle
+        old_lin = hh.linear_base(handle)
+        old_size = hh.size_of(handle)
+        if old_lin is None:
+            return 0
+        new = hh.alloc(size)
+        if not new:
+            return 0
+        new_lin = hh.linear_base(new)
+        data = sys.machine.mem.data
+        keep = min(old_size, size)
+        data[new_lin:new_lin + keep] = data[old_lin:old_lin + keep]
+        if flags & 0x0040 and size > old_size:          # GMEM_ZEROINIT tail
+            data[new_lin + old_size:new_lin + size] = b"\x00" * (size - old_size)
+        hh.free(handle)
+        return new
 
     @api.register("KERNEL", 18, args="word", ret="long")  # GlobalLock(handle)
     def GlobalLock(ctx: CallContext) -> int:
@@ -398,6 +464,88 @@ def _dos_get_time(ctx: CallContext) -> None:
     ctx.cpu.s.dx = 0
 
 
+def _dos_get_drive(ctx: CallContext) -> None:
+    # AH=19h: AL = current default drive (0=A:, 2=C:).  We present C:.
+    ctx.cpu.s.ax = (ctx.cpu.s.ax & 0xFF00) | 2
+
+
+def _dos_get_set_attr(ctx: CallContext) -> None:
+    # AH=43h: AL=0 get / AL=1 set file attributes.  DS:DX = ASCIIZ name.
+    # Get: CF clear + CX=attributes if it exists, else CF set + AX=2 (not
+    # found).  Set: accept and clear CF (we never mutate original assets).
+    sys: Win16System = ctx.registry.services["system"]
+    s = ctx.cpu.s
+    name = ctx.read_string((s.ds << 16) | s.dx).decode("latin-1")
+    if (s.ax & 0xFF) == 1:                      # set attributes — no-op
+        _set_cf(ctx, False)
+        return
+    handle = sys.file_open(name)
+    if handle < 0:
+        s.ax = 2                                # ERROR_FILE_NOT_FOUND
+        _set_cf(ctx, True)
+        return
+    sys.file_close(handle)
+    s.cx = 0x20                                 # FILE_ATTRIBUTE_ARCHIVE
+    _set_cf(ctx, False)
+
+
+def _dos_open(ctx: CallContext) -> None:
+    # AH=3Dh: AL=access mode, DS:DX=ASCIIZ name -> AX=handle (CF clear) or
+    # AX=error (CF set).  The C runtime's open() path (SimAnt opens data files
+    # by raw INT 21h as well as via _lopen).
+    sys: Win16System = ctx.registry.services["system"]
+    s = ctx.cpu.s
+    name = ctx.read_string((s.ds << 16) | s.dx).decode("latin-1")
+    writable = (s.ax & 0x03) != 0
+    handle = sys.file_open(name, writable=writable)
+    if handle < 0:
+        s.ax = 2                                # ERROR_FILE_NOT_FOUND
+        _set_cf(ctx, True)
+        return
+    s.ax = handle
+    _set_cf(ctx, False)
+
+
+def _dos_create(ctx: CallContext) -> None:
+    # AH=3Ch: CX=attributes, DS:DX=ASCIIZ name -> AX=handle (create/truncate).
+    sys: Win16System = ctx.registry.services["system"]
+    s = ctx.cpu.s
+    name = ctx.read_string((s.ds << 16) | s.dx).decode("latin-1")
+    handle = sys.file_open(name, writable=True, create=True)
+    if handle < 0:
+        s.ax = 3                                # ERROR_PATH_NOT_FOUND
+        _set_cf(ctx, True)
+        return
+    s.ax = handle
+    _set_cf(ctx, False)
+
+
+def _dos_ioctl(ctx: CallContext) -> None:
+    # AH=44h: IOCTL.  The C runtime calls AL=0 (Get Device Information) on
+    # every opened handle to implement isatty().  For a disk file the device
+    # word has bit 7 (ISDEV) clear.  AL=1 (set) is a no-op.
+    s = ctx.cpu.s
+    al = s.ax & 0xFF
+    if al == 0:
+        s.dx = 0                                # regular file (not a character device)
+        _set_cf(ctx, False)
+    elif al == 1:
+        _set_cf(ctx, False)
+    else:
+        raise NotImplementedError(f"INT 21h AH=44h IOCTL subfunction AL={al:02X}h")
+
+
+def _dos_get_cwd(ctx: CallContext) -> None:
+    # AH=47h: DL=drive (0=default), DS:SI = 64-byte buffer.  The path is
+    # returned WITHOUT the drive letter or a leading backslash — the current
+    # directory is the game's own asset folder root, so present the root
+    # (empty string).  Success: CF clear, AX=0100h.
+    s = ctx.cpu.s
+    ctx.mem.wb(s.ds, s.si, 0)
+    s.ax = 0x0100
+    _set_cf(ctx, False)
+
+
 def _dos_file(ctx: CallContext, handle: int):
     sys: Win16System = ctx.registry.services["system"]
     vf = sys.files.get(handle)
@@ -474,6 +622,12 @@ def _dos_terminate(ctx: CallContext) -> None:
 
 
 DOS_SERVICES = {
+    0x19: _dos_get_drive,
+    0x3C: _dos_create,
+    0x3D: _dos_open,
+    0x43: _dos_get_set_attr,
+    0x44: _dos_ioctl,
+    0x47: _dos_get_cwd,
     0x25: _dos_set_vector,
     0x4C: _dos_terminate,
     0x2A: _dos_get_date,

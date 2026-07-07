@@ -18,6 +18,7 @@ GAMES = {
     # name        (exe path under assets/,        winflags)
     "ppython":    ("PPYTHON/PYTHON.EXE",          WINFLAGS_NO_FPU),
     "microman":   ("MICROMAN/MICROMAN.EXE",       WINFLAGS_NO_FPU),
+    "simant":     ("ANTWIN/SIMANTW.EXE",          WINFLAGS_NO_FPU),  # brought up
     # Not yet brought up — listed so `boot.py` can reach them:
     "bangbang":   ("BANGBANG/BANGBANG.EXE",       WINFLAGS_NO_FPU),
     "kye":        ("KYE/KYE.EXE",                 WINFLAGS_NO_FPU),

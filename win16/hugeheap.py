@@ -97,6 +97,14 @@ class HugeHeap:
         self._free_selectors(base_sel, n)
         return True
 
+    def free_bytes(self) -> int:
+        """Total unallocated linear space (GetFreeSpace)."""
+        return sum(avail for _base, avail in self._lin_free)
+
+    def largest_free_block(self) -> int:
+        """Biggest single contiguous free run (GlobalCompact return)."""
+        return max((avail for _base, avail in self._lin_free), default=0)
+
     def linear_base(self, base_sel: int) -> int | None:
         info = self._blocks.get(base_sel)
         return info[0] if info else None
