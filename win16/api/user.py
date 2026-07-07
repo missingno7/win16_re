@@ -65,6 +65,10 @@ def _vk_to_char(vk: int) -> int | None:
 # Windows 3.1 on standard VGA 640x480: the documented metric values.
 # Filled per observed index — extend from the same reference when a new
 # index is requested (fail loud otherwise).
+# Virtual interpreted-instructions per millisecond for the GetTickCount floor
+# (a mid-90s PC pace).  Tunes how fast busy-wait timers elapse in VM time.
+INSTR_PER_MS = 1000
+
 SYSTEM_METRICS = {
     0: 640,     # SM_CXSCREEN
     1: 480,     # SM_CYSCREEN
@@ -868,7 +872,16 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 13, ret="long")               # GetTickCount()
     def GetTickCount(ctx: CallContext) -> int:
-        return _sys(ctx).clock_ms & 0xFFFFFFFF
+        # Elapsed-time clock.  It must keep advancing even when the program
+        # BUSY-WAITS on it without pumping messages (SimAnt times its splash
+        # with `while GetTickCount()-t0 < delay`), so the message clock alone
+        # (which only ticks at message boundaries) would freeze it.  Use an
+        # instruction-derived floor: monotonic, deterministic (oracle-safe),
+        # and driven purely by progress.  Message-timed games keep their
+        # larger clock_ms unchanged.
+        sys = _sys(ctx)
+        instr_ms = ctx.cpu.instruction_count // INSTR_PER_MS
+        return max(sys.clock_ms, instr_ms) & 0xFFFFFFFF
 
     @api.register("USER", 17, args="ptr")               # GetCursorPos(lpPoint)
     def GetCursorPos(ctx: CallContext) -> int:
