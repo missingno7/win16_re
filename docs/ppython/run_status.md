@@ -83,6 +83,31 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — perf split VM-side/game-side; WAV out; keyboard fixed; hook targets named
+- **Owner asked where the bottleneck is.**  Measured: the game requests a 40ms timer
+  (25fps) but received 3.9 ticks/s — 6x slow, and the driver drops missed ticks, so
+  game TIME dilates (the "386 feel").  cProfile split the cost:
+  - **VM side (fixed, 2.6x)**: SetDIBitsToDevice was 63% — LUT rebuilt with 256 mem.rw
+    per blit + per-pixel Python.  Now: LUT cached on (table bytes, palette identity),
+    blit fully numpy-vectorized (analytic clip both axes; ~4 array ops per blit).
+    1500-step window 1.457s→0.554s.
+  - **Game side (the next lever, ~52% of what remains)**: PC-sampling (wrap CPU.step,
+    sample CS:IP every 64 instr) found WAP's two inner loops in seg 2 (CS 0852):
+    `0852:8D70-8DAF` = 37% — a huge-buffer FILL storing ONE byte per iteration with
+    full selector recompute (shl dx,3 / add / mov es / stosb-like) ≈ 25 interpreted
+    instr per byte; `0852:9260-929F` = 15% — the classic huge-pointer MEMCPY
+    (4 bytes/iter, offset+=4 / jnc / selector+=8).  Both are single memoryview/numpy
+    slice ops in our linear memory model → hook the enclosing functions (find entries,
+    replace, oracle-verify frame pixels over a demo) — the dos_re method, and the
+    rehearsal for the SimAnt endgame.
+- **WAV audio**: sndPlaySound now plays through the host (SquareWaveBackend.play_wav
+  via pygame.mixer; SND_LOOP honoured; NULL=stop; sound_log stays authoritative;
+  SND_MEMORY log-only until proven).  microman's title WAV (32KB) confirmed delivered.
+- **Keyboard fixed**: GetAsyncKeyState read services["async_keys"] which NOTHING fed —
+  microman steers by POLLING (not WM_KEYDOWN), so arrows were dead.  Key state is now
+  derived from the message stream in get_message (demo-replay identical), with the
+  real API's bit-0 went-down-since-last-poll latch for taps.
+
 ## 2026-07-07 — MICROMAN pixel-correct: the palette chain root-caused (3 fixes)
 - The owner's playtest still showed `LoadPage Error = 9` + wrong colours.  A full-API
   ring-buffer trace dumped at the moment the game called MessageBox found the real
