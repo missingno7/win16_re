@@ -6,3 +6,6 @@ assets/
 # Scratch evidence; promoted oracles live in artifacts/test_oracles/ (tracked).
 artifacts/*
 !artifacts/test_oracles/
+
+# Snapshots are scratch evidence unless promoted.
+artifacts/snapshots/

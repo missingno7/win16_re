@@ -402,6 +402,37 @@ def install(api: ApiRegistry) -> None:
             return 0
         return sys.call_wndproc(win, msg, wparam, lparam)
 
+    @api.register("USER", 404, args="word segstr ptr")  # GetClassInfo
+    def GetClassInfo(ctx: CallContext) -> int:          # (hInst, name, lpWndClass)
+        sys = _sys(ctx)
+        name = _resource_name(ctx, ctx.args[1])
+        cls = sys.classes.get(name) if isinstance(name, str) else None
+        if cls is None:
+            return 0
+        seg, off = (ctx.args[2] >> 16) & 0xFFFF, ctx.args[2] & 0xFFFF
+        mem = ctx.mem
+        mem.ww(seg, off, cls.style)
+        mem.ww(seg, off + 2, cls.wndproc[1])
+        mem.ww(seg, off + 4, cls.wndproc[0])
+        for i, v in enumerate((cls.cls_extra, cls.wnd_extra, cls.h_instance,
+                               cls.h_icon, cls.h_cursor, cls.h_background)):
+            mem.ww(seg, off + 6 + 2 * i, v)
+        mem.ww(seg, off + 18, 0)        # lpszMenuName: not read back so far —
+        mem.ww(seg, off + 20, 0)        # NULL until evidence demands the ptr
+        mem.ww(seg, off + 22, 0)
+        mem.ww(seg, off + 24, 0)
+        return 1
+
+    @api.register("USER", 403, args="str word")         # UnregisterClass(name, hInst)
+    def UnregisterClass(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        name = _resource_name(ctx, ctx.args[0])
+        cls = sys.classes.pop(name, None) if isinstance(name, str) else None
+        if cls is None:
+            return 0
+        sys.handles.remove(cls.handle)
+        return 1
+
     @api.register("USER", 6, args="word")               # PostQuitMessage(code)
     def PostQuitMessage(ctx: CallContext) -> int:
         _sys(ctx).quit_posted = ctx.args[0]

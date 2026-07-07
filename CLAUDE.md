@@ -32,17 +32,28 @@ framework from its sibling checkout at `D:\Games\DOS\dos_re` (added to `sys.path
 win16/            game-agnostic Win16 layer (candidate for promotion into dos_re):
   ne.py             NE file parser (pure, stdlib)
   loader.py         segment mapping + relocations into the dos_re VM
-  api/              KERNEL/USER/GDI/SOUND implemented as Python services
-  fpu.py            win87em/x87 interrupt service
+  api/              KERNEL/USER/GDI/SOUND + dialogs, implemented as Python services
+  dialog.py/menu.py DLGTEMPLATE + MENU resource parsers
+  dib.py/png.py/font8x8.py   graphics helpers
+  interactive.py    real-time driver (wall-clock message pacing, pause-at-boundary)
+  demo.py           record/replay the GetMessage+dialog stream (the RE baseline)
+  vmsnap.py         full-machine snapshots + game-observable digest
 ppython/          the game adapter (addresses, formats, recovered logic)
   recovered/        pure recovered game logic — never imports dos_re or win16 VM bits
   bridge/           typed views over VM memory (the ONE place offsets live)
   codecs/           native decoders for game asset formats (.PPS levels, .SET)
   probes/           throwaway observation scripts
+scripts/          play.py (interactive; --record, F9 snapshot), replay.py (headless)
 docs/ppython/     ledgers: run_status.md (journal), symbol_ledger.md, blockers.md
 tests/            pytest; every test using assets/ must skip when assets/ is missing
 assets/           the original game files (gitignored, never committed)
 ```
+
+**This is an AI-operated harness.** Only a human is needed to *play* (generate input);
+everything else is for the agent. VM stops and gaps go to the **console** (stderr) with
+CS:IP + instruction count + traceback + trace tail + API log — never trapped in the GUI.
+Evidence tooling mirrors dos_re: demos (`scripts/replay.py`) and snapshots are the
+deterministic verification baseline.
 
 ## Non-negotiables (inherited from dos_re — enforced, not aspirational)
 

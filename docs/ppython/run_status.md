@@ -1,6 +1,23 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
+- **Demos (record/replay):** `win16/demo.py` — the frame boundary is GetMessage, so a
+  demo is the exact stream of returned messages + consumed dialog events (virtual-clock
+  stamped). Record: `play.py --record FILE`, or set `services["demo_recorder"]`. Replay:
+  `python scripts/replay.py FILE [--png DIR] [--snapshot DIR]`, or set
+  `system.message_source = player.next_message` + `services["demo_player"]`. Replay is
+  bit-exact (proven) and fails loud (`DemoDivergence`/`DemoEnded`) the instant the
+  machine asks for input the demo doesn't have next. THIS IS THE VERIFICATION BASELINE
+  every future hook/native replacement must reproduce.
+- **Snapshots:** `win16/vmsnap.py` — `save_snapshot(machine, dir)` / `load_snapshot(dir,
+  create_machine)`; three files (memory.bin, state.json, system.pickle). Must be taken at
+  a message boundary (refuses if a modal dialog is open). `digest(machine)` = the
+  game-observable fingerprint (memory + CPU + window surfaces + clock + timer intervals;
+  the pump's internal timer_due schedule is deliberately excluded). In `play.py` press
+  **F9** to snapshot (pauses the CPU at its next boundary first).
+- **Console-first errors:** `play.py` prints every VM stop to stderr with CS:IP,
+  instruction count, traceback, last trace lines and API call log — the window only shows
+  a red "see console" banner. MessageBoxes are echoed to stdout. Built for AI operation.
 - **Dialog engine:** `win16/dialog.py` (DLGTEMPLATE parser) + `win16/api/dialogs.py`
   (DialogBox/EndDialog/Get-SetDlgItem*/SendDlgItemMessage/DlgDir* + Dialog/
   DialogControlState). DialogBox runs the game's real dialog proc in the VM in a
@@ -35,6 +52,29 @@
 - **Menu commands** (from the MENU resource): 1050 New(F2), 1100 Sound(F3),
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
+
+## 2026-07-07 — RE MACHINERY: demos + snapshots + console-first + clean Exit
+- Built the dos_re-style evidence layer for Win16. **Demos** (`win16/demo.py`):
+  record/replay the GetMessage stream + dialog events; replay proven bit-exact
+  (record interactive session w/ dialog → replay headless → identical digest +
+  playfield PNG) and fail-loud on divergence. **Snapshots** (`win16/vmsnap.py`):
+  memory+CPU+OS-object-graph, digest-verified roundtrip, taken only at a message
+  boundary; F9 in the player (pauses CPU at boundary via `driver.pause_at_boundary`).
+  `scripts/replay.py` is the headless replay/evidence tool. Determinism gates added
+  (3 tests): demo replay bit-exact, snapshot roundtrip bit-exact, divergence raises.
+- **Console-first per the owner + dos_re doctrine**: VM stops print to stderr with
+  CS:IP + instr count + traceback + trace tail + API log; window shows only a red
+  "see console" banner; MessageBoxes echo to stdout; `--record` announced. This is an
+  AI-operated harness — evidence goes to the console, not trapped in a GUI.
+- **Exit crash fixed** (owner report "handle 0000 is NoneType, wanted DC"): GDI ops on
+  a NULL hdc now return the API's documented failure (not a handle-table KeyError);
+  the true fail-loud path (non-zero garbage handle = OUR bug) is preserved. The Exit
+  path then needed GetClassInfo/UnregisterClass and DOS INT 21h AH=4Ch (terminate) →
+  the app now exits cleanly (HaltExecution → "app exited cleanly", window closes).
+- Digest excludes the pump's internal timer_due (unobservable scheduling detail) —
+  found via a component-by-component record/replay diff.
+- Suite: 25 (added the 3 determinism gates: demo bit-exact, snapshot roundtrip,
+  divergence-fails-loud).
 
 ## 2026-07-07 — DIALOG ENGINE: the real thing, no stubs (About/High Scores/Options/…)
 - Owner: menu items (About, High Scores, Options ▸ Mouse/Screen-set, Help) "did

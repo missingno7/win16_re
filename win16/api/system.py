@@ -105,10 +105,16 @@ class Win16System:
 
     def get_message(self):
         """What GetMessage returns: delegate to an interactive driver when one
-        is installed, else the deterministic pump."""
+        is installed, else the deterministic pump.  Every returned message
+        passes through the demo tap when recording."""
         if self.message_source is not None:
-            return self.message_source(self)
-        return self.next_message()
+            msg = self.message_source(self)
+        else:
+            msg = self.next_message()
+        recorder = self.machine.api.services.get("demo_recorder")
+        if recorder is not None:
+            recorder.message(msg)
+        return msg
 
     def next_message(self):
         """The message-pump core (GetMessage order: posted > paint > timer).

@@ -156,19 +156,49 @@ def _pump_timers(ctx: CallContext) -> None:
             sysobj.call_wndproc(win, WM_TIMER, key[1], 0)
 
 
+def _dispatch_dialog_event(ctx: CallContext, dlg: Dialog, event) -> None:
+    kind = event[0]
+    if kind == "command":
+        _ctrl_id, notify = event[1], event[2]
+        ctrl = dlg.by_id.get(_ctrl_id)
+        if ctrl is not None and ctrl.is_auto_radio:
+            dlg.set_radio(ctrl)
+        lparam = ((notify & 0xFFFF) << 16) | (ctrl.handle if ctrl else 0)
+        _call_proc(ctx, dlg, WM_COMMAND, _ctrl_id, lparam)
+    elif kind == "settext":                             # recorded edit content
+        dlg.control(event[1]).text = event[2]
+    elif kind == "close":                               # window X == Cancel
+        _call_proc(ctx, dlg, WM_COMMAND, IDCANCEL, 0)
+        if not dlg.ended:
+            dlg.ended = True
+            dlg.result = IDCANCEL
+    else:
+        raise Win16ApiGap(f"dialog event {kind!r} not understood")
+
+
 def _run_modal(ctx: CallContext, dlg: Dialog) -> int:
     sysobj = _sys(ctx)
     host = _host(ctx)
+    player = ctx.registry.services.get("demo_player")
+    recorder = ctx.registry.services.get("demo_recorder")
     if host is not None:
         host.show(dlg)
     _call_proc(ctx, dlg, WM_INITDIALOG, 0, 0)
-    if host is None:
+
+    if player is not None:
+        # Replay: consume the recorded dialog-event stream, byte for byte.
+        while not dlg.ended:
+            _dispatch_dialog_event(ctx, dlg, player.next_dialog_event(dlg.name))
+    elif host is None:
         # Headless: answer like a user pressing OK (then Cancel), same policy
         # as the auto-OK MessageBox.  Anything beyond that is a gap.
         for answer in (IDOK, IDCANCEL):
             if dlg.ended:
                 break
-            _call_proc(ctx, dlg, WM_COMMAND, answer, 0)
+            event = ("command", answer, 0)
+            if recorder is not None:
+                recorder.dialog_event(dlg.name, event)
+            _dispatch_dialog_event(ctx, dlg, event)
         if not dlg.ended:
             raise Win16ApiGap(f"dialog {dlg.name}: proc ended on neither OK nor Cancel")
     else:
@@ -180,21 +210,17 @@ def _run_modal(ctx: CallContext, dlg: Dialog) -> int:
                                       getattr(host, "now_ms", lambda: sysobj.clock_ms)())
                 _pump_timers(ctx)
                 continue
-            kind = event[0]
-            if kind == "command":
-                _ctrl_id, notify = event[1], event[2]
-                ctrl = dlg.by_id.get(_ctrl_id)
-                if ctrl is not None and ctrl.is_auto_radio:
-                    dlg.set_radio(ctrl)
-                lparam = ((notify & 0xFFFF) << 16) | (ctrl.handle if ctrl else 0)
-                _call_proc(ctx, dlg, WM_COMMAND, _ctrl_id, lparam)
-            elif kind == "close":                        # window X == Cancel
-                _call_proc(ctx, dlg, WM_COMMAND, IDCANCEL, 0)
-                if not dlg.ended:
-                    dlg.ended = True
-                    dlg.result = IDCANCEL
-            else:
-                raise Win16ApiGap(f"dialog event {kind!r} not understood")
+            # Edit widgets mirror text live; capture the final content in the
+            # demo just before each command so replay reproduces typed input.
+            if recorder is not None:
+                if event[0] == "command":
+                    for ctrl in dlg.controls:
+                        if ctrl.cls == "Edit" and ctrl.ctrl_id != 0xFFFF:
+                            recorder.dialog_event(
+                                dlg.name, ("settext", ctrl.ctrl_id, ctrl.text))
+                recorder.dialog_event(dlg.name, event)
+            _dispatch_dialog_event(ctx, dlg, event)
+    if host is not None:
         host.close(dlg)
     return dlg.result
 

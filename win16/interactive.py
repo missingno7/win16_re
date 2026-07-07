@@ -27,6 +27,9 @@ class InteractiveDriver:
         self._input: list[tuple[int, int, int, int]] = []
         self._cond = threading.Condition()
         self._t0 = time.monotonic()
+        self._pause_requested = False
+        self.paused = threading.Event()     # set while the CPU thread is
+        self._resume = threading.Event()    # parked at the message boundary
         sysobj.message_source = self._next
 
     # -- host (GUI thread) side --------------------------------------------
@@ -42,6 +45,20 @@ class InteractiveDriver:
         with self._cond:
             self.running = False
             self._cond.notify()
+        self._resume.set()                  # release a parked CPU thread
+
+    def pause_at_boundary(self, timeout: float = 3.0) -> bool:
+        """Ask the CPU thread to park at its next GetMessage boundary (the
+        quiescent point for snapshots).  Returns True once parked."""
+        self._pause_requested = True
+        with self._cond:
+            self._cond.notify()
+        return self.paused.wait(timeout)
+
+    def resume(self) -> None:
+        self._pause_requested = False
+        self.paused.clear()
+        self._resume.set()
 
     # -- CPU thread side (called inside GetMessage) ------------------------
     def _drain_input(self) -> None:
@@ -53,6 +70,10 @@ class InteractiveDriver:
 
     def _next(self, sysobj):
         while True:
+            if self._pause_requested:
+                self.paused.set()
+                self._resume.wait()
+                self._resume.clear()
             self._drain_input()
             if not self.running or sysobj.quit_posted is not None:
                 return None

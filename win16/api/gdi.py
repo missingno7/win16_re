@@ -18,7 +18,12 @@ def _sys(ctx: CallContext) -> Win16System:
     return ctx.registry.services["system"]
 
 
-def _dc_surface(sys: Win16System, hdc: int) -> Surface:
+def _dc_surface(sys: Win16System, hdc: int) -> Surface | None:
+    """The DC's target pixels; None for a NULL hdc (the caller returns the
+    API's documented failure).  A non-zero garbage handle still fails loud —
+    that would mean OUR handle table broke, not app behaviour."""
+    if hdc == 0:
+        return None
     dc = sys.handles.require(hdc, DC)
     if dc.is_memory:
         return dc.bitmap.surface
@@ -74,6 +79,8 @@ def install(api: ApiRegistry) -> None:
     @api.register("GDI", 45, args="word word")          # SelectObject(hdc, hobj)
     def SelectObject(ctx: CallContext) -> int:
         sys = _sys(ctx)
+        if ctx.args[0] == 0 or ctx.args[1] == 0:
+            return 0        # documented failure for NULL handles (real GDI)
         dc = sys.handles.require(ctx.args[0], DC)
         obj = sys.handles.get(ctx.args[1])
         if isinstance(obj, Bitmap):
@@ -109,8 +116,12 @@ def install(api: ApiRegistry) -> None:
         sys = _sys(ctx)
         hdst, x, y, w, h, hsrc, sx, sy, rop = ctx.args
         dst = _dc_surface(sys, hdst)
+        if dst is None:
+            return 0
         if hsrc:
             src = _dc_surface(sys, hsrc)
+            if src is None:
+                return 0
         elif rop in (0x00000042, 0x00FF0062):            # BLACKNESS/WHITENESS
             src = None
         else:
@@ -149,6 +160,8 @@ def install(api: ApiRegistry) -> None:
         sys = _sys(ctx)
         hdc, x, y, w, h, rop = ctx.args
         dst = _dc_surface(sys, hdc)
+        if dst is None:
+            return 0
         x, y, w, h = _signed(x), _signed(y), _signed(w), _signed(h)
         if rop == 0x00000042:                            # BLACKNESS
             _fill_rect(dst, x, y, w, h, (0, 0, 0))
@@ -165,6 +178,8 @@ def install(api: ApiRegistry) -> None:
         from win16.font8x8 import glyph_rows
         sys = _sys(ctx)
         hdc, x, y, str_ptr, count = ctx.args
+        if hdc == 0:
+            return 0
         dc = sys.handles.require(hdc, DC)
         dst = _dc_surface(sys, hdc)
         x, y = _signed(x), _signed(y)
@@ -221,6 +236,8 @@ def install(api: ApiRegistry) -> None:
         if rop != 0x00CC0020:
             raise NotImplementedError(f"StretchBlt rop {rop:#010x}")
         dst, src = _dc_surface(sys, hdst), _dc_surface(sys, hsrc)
+        if dst is None or src is None:
+            return 0
         dx, dy, dw, dh = _signed(dx), _signed(dy), _signed(dw), _signed(dh)
         sx, sy, sw, sh = _signed(sx), _signed(sy), _signed(sw), _signed(sh)
         if dw <= 0 or dh <= 0 or sw <= 0 or sh <= 0:

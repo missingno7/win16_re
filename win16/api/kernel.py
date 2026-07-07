@@ -308,8 +308,14 @@ def _dos_lseek(ctx: CallContext) -> None:
     _set_cf(ctx, False)
 
 
+def _dos_terminate(ctx: CallContext) -> None:
+    # AH=4Ch AL=exit code: the app is done — halt the machine cleanly.
+    ctx.cpu.halted = True
+
+
 DOS_SERVICES = {
     0x25: _dos_set_vector,
+    0x4C: _dos_terminate,
     0x2A: _dos_get_date,
     0x2C: _dos_get_time,
     0x30: _dos_get_version,

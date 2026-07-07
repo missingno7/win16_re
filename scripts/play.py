@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+import time
+import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -175,6 +177,9 @@ class WindowView:
         c.bind("<ButtonRelease-3>", lambda e: self._on_mouse(e, WM_RBUTTONUP, 0))
 
     def _on_key_down(self, event) -> None:
+        if event.keysym == "F9":                # harness key: take a snapshot
+            self.app.take_snapshot()
+            return
         vk = keysym_to_vk(event)
         if vk is not None:
             self.app.driver.post_input(self.win.handle, WM_KEYDOWN, vk, 0x0001)
@@ -353,7 +358,8 @@ class DialogView:
 
 
 class PlayApp:
-    def __init__(self, speed: float, scale: int) -> None:
+    def __init__(self, speed: float, scale: int,
+                 record: str | None = None) -> None:
         self.scale = scale
         self.origin_x, self.origin_y = 60, 60
         self.machine = create_machine()
@@ -361,6 +367,13 @@ class PlayApp:
         self.driver = InteractiveDriver(self.sys, speed=speed)
         self.status = "running"
         self.stopped = False
+        self.recorder = None
+        if record:
+            from win16.demo import DemoRecorder
+            self.recorder = DemoRecorder(record, self.machine.exe.path.name)
+            self.machine.api.services["demo_recorder"] = self.recorder
+            print(f"[play] recording demo to {record}", flush=True)
+        self._console_counts = {"boxes": 0}
         self.views: dict[int, WindowView] = {}
         self.dialog_views: dict[int, DialogView] = {}
         self._dialog_reqs: list[tuple] = []
@@ -383,27 +396,56 @@ class PlayApp:
 
     # -- CPU worker -------------------------------------------------------------
     def _run_cpu(self) -> None:
+        from dos_re.cpu import HaltExecution
         cpu = self.machine.cpu
         cpu.trace_enabled = False
         try:
             while self.driver.running:
                 cpu.step()
             self.status = "stopped"
-        except Win16ApiGap as exc:
-            self.status = f"VM STOPPED - unimplemented API: {exc}"
-        except Exception as exc:  # noqa: BLE001 — surface everything in the UI
+        except HaltExecution:
+            self.status = "app exited cleanly (DOS terminate)"
+            print(f"[play] {self.status}", flush=True)
+        except Exception as exc:  # noqa: BLE001 — console first, then the UI
             self.status = f"VM STOPPED - {type(exc).__name__}: {exc}"
+            print(f"\n[play] {self.status}", file=sys.stderr, flush=True)
+            print(f"[play] at CS:IP {cpu.s.cs:04X}:{cpu.s.ip:04X}, "
+                  f"instruction {cpu.instruction_count}", file=sys.stderr)
+            traceback.print_exc()
+            print("[play] last trace lines:", file=sys.stderr)
+            for line in cpu.trace[-10:]:
+                print("   ", line, file=sys.stderr)
+            for line in self.machine.api.call_log[-10:]:
+                print("    api:", line, file=sys.stderr)
         self.stopped = True
         self.driver.running = False
 
     # -- modal MessageBox bridge (CPU thread <-> GUI thread) ---------------------
     def _messagebox_blocking(self, caption: str, text: str, mtype: int) -> int:
+        print(f"[game] MessageBox: {caption!r}: {text!r}", flush=True)
         done = threading.Event()
         result = {"rc": 1}
         with self._box_lock:
             self._pending_box = (caption, text, mtype, done, result)
         done.wait(timeout=120)                  # never wedge the VM forever
         return result["rc"]
+
+    # -- snapshots (F9) -----------------------------------------------------------
+    def take_snapshot(self) -> None:
+        from win16.vmsnap import SnapshotError, save_snapshot
+        if not self.driver.pause_at_boundary():
+            print("[play] snapshot failed: CPU did not reach a message "
+                  "boundary (mid-frame or modal dialog open)", file=sys.stderr)
+            return
+        try:
+            stamp = time.strftime("%H%M%S")
+            out = Path("artifacts") / "snapshots" / f"snap_{stamp}"
+            save_snapshot(self.machine, out, note="taken from play.py (F9)")
+            print(f"[play] snapshot saved to {out}", flush=True)
+        except SnapshotError as exc:
+            print(f"[play] snapshot failed: {exc}", file=sys.stderr)
+        finally:
+            self.driver.resume()
 
     def _show_pending_box(self) -> None:
         with self._box_lock:
@@ -465,22 +507,28 @@ class PlayApp:
 
         main = next((v for v in self.views.values() if v.is_main), None)
         if main is not None:
-            skipped = self.machine.api.services.get("skipped_ui", [])
-            note = f"   [skipped: {skipped[-1][0]} {skipped[-1][1]}]" if skipped else ""
             clk = self.sys.clock_ms
-            main.status_var.set(f"{self.status}   t={clk // 1000}.{clk % 1000:03d}s{note}")
-            if self.stopped and not getattr(self, "_banner", None):
-                self._banner = tk.Label(main.top, text=self.status, bg="#c00000",
-                                        fg="white", font=("Consolas", 10, "bold"))
+            rec = f"   REC {self.recorder.records}" if self.recorder else ""
+            main.status_var.set(f"{self.status}   t={clk // 1000}.{clk % 1000:03d}s{rec}")
+            if self.stopped and "STOPPED" in self.status \
+                    and not getattr(self, "_banner", None):
+                self._banner = tk.Label(main.top, text=self.status + "  (see console)",
+                                        bg="#c00000", fg="white",
+                                        font=("Consolas", 10, "bold"))
                 self._banner.pack(fill="x")
 
-        if not self.views and self.stopped:
-            self.root.destroy()
+        if self.stopped and ("exited cleanly" in self.status or not self.views):
+            self.on_close()
             return
         self.root.after(33, self._tick)
 
     def on_close(self) -> None:
         self.driver.stop()
+        if self.recorder is not None:
+            self.recorder.close()
+            print(f"[play] demo saved: {self.recorder.path} "
+                  f"({self.recorder.records} records)", flush=True)
+            self.recorder = None
         # Release a CPU thread blocked inside a modal MessageBox.
         with self._box_lock:
             if self._pending_box is not None:
@@ -498,10 +546,12 @@ def main() -> None:
                     help="time multiplier (1.0 = real speed)")
     ap.add_argument("--scale", type=int, default=1,
                     help="integer pixel scale (e.g. 2 doubles the windows)")
+    ap.add_argument("--record", metavar="FILE", default=None,
+                    help="record a demo (message + dialog event stream) to FILE")
     args = ap.parse_args()
     if not assets_present():
         raise SystemExit("assets/PYTHON.EXE not found — put the game files in assets/")
-    PlayApp(args.speed, args.scale).run()
+    PlayApp(args.speed, args.scale, record=args.record).run()
 
 
 if __name__ == "__main__":
