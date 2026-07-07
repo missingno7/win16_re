@@ -175,6 +175,142 @@ def _make_copy_island(exit_ip: int):
     return island
 
 
+# The opaque byte-copy macro (WAP sprite/row draw): copy CX bytes from a huge
+# source pointer to a huge dest pointer, both advancing 1 byte/iter with a
+# selector bump (+8) on 16-bit offset wrap — 25 interpreted instructions per
+# byte.  Frame offsets vary per clone, so match structurally and read them
+# from the code (S1 = src-offset local, D1 = dest-offset local; selector is
+# the adjacent word at +2).
+#
+#   L: c4 5e S1        les bx,[bp+S1]          ; src ptr
+#      83 46 S1 01     add word [bp+S1],1
+#      73 05           jnb +5
+#      81 46 S1+2 08 00  add word [bp+S1+2],8  ; src selector on wrap
+#      26 8a 07        mov al,es:[bx]
+#      c4 5e D1        les bx,[bp+D1]          ; dst ptr
+#      83 46 D1 01     add word [bp+D1],1
+#      73 05           jnb +5
+#      81 46 D1+2 08 00  add word [bp+D1+2],8  ; dst selector on wrap
+#      26 88 07        mov es:[bx],al
+#      49              dec cx
+#      75 rel          jnz L
+_BYTE_COPY_LEN = 37
+
+
+def _match_byte_copy(code: bytes, p: int):
+    """If a byte-copy macro starts at code[p], return (s1, d1) as signed frame
+    offsets, else None."""
+    if p + _BYTE_COPY_LEN > len(code):
+        return None
+    b = code[p:p + _BYTE_COPY_LEN]
+    s1, d1 = b[2], b[19]
+    tmpl = [0xc4, 0x5e, s1, 0x83, 0x46, s1, 0x01, 0x73, 0x05,
+            0x81, 0x46, (s1 + 2) & 0xff, 0x08, 0x00, 0x26, 0x8a, 0x07,
+            0xc4, 0x5e, d1, 0x83, 0x46, d1, 0x01, 0x73, 0x05,
+            0x81, 0x46, (d1 + 2) & 0xff, 0x08, 0x00, 0x26, 0x88, 0x07,
+            0x49, 0x75]
+    if list(b[:36]) != tmpl:
+        return None
+    to_signed = lambda v: v - 256 if v > 127 else v
+    return to_signed(s1), to_signed(d1)
+
+
+def _make_byte_copy_island(exit_ip: int, s1: int, d1: int):
+    """Opaque byte memcpy island (CX bytes) for one clone's frame layout."""
+
+    def island(cpu) -> None:
+        s = cpu.s
+        mem = cpu.mem
+        n = s.cx & 0xFFFF
+        if n == 0:
+            n = 0x10000
+        src_off, src_sel = _frame_word(cpu, s1), _frame_word(cpu, s1 + 2)
+        dst_off, dst_sel = _frame_word(cpu, d1), _frame_word(cpu, d1 + 2)
+
+        src_lin = _huge_lin(mem, src_sel) + src_off
+        dst_lin = _huge_lin(mem, dst_sel) + dst_off
+        if src_lin < dst_lin < src_lin + n:
+            for k in range(n):
+                mem.data[dst_lin + k] = mem.data[src_lin + k]
+        else:
+            mem.data[dst_lin:dst_lin + n] = mem.data[src_lin:src_lin + n]
+
+        _set_frame_word(cpu, s1, (src_off + n) & 0xFFFF)
+        _set_frame_word(cpu, s1 + 2, (src_sel + 8 * ((src_off + n) >> 16)) & 0xFFFF)
+        _set_frame_word(cpu, d1, (dst_off + n) & 0xFFFF)
+        _set_frame_word(cpu, d1 + 2, (dst_sel + 8 * ((dst_off + n) >> 16)) & 0xFFFF)
+
+        # Registers as the last (n-1'th) iteration leaves them.
+        s.ax = (s.ax & 0xFF00) | mem.data[src_lin + n - 1]
+        s.bx = (dst_off + n - 1) & 0xFFFF
+        s.es = (dst_sel + 8 * ((dst_off + n - 1) >> 16)) & 0xFFFF
+        s.cx = 0
+        # `dec cx` (1 -> 0): ZF/PF set, others clear; CF from the prior pointer
+        # add is 0 for heap selectors (no 16-bit overflow).
+        s.flags = (s.flags & ~ARITH) | ZF | PF
+        s.ip = exit_ip
+
+    return island
+
+
+# The huge-pointer byte-FILL macro (WAP RLE run fill): write a constant byte
+# CX times to a huge dest pointer advancing 1/iter with a selector bump on
+# wrap.  Distinct from the recompute-per-byte fill above (which rebuilds the
+# selector from a 32-bit offset); this one walks a huge pointer like the
+# byte-copy.  Frame offsets vary per clone (D2 = value local, D1 = dest local).
+#
+#   L: 8a 46 D2        mov al,[bp+D2]          ; constant fill value
+#      c4 5e D1        les bx,[bp+D1]          ; dest ptr
+#      83 46 D1 01     add word [bp+D1],1
+#      73 05           jnb +5
+#      81 46 D1+2 08 00  add word [bp+D1+2],8  ; dest selector on wrap
+#      26 88 07        mov es:[bx],al
+#      49              dec cx
+#      75 rel          jnz L
+_BYTE_FILL_LEN = 23
+
+
+def _match_byte_fill(code: bytes, p: int):
+    if p + _BYTE_FILL_LEN > len(code):
+        return None
+    b = code[p:p + _BYTE_FILL_LEN]
+    d2, d1 = b[2], b[5]
+    tmpl = [0x8a, 0x46, d2, 0xc4, 0x5e, d1, 0x83, 0x46, d1, 0x01, 0x73, 0x05,
+            0x81, 0x46, (d1 + 2) & 0xff, 0x08, 0x00, 0x26, 0x88, 0x07,
+            0x49, 0x75]
+    if list(b[:22]) != tmpl:
+        return None
+    to_signed = lambda v: v - 256 if v > 127 else v
+    return to_signed(d2), to_signed(d1)
+
+
+def _make_byte_fill_island(exit_ip: int, d2: int, d1: int):
+    """Huge-pointer byte memset island (CX bytes of a constant)."""
+
+    def island(cpu) -> None:
+        s = cpu.s
+        mem = cpu.mem
+        n = s.cx & 0xFFFF
+        if n == 0:
+            n = 0x10000
+        value = mem.rb(s.ss, (s.bp + d2) & 0xFFFF)
+        dst_off, dst_sel = _frame_word(cpu, d1), _frame_word(cpu, d1 + 2)
+        dst_lin = _huge_lin(mem, dst_sel) + dst_off
+        mem.data[dst_lin:dst_lin + n] = bytes([value]) * n
+
+        _set_frame_word(cpu, d1, (dst_off + n) & 0xFFFF)
+        _set_frame_word(cpu, d1 + 2, (dst_sel + 8 * ((dst_off + n) >> 16)) & 0xFFFF)
+
+        s.ax = (s.ax & 0xFF00) | value
+        s.bx = (dst_off + n - 1) & 0xFFFF
+        s.es = (dst_sel + 8 * ((dst_off + n - 1) >> 16)) & 0xFFFF
+        s.cx = 0
+        s.flags = (s.flags & ~ARITH) | ZF | PF
+        s.ip = exit_ip
+
+    return island
+
+
 def install(machine) -> int:
     """Scan the code segment for every clone of the loop bodies and hook each
     at its loop head.  Returns the number of islands installed."""
@@ -193,7 +329,30 @@ def install(machine) -> int:
             cpu.hook_names[(cs, pos)] = f"{name}@{pos:04X}"
             count += 1
             pos = code.find(body, pos + 1)
-    if count < 3:
+
+    # Structurally-matched byte-copy clones (frame offsets vary per clone).
+    for pos in range(len(code) - _BYTE_COPY_LEN):
+        m = _match_byte_copy(code, pos)
+        if m is None:
+            continue
+        s1, d1 = m
+        cpu.replacement_hooks[(cs, pos)] = _make_byte_copy_island(
+            pos + _BYTE_COPY_LEN, s1, d1)
+        cpu.hook_names[(cs, pos)] = f"wap_byte_copy@{pos:04X}"
+        count += 1
+
+    # Structurally-matched huge-pointer byte-fill clones.
+    for pos in range(len(code) - _BYTE_FILL_LEN):
+        m = _match_byte_fill(code, pos)
+        if m is None:
+            continue
+        d2, d1 = m
+        cpu.replacement_hooks[(cs, pos)] = _make_byte_fill_island(
+            pos + _BYTE_FILL_LEN, d2, d1)
+        cpu.hook_names[(cs, pos)] = f"wap_byte_fill@{pos:04X}"
+        count += 1
+
+    if count < 5:
         raise AssertionError(
             f"microman islands: expected the WAP loop families in segment "
             f"{CODE_SEG_INDEX}, found only {count} clone(s) — wrong binary?")

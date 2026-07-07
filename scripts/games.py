@@ -33,3 +33,19 @@ def game_exe(name: str) -> Path:
 
 def game_winflags(name: str) -> int:
     return GAMES[name][1]
+
+
+def install_game_hooks(name: str, machine) -> int:
+    """Install a game's lifted-island hooks if it ships a package with them.
+
+    Each game with recovered hot-path hooks is its own package (e.g.
+    `microman/`) exposing `runtime.install_hooks(machine)`.  Games without a
+    package (or without hooks) install nothing.  Returns the count installed.
+    """
+    import importlib
+    try:
+        runtime = importlib.import_module(f"{name}.runtime")
+    except ModuleNotFoundError:
+        return 0
+    installer = getattr(runtime, "install_hooks", None)
+    return installer(machine) if installer is not None else 0

@@ -1,4 +1,4 @@
-"""The microman lifted islands (gamehooks/microman.py) — the A/B oracle gate.
+"""The microman lifted islands (microman/hooks.py) — the A/B oracle gate.
 
 Two machines run the same deterministic headless boot side by side: one pure
 ASM, one with the WAP fill/copy islands hooked.  At every checkpoint the
@@ -6,23 +6,12 @@ window pixels must be IDENTICAL — the hook's value is byte-exact speed, and
 this gate is what makes it a recovery instead of an approximation.
 """
 import hashlib
-import sys
-from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+from microman import hooks, runtime
 
-import ppython._env  # noqa: E402,F401
-
-from gamehooks import install_game_hooks  # noqa: E402
-from scripts.games import game_exe, game_winflags  # noqa: E402
-from win16.app import create_machine  # noqa: E402
-
-MICROMAN = game_exe("microman")
-
-pytestmark = pytest.mark.skipif(not MICROMAN.exists(),
+pytestmark = pytest.mark.skipif(not runtime.assets_present(),
                                 reason="microman assets not present")
 
 # 20 batches reaches the first WAP page-transition animation (~batch 13+),
@@ -33,10 +22,25 @@ BATCH_STEPS = 500
 
 
 def _drive(hooked: bool):
-    machine = create_machine(MICROMAN, winflags=game_winflags("microman"))
+    machine = runtime.create_machine()
     machine.cpu.trace_enabled = False
+    fires = {}
     if hooked:
-        assert install_game_hooks("microman", machine) == 17
+        assert runtime.install_hooks(machine) == 19
+        # Count each island FAMILY's firings so the test proves every shape is
+        # actually exercised (not just installed).
+        cs = machine.seg_bases[__import__("microman").hooks.CODE_SEG_INDEX]
+        for (hcs, ip), name in list(machine.cpu.hook_names.items()):
+            if hcs != cs:
+                continue
+            family = name.split("@")[0]
+            orig = machine.cpu.replacement_hooks[(hcs, ip)]
+
+            def wrap(cpu, _orig=orig, _fam=family):
+                fires[_fam] = fires.get(_fam, 0) + 1
+                return _orig(cpu)
+
+            machine.cpu.replacement_hooks[(hcs, ip)] = wrap
     sysobj = machine.api.services["system"]
     hashes = []
     for _ in range(BATCHES):
@@ -45,12 +49,12 @@ def _drive(hooked: bool):
                     if w.wndclass.name == "MicroManClass"), None)
         pixels = bytes(win.surface.pixels) if win is not None else b""
         hashes.append(hashlib.sha256(pixels).hexdigest())
-    return machine, hashes
+    return machine, hashes, fires
 
 
 def test_islands_are_pixel_exact_and_engaged():
-    plain, plain_hashes = _drive(hooked=False)
-    hooked, hooked_hashes = _drive(hooked=True)
+    plain, plain_hashes, _ = _drive(hooked=False)
+    hooked, hooked_hashes, fires = _drive(hooked=True)
 
     # Byte-exact rendering at every checkpoint.
     assert hooked_hashes == plain_hashes
@@ -62,13 +66,18 @@ def test_islands_are_pixel_exact_and_engaged():
         f"hooks never engaged: {hooked.cpu.instruction_count} vs "
         f"{plain.cpu.instruction_count}")
 
+    # Every island FAMILY fired at least once in the title window (so the
+    # byte-exact comparison above actually covers each shape).
+    for family in ("wap_fill_asc", "wap_fill_desc", "wap_huge_copy",
+                   "wap_byte_copy", "wap_byte_fill"):
+        assert fires.get(family, 0) > 0, f"{family} never fired"
+
 
 def test_install_refuses_wrong_code():
     """A binary whose code segment lacks the WAP loop bodies must be refused
     (an island landing on different code corrupts silently)."""
-    machine = create_machine(MICROMAN, winflags=game_winflags("microman"))
-    from gamehooks import microman as mm
-    cs = machine.seg_bases[mm.CODE_SEG_INDEX]
+    machine = runtime.create_machine()
+    cs = machine.seg_bases[hooks.CODE_SEG_INDEX]
     machine.mem.data[cs << 4:(cs << 4) + 0x10000] = bytes(0x10000)
     with pytest.raises(AssertionError):
-        mm.install(machine)
+        hooks.install(machine)

@@ -5,24 +5,11 @@ NE (different modules incl. MMSYSTEM, real 80186 ENTER frames, the _l* file
 API, palette-mode device queries) and runs deep into its own code, reporting a
 clean named frontier rather than crashing.
 """
-import sys
-from pathlib import Path
-
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+from microman import runtime
 
-import ppython._env  # noqa: E402,F401
-
-from scripts.games import game_exe, game_winflags  # noqa: E402
-from win16.api.core import Win16ApiGap  # noqa: E402
-from win16.api.system import Win16System  # noqa: E402
-from win16.app import create_machine  # noqa: E402
-
-MICROMAN = game_exe("microman")
-
-pytestmark = pytest.mark.skipif(not MICROMAN.exists(),
+pytestmark = pytest.mark.skipif(not runtime.assets_present(),
                                 reason="microman assets not present")
 
 
@@ -35,7 +22,7 @@ def test_microman_boots_and_renders():
     (InvalidateRect every frame) it never goes idle, so bound the drive on the
     outcome — the first non-blank paint of its window — not on an instruction
     budget that would otherwise grind through millions of frames."""
-    machine = create_machine(MICROMAN, winflags=game_winflags("microman"))
+    machine = runtime.create_machine()
     machine.cpu.trace_enabled = False
     sysm = machine.api.services["system"]
 

@@ -45,7 +45,14 @@ def digest(machine) -> str:
     return h.hexdigest()
 
 
-def save_snapshot(machine, out_dir: str | Path, *, note: str = "") -> Path:
+def snapshot_game(snap_dir: str | Path) -> str:
+    """The game name recorded in a snapshot (empty if pre-v3 / unknown)."""
+    meta = json.loads((Path(snap_dir) / "state.json").read_text())
+    return meta.get("game", "")
+
+
+def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
+                  game: str = "") -> Path:
     from win16.api.dialogs import Dialog
     out = Path(out_dir)
     sysobj = machine.api.services["system"]
@@ -57,8 +64,9 @@ def save_snapshot(machine, out_dir: str | Path, *, note: str = "") -> Path:
 
     meta = {
         "kind": "win16-snapshot",
-        "version": 2,
+        "version": 3,
         "note": note,
+        "game": game,                   # canonical game name (scripts/games.py)
         "exe": machine.exe.path.name,
         "cpu": asdict(machine.cpu.s),
         "instruction_count": machine.cpu.instruction_count,

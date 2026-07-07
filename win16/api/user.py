@@ -568,9 +568,13 @@ def install(api: ApiRegistry) -> None:
         mtype = ctx.args[3]
         ctx.registry.services.setdefault("messagebox_log", []).append(
             (sys.clock_ms, caption, text, mtype))
+        from win16.msgbox import default_result
         host = ctx.registry.services.get("messagebox_host")
         if host is None:
-            return 1                # headless: IDOK — modal UI auto-dismissed
+            # Headless: auto-dismiss on the DEFAULT button (IDOK / IDYES / ...)
+            # so the game takes the affirmative path a bare "OK" stub used to
+            # deny (e.g. microman's "Start a new game?" MB_YESNO).
+            return default_result(mtype)
         # Present the box (non-blocking) and run a real modal loop: keep
         # pumping WM_PAINT to the game windows so a frame drawn offscreen just
         # before this box (e.g. the crashed-snake frame) is shown while the box

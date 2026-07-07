@@ -83,6 +83,36 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — microman package + MessageBox Yes/No + snapshot game-name + 2 more islands
+- **MessageBox button sets** (owner: Restart gave only OK, treated as No).  `win16/
+  msgbox.py` maps `mtype & 0x0F` to the real button set + IDs (MB_OK/OKCANCEL/
+  ABORTRETRYIGNORE/YESNOCANCEL/YESNO/RETRYCANCEL → IDOK..IDNO).  The API returns the
+  DEFAULT (affirmative) headless (was always IDOK=1, which the game read as "not Yes");
+  play.py's modal renders the actual buttons and reports the chosen ID.  microman's
+  Restart is MB_YESNO|ICONQUESTION (0x24) → Yes/No returning 6/7.  Pinned:
+  `tests/test_msgbox.py`.
+- **microman is now its own package** (mirrors ppython/): `microman/` = `_env`,
+  `runtime` (EXE path, winflags, create_machine, install_hooks, GAME_NAME), `hooks`
+  (moved from gamehooks/), `recovered/`, `probes/`, `tests/`.  gamehooks/ retired; the
+  generic loader is `scripts/games.install_game_hooks(name, machine)` → imports
+  `<name>.runtime.install_hooks`.  Every game-specific test moved under
+  `microman/tests/`.
+- **Snapshots carry the game name** (format v3: `game` field).  `play.py --resume DIR`
+  now works WITHOUT `--game` — it reads the game from the snapshot (falls back to
+  matching the recorded EXE name for pre-v3 snapshots).  `win16.vmsnap.snapshot_game`.
+- **Two more lifted islands** (owner: profile the snapshot, hook the costliest).  Fine
+  PC-sampling of gameplay from snap_220905 found two unhooked huge-pointer byte loops
+  the earlier fill/copy signatures missed (different frame layout, matched
+  STRUCTURALLY now, reading the frame offsets from the code):
+  - `wap_byte_fill` (huge-ptr memset, value/dst walk 1 byte/iter) — the hottest idle
+    loop; fires ~24k times in the title alone.  **7.1 → 8.6 fps (+21%)** idle.
+  - `wap_byte_copy` (huge-ptr memcpy) — the opaque sprite-row draw; ~13k fires under
+    input, −26% instructions during action.
+  Both verified byte-exact by the A/B pixel gate (now asserts EACH of the 5 island
+  families fires).  19 islands total.  Remaining gameplay hot spot: the `6E` sprite
+  decoder (per-pixel clip + transparency branches) — not a single slice, the harder
+  next target.
+
 ## 2026-07-07 — snapshot resume from play.py + SND_MEMORY SFX + islands scan-all
 - **Resume a session from a snapshot** (owner asked, to profile gameplay itself):
   `play.py --resume <snap_dir>` boots straight from an F9 snapshot instead of cold.

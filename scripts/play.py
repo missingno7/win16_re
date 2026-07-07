@@ -492,11 +492,12 @@ class ModalBox:
     loop polling `done`) and the GUI thread (which shows it and sets `done`)."""
 
     def __init__(self, caption: str, text: str, mtype: int) -> None:
+        from win16.msgbox import close_result
         self.caption = caption
         self.text = text
         self.mtype = mtype
         self.done = threading.Event()
-        self.result = 1                          # IDOK
+        self.result = close_result(mtype)        # if closed without choosing
 
 
 class MessageBoxView:
@@ -521,13 +522,27 @@ class MessageBoxView:
         tk.Label(body, bitmap=bmp, bg=DIALOG_BG).pack(side="left", padx=(0, 14))
         tk.Label(body, text=box.text, bg=DIALOG_BG, justify="left",
                  font=("MS Sans Serif", 9)).pack(side="left")
-        btn = tk.Button(self.top, text="OK", width=10, default="active",
-                        command=self._ok)
-        btn.pack(pady=(0, 12))
-        btn.focus_set()
-        self.top.bind("<Return>", lambda _e: self._ok())
-        self.top.bind("<Escape>", lambda _e: self._ok())
-        self.top.protocol("WM_DELETE_WINDOW", self._ok)
+
+        # Render the button set the MessageBox type asks for (OK / Yes-No /
+        # Retry-Cancel / ...), each reporting its real Win16 ID.
+        from win16.msgbox import buttons, close_result
+        row = tk.Frame(self.top, bg=DIALOG_BG)
+        row.pack(pady=(0, 12))
+        first = None
+        for label, result_id in buttons(box.mtype):
+            b = tk.Button(row, text=label, width=8,
+                          command=lambda r=result_id: self._choose(r))
+            b.pack(side="left", padx=4)
+            if first is None:
+                first = b
+        if first is not None:
+            first.configure(default="active")
+            first.focus_set()
+        affirmative = buttons(box.mtype)[0][1]
+        cancel = close_result(box.mtype)
+        self.top.bind("<Return>", lambda _e: self._choose(affirmative))
+        self.top.bind("<Escape>", lambda _e: self._choose(cancel))
+        self.top.protocol("WM_DELETE_WINDOW", lambda: self._choose(cancel))
 
         self.top.update_idletasks()
         w, h = self.top.winfo_reqwidth(), self.top.winfo_reqheight()
@@ -546,8 +561,8 @@ class MessageBoxView:
         except tk.TclError:
             pass
 
-    def _ok(self) -> None:
-        self.box.result = 1                      # IDOK
+    def _choose(self, result_id: int) -> None:
+        self.box.result = result_id
         self.box.done.set()
 
     def destroy(self) -> None:
@@ -565,6 +580,7 @@ class PlayApp:
                  game_name: str = "", hooks: bool = True,
                  resume: str | None = None) -> None:
         self.scale = scale
+        self.game_name = game_name
         self.origin_x, self.origin_y = 60, 60
         if resume:
             from win16.vmsnap import load_snapshot
@@ -575,7 +591,7 @@ class PlayApp:
         else:
             self.machine = create_machine(exe_path, winflags=winflags)
         if hooks and game_name:
-            from gamehooks import install_game_hooks
+            from scripts.games import install_game_hooks
             n = install_game_hooks(game_name, self.machine)
             if n:
                 print(f"[play] {n} game hook(s) installed for {game_name} "
@@ -680,7 +696,8 @@ class PlayApp:
         try:
             stamp = time.strftime("%H%M%S")
             out = Path("artifacts") / "snapshots" / f"snap_{stamp}"
-            save_snapshot(self.machine, out, note="taken from play.py (F9)")
+            save_snapshot(self.machine, out, note="taken from play.py (F9)",
+                          game=self.game_name)
             print(f"[play] snapshot saved to {out}", flush=True)
         except SnapshotError as exc:
             print(f"[play] snapshot failed: {exc}", file=sys.stderr)
@@ -708,7 +725,8 @@ class PlayApp:
         try:
             save_snapshot(self.machine, out,
                           note=f"inspection snapshot at MessageBox {tag!r} "
-                               "(mid-modal; not resumable)")
+                               "(mid-modal; not resumable)",
+                          game=self.game_name)
             print(f"[play] inspection snapshot at {tag!r} box -> {out}\n"
                   f"       memory+CPU+pixels valid; load with "
                   f"win16.vmsnap.load_snapshot for inspection.", flush=True)
@@ -818,13 +836,33 @@ def main() -> None:
                     help="start from a snapshot directory (taken with F9) "
                          "instead of a cold boot — exact same state")
     args = ap.parse_args()
-    exe = game_exe(args.game)
+    game = args.game
+    # A snapshot records its own game — resuming one auto-selects it, so
+    # `--resume DIR` alone works without also repeating `--game`.
+    if args.resume:
+        from win16.vmsnap import snapshot_game
+        snap_game = snapshot_game(args.resume)
+        if not snap_game:
+            # Pre-v3 snapshot (no game field): match its recorded EXE name
+            # against the registry so old snapshots still auto-select.
+            import json
+            exe_name = json.loads(
+                (Path(args.resume) / "state.json").read_text()).get("exe", "")
+            snap_game = next((n for n in GAMES
+                              if game_exe(n).name.upper() == exe_name.upper()), "")
+        if snap_game and "--game" not in sys.argv:
+            game = snap_game
+        elif snap_game and snap_game != game:
+            raise SystemExit(
+                f"snapshot is for game {snap_game!r} but --game {game!r} was "
+                f"given; omit --game or pass --game {snap_game}")
+    exe = game_exe(game)
     if not exe.exists():
         raise SystemExit(f"{exe} not found — put the game files under assets/")
-    PlayApp(exe, game_winflags(args.game), args.speed, args.scale,
+    PlayApp(exe, game_winflags(game), args.speed, args.scale,
             record=args.record, mute=args.mute,
             snapshot_on_box=args.snapshot_on_box,
-            game_name=args.game, hooks=not args.no_hooks,
+            game_name=game, hooks=not args.no_hooks,
             resume=args.resume).run()
 
 
