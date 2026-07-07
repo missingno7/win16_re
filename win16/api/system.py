@@ -103,6 +103,27 @@ class Win16System:
     def post_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> None:
         self.msg_queue.append((hwnd, msg, wparam, lparam, self.clock_ms, 0))
 
+    def pump_modal(self, *, paint: bool = True, timers: bool = False) -> bool:
+        """Dispatch one pending WM_PAINT (and optionally a due WM_TIMER) to a
+        window's WndProc — what a real modal loop (MessageBox/DialogBox) does so
+        other windows keep repainting/animating while it is up.  Returns True if
+        it dispatched anything.  Paint is what lets the game show a frame it drew
+        offscreen right before the modal (e.g. the crashed-snake frame)."""
+        if paint:
+            for win in self.windows:
+                if win.visible and win.dirty:
+                    self.call_wndproc(win, 0x000F, 0, 0)     # WM_PAINT
+                    return True
+        if timers and self.timer_due:
+            key, due = min(self.timer_due.items(), key=lambda kv: kv[1])
+            if self.clock_ms >= due:
+                self.timer_due[key] = self.clock_ms + self.timers[key]
+                win = self.handles.get(key[0])
+                if win is not None:
+                    self.call_wndproc(win, 0x0113, key[1], 0)  # WM_TIMER
+                    return True
+        return False
+
     def get_message(self):
         """What GetMessage returns: delegate to an interactive driver when one
         is installed, else the deterministic pump.  Every returned message

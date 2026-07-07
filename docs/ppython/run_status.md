@@ -61,6 +61,26 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — the REAL crash-frame fix: MessageBox must pump WM_PAINT
+- The earlier _flush_windows fix was necessary but not sufficient. Root cause found
+  by tracing blits: the game draws the crash head **PPHEADX to the OFFSCREEN
+  playfield** (last blit before the box, at the head cell advanced into the wall),
+  calls InvalidateRect (window goes dirty), then MessageBox — it never blits the
+  viewport to the window itself. Real Windows' MessageBox runs a message loop that
+  dispatches WM_PAINT to other windows, so the game repaints the crash head from
+  its offscreen buffer WHILE the box is up. Ours just blocked. Proven: at the box
+  the window is dirty and dispatching one WM_PAINT turns 0→73 center-red pixels (the
+  crash head appears, advanced into the wall — matches the owner's screenshot).
+- Fix: `Win16System.pump_modal(paint, timers)` dispatches a pending WM_PAINT/timer
+  to a window's WndProc. MessageBox (user.py) now runs a real modal loop:
+  present a NON-blocking box (play.py `ModalBox`+`MessageBoxView`, custom Win3.1
+  box, not tk_messagebox — a native blocking box would freeze the GUI tick and
+  hide the repaint) and pump WM_PAINT until the user answers. Dialog engine routed
+  through the same pump_modal (paint+timers) for consistency. Paint-only for boxes
+  keeps the crash frame frozen behind the box (no re-entrant snake movement).
+- snapshot-on-box + F9 preserved; on_close releases parked box loops.
+- Suite: 32.
+
 ## 2026-07-07 — crash-frame regression fixed + snapshot-on-event
 - Owner: the crashed-snake frame stopped showing after the flicker fix. Root cause
   confirmed by instrumenting: the game DOES draw the crash frame before the

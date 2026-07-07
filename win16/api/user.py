@@ -545,14 +545,21 @@ def install(api: ApiRegistry) -> None:
         sys = _sys(ctx)
         text = ctx.read_string(ctx.args[1]).decode("latin-1") if ctx.args[1] else ""
         caption = ctx.read_string(ctx.args[2]).decode("latin-1") if ctx.args[2] else ""
+        mtype = ctx.args[3]
         ctx.registry.services.setdefault("messagebox_log", []).append(
-            (sys.clock_ms, caption, text, ctx.args[3]))
-        ui = ctx.registry.services.get("messagebox_ui")
-        if ui is not None:
-            # An interactive host shows the real modal box; this blocks the
-            # CPU thread until the user answers — faithful modal semantics.
-            return ui(caption, text, ctx.args[3]) & 0xFFFF
-        return 1                    # headless: IDOK — modal UI auto-dismissed
+            (sys.clock_ms, caption, text, mtype))
+        host = ctx.registry.services.get("messagebox_host")
+        if host is None:
+            return 1                # headless: IDOK — modal UI auto-dismissed
+        # Present the box (non-blocking) and run a real modal loop: keep
+        # pumping WM_PAINT to the game windows so a frame drawn offscreen just
+        # before this box (e.g. the crashed-snake frame) is shown while the box
+        # is up — exactly what the Windows MessageBox modal loop does.
+        box = host.present_box(caption, text, mtype)
+        while not box.done.is_set():
+            if not sys.pump_modal(paint=True):
+                box.done.wait(0.01)
+        return box.result & 0xFFFF
 
     @api.register("USER", 171, args="word str word long")
     def WinHelp(ctx: CallContext) -> int:                # (hwnd, file, cmd, data)

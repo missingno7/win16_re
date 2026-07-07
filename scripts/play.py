@@ -29,7 +29,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import messagebox as tk_messagebox
 from tkinter import ttk
 
 from PIL import Image, ImageTk
@@ -439,6 +438,77 @@ class DialogView:
             pass
 
 
+class ModalBox:
+    """A MessageBox request shared between the CPU thread (which pumps a modal
+    loop polling `done`) and the GUI thread (which shows it and sets `done`)."""
+
+    def __init__(self, caption: str, text: str, mtype: int) -> None:
+        self.caption = caption
+        self.text = text
+        self.mtype = mtype
+        self.done = threading.Event()
+        self.result = 1                          # IDOK
+
+
+class MessageBoxView:
+    """A non-blocking Win-3.1-style message box (so the GUI keeps ticking and
+    rendering the game frame behind it while the CPU pumps WM_PAINT)."""
+
+    TK_BITMAP = {0x30: "warning", 0x10: "error", 0x20: "question", 0x40: "info"}
+
+    def __init__(self, app: "PlayApp", box: ModalBox) -> None:
+        self.app = app
+        self.box = box
+        parent_view = next((v for v in app.views.values() if v.is_main), None)
+        parent_top = parent_view.top if parent_view else app.root
+        self.top = tk.Toplevel(parent_top)
+        self.top.title(box.caption or "")
+        self.top.resizable(False, False)
+        self.top.configure(bg=DIALOG_BG)
+
+        body = tk.Frame(self.top, bg=DIALOG_BG)
+        body.pack(padx=16, pady=14)
+        bmp = self.TK_BITMAP.get(box.mtype & 0xF0, "info")
+        tk.Label(body, bitmap=bmp, bg=DIALOG_BG).pack(side="left", padx=(0, 14))
+        tk.Label(body, text=box.text, bg=DIALOG_BG, justify="left",
+                 font=("MS Sans Serif", 9)).pack(side="left")
+        btn = tk.Button(self.top, text="OK", width=10, default="active",
+                        command=self._ok)
+        btn.pack(pady=(0, 12))
+        btn.focus_set()
+        self.top.bind("<Return>", lambda _e: self._ok())
+        self.top.bind("<Escape>", lambda _e: self._ok())
+        self.top.protocol("WM_DELETE_WINDOW", self._ok)
+
+        self.top.update_idletasks()
+        w, h = self.top.winfo_reqwidth(), self.top.winfo_reqheight()
+        if parent_view is not None:
+            px, py = parent_top.winfo_rootx(), parent_top.winfo_rooty()
+            pw, ph = parent_top.winfo_width(), parent_top.winfo_height()
+            x, y = px + max((pw - w) // 2, 0), py + max((ph - h) // 3, 0)
+        else:
+            x = y = 120
+        self.top.geometry(f"+{x}+{y}")
+        self.top.transient(parent_top)
+        self.top.lift()
+        try:
+            self.top.grab_set()
+            self.top.focus_force()
+        except tk.TclError:
+            pass
+
+    def _ok(self) -> None:
+        self.box.result = 1                      # IDOK
+        self.box.done.set()
+
+    def destroy(self) -> None:
+        try:
+            self.top.grab_release()
+            self.top.destroy()
+        except tk.TclError:
+            pass
+
+
 class PlayApp:
     def __init__(self, speed: float, scale: int,
                  record: str | None = None, mute: bool = False,
@@ -464,20 +534,20 @@ class PlayApp:
             from win16.audio import SquareWaveBackend
             self.audio = SquareWaveBackend()
             self.machine.api.services["sound_backend"] = self.audio
-        self._console_counts = {"boxes": 0}
         self.views: dict[int, WindowView] = {}
         self.dialog_views: dict[int, DialogView] = {}
         self._dialog_reqs: list[tuple] = []
         self._dialog_lock = threading.Lock()
-        self._pending_box: tuple | None = None
+        self._box_reqs: list[ModalBox] = []
         self._box_lock = threading.Lock()
+        self.box_view: "MessageBoxView | None" = None
 
         self.root = tk.Tk()
         self.root.withdraw()                    # game windows are the UI
 
-        # Real modal MessageBox service: the CPU thread blocks here until the
-        # GUI thread shows the box and the user dismisses it.
-        self.machine.api.services["messagebox_ui"] = self._messagebox_blocking
+        # Modal MessageBox host: the CPU thread's MessageBox runs a pumping
+        # modal loop and only reads box.done — the GUI shows a non-blocking box.
+        self.machine.api.services["messagebox_host"] = self
         # Dialog engine presentation host (called from the CPU thread).
         self.machine.api.services["dialog_ui"] = self
 
@@ -512,14 +582,29 @@ class PlayApp:
         self.driver.running = False
 
     # -- modal MessageBox bridge (CPU thread <-> GUI thread) ---------------------
-    def _messagebox_blocking(self, caption: str, text: str, mtype: int) -> int:
+    def present_box(self, caption: str, text: str, mtype: int) -> "ModalBox":
+        """Called from the CPU thread's MessageBox modal loop.  Queues a
+        non-blocking box for the GUI to show and returns it; the CPU loop pumps
+        WM_PAINT and polls box.done."""
         print(f"[game] MessageBox: {caption!r}: {text!r}", flush=True)
-        done = threading.Event()
-        result = {"rc": 1}
+        box = ModalBox(caption, text, mtype)
         with self._box_lock:
-            self._pending_box = (caption, text, mtype, done, result)
-        done.wait(timeout=120)                  # never wedge the VM forever
-        return result["rc"]
+            self._box_reqs.append(box)
+        return box
+
+    def _service_box(self) -> None:
+        with self._box_lock:
+            reqs, self._box_reqs = self._box_reqs, []
+        for box in reqs:                        # one modal at a time in practice
+            self.box_view = MessageBoxView(self, box)
+            if self.snapshot_on_box and (self.snapshot_on_box in box.caption.lower()
+                                         or self.snapshot_on_box in box.text.lower()):
+                self._flush_windows()
+                self._snapshot_inspection(
+                    "".join(c for c in box.caption if c.isalnum())[:16] or "box")
+        if self.box_view is not None and self.box_view.box.done.is_set():
+            self.box_view.destroy()
+            self.box_view = None
 
     # -- snapshots (F9) -----------------------------------------------------------
     def take_snapshot(self) -> None:
@@ -566,28 +651,6 @@ class PlayApp:
         except SnapshotError as exc:
             print(f"[play] snapshot-on-box failed: {exc}", file=sys.stderr)
 
-    def _show_pending_box(self) -> None:
-        with self._box_lock:
-            pending, self._pending_box = self._pending_box, None
-        if pending is None:
-            return
-        caption, text, mtype, done, result = pending
-        # Flush the crash/last frame to screen BEFORE the modal blocks ticks.
-        self._flush_windows()
-        if self.snapshot_on_box and (self.snapshot_on_box in caption.lower()
-                                     or self.snapshot_on_box in text.lower()):
-            self._snapshot_inspection("".join(c for c in caption if c.isalnum())[:16]
-                                      or "box")
-        icon = mtype & 0xF0
-        if icon == 0x30:                        # MB_ICONEXCLAMATION
-            tk_messagebox.showwarning(caption, text)
-        elif icon == 0x10:                      # MB_ICONHAND
-            tk_messagebox.showerror(caption, text)
-        else:
-            tk_messagebox.showinfo(caption, text)
-        result["rc"] = 1                        # IDOK (only OK boxes observed)
-        done.set()
-
     # -- dialog host (called from the CPU thread) --------------------------------
     def show(self, dlg) -> None:
         with self._dialog_lock:
@@ -620,6 +683,7 @@ class PlayApp:
     # -- main tick ---------------------------------------------------------------
     def _tick(self) -> None:
         self._service_dialogs()
+        self._service_box()
         live = {w.handle: w for w in self.sys.windows if w.visible}
         for handle in [h for h in self.views if h not in live]:
             self.views.pop(handle).destroy()
@@ -628,8 +692,6 @@ class PlayApp:
                 self.views[handle] = WindowView(self, win)
         for view in self.views.values():
             view.sync()
-
-        self._show_pending_box()
 
         main = next((v for v in self.views.values() if v.is_main), None)
         if main is not None:
@@ -658,11 +720,13 @@ class PlayApp:
             print(f"[play] demo saved: {self.recorder.path} "
                   f"({self.recorder.records} records)", flush=True)
             self.recorder = None
-        # Release a CPU thread blocked inside a modal MessageBox.
+        # Release a CPU thread parked in a modal MessageBox loop.
         with self._box_lock:
-            if self._pending_box is not None:
-                self._pending_box[3].set()
-                self._pending_box = None
+            for box in self._box_reqs:
+                box.done.set()
+            self._box_reqs.clear()
+        if self.box_view is not None:
+            self.box_view.box.done.set()
         self.root.after(150, self.root.destroy)
 
     def run(self) -> None:

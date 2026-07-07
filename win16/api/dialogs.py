@@ -142,18 +142,13 @@ def _call_proc(ctx: CallContext, dlg: Dialog, msg: int, wparam: int,
 
 
 def _pump_timers(ctx: CallContext) -> None:
-    """Real modal loops keep dispatching WM_TIMER to other windows; without
-    this the game (music, animation) would freeze under an open dialog."""
+    """Real modal loops keep dispatching WM_PAINT + WM_TIMER to other windows;
+    without this the game (repaints, music, animation) would freeze under an
+    open dialog."""
     sysobj = _sys(ctx)
-    if sysobj.message_source is None or not sysobj.timer_due:
+    if sysobj.message_source is None:
         return
-    now = sysobj.clock_ms
-    key, due = min(sysobj.timer_due.items(), key=lambda kv: kv[1])
-    if now >= due:
-        sysobj.timer_due[key] = now + sysobj.timers[key]
-        win = sysobj.handles.get(key[0])
-        if win is not None:
-            sysobj.call_wndproc(win, WM_TIMER, key[1], 0)
+    sysobj.pump_modal(paint=True, timers=True)
 
 
 def _dispatch_dialog_event(ctx: CallContext, dlg: Dialog, event) -> None:
