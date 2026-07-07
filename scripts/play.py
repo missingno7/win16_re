@@ -247,19 +247,42 @@ class DialogView:
         self.widgets: dict[int, object] = {}          # ctrl_id -> tk widget
         self.vars: dict[int, tk.Variable] = {}
 
+        # Parent to a VISIBLE game window — the root is withdrawn, and a
+        # dialog transient to a withdrawn window never maps (it just grabs
+        # input invisibly, freezing the game).  Prefer the dialog's own parent
+        # HWND, else the main game window.
+        parent_view = app.views.get(dlg.parent) or next(
+            (v for v in app.views.values() if v.is_main), None)
+        parent_top = parent_view.top if parent_view else app.root
+
         w, h = dlg.size_px()
-        self.top = tk.Toplevel(app.root)
+        w, h = max(w, 1) * self.scale, max(h, 1) * self.scale
+        self.top = tk.Toplevel(parent_top)
         self.top.title(dlg.template.caption or "Dialog")
         self.top.resizable(False, False)
-        self.top.geometry(f"{w * self.scale}x{h * self.scale}")
-        self.frame = tk.Frame(self.top, width=w * self.scale, height=h * self.scale)
+        self.frame = tk.Frame(self.top, width=w, height=h)
         self.frame.pack(fill="both", expand=True)
         self.frame.pack_propagate(False)
         for ctrl in dlg.controls:
             self._build_control(ctrl)
-        self.top.transient(app.root)
+
+        # Centre over the parent, then map and raise it before grabbing input.
+        self.top.update_idletasks()
+        if parent_view is not None:
+            px, py = parent_top.winfo_rootx(), parent_top.winfo_rooty()
+            pw, ph = parent_top.winfo_width(), parent_top.winfo_height()
+            x = px + max((pw - w) // 2, 0)
+            y = py + max((ph - h) // 2, 0)
+        else:
+            x = y = 80
+        self.top.geometry(f"{w}x{h}+{x}+{y}")
+        self.top.transient(parent_top)
+        self.top.deiconify()
+        self.top.lift()
+        self.top.update_idletasks()
         try:
-            self.top.grab_set()                       # modal
+            self.top.grab_set()                       # modal — only once visible
+            self.top.focus_force()
         except tk.TclError:
             pass
         self.top.protocol("WM_DELETE_WINDOW",
