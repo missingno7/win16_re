@@ -382,7 +382,7 @@ class DialogView:
 
 class PlayApp:
     def __init__(self, speed: float, scale: int,
-                 record: str | None = None) -> None:
+                 record: str | None = None, mute: bool = False) -> None:
         self.scale = scale
         self.origin_x, self.origin_y = 60, 60
         self.machine = create_machine()
@@ -396,6 +396,13 @@ class PlayApp:
             self.recorder = DemoRecorder(record, self.machine.exe.path.name)
             self.machine.api.services["demo_recorder"] = self.recorder
             print(f"[play] recording demo to {record}", flush=True)
+
+        # Host audio: square-wave synthesis of the SOUND.DRV voice stream.
+        self.audio = None
+        if not mute:
+            from win16.audio import SquareWaveBackend
+            self.audio = SquareWaveBackend()
+            self.machine.api.services["sound_backend"] = self.audio
         self._console_counts = {"boxes": 0}
         self.views: dict[int, WindowView] = {}
         self.dialog_views: dict[int, DialogView] = {}
@@ -547,6 +554,9 @@ class PlayApp:
 
     def on_close(self) -> None:
         self.driver.stop()
+        if self.audio is not None:
+            self.audio.close()
+            self.audio = None
         if self.recorder is not None:
             self.recorder.close()
             print(f"[play] demo saved: {self.recorder.path} "
@@ -571,10 +581,11 @@ def main() -> None:
                     help="integer pixel scale (e.g. 2 doubles the windows)")
     ap.add_argument("--record", metavar="FILE", default=None,
                     help="record a demo (message + dialog event stream) to FILE")
+    ap.add_argument("--mute", action="store_true", help="disable host audio output")
     args = ap.parse_args()
     if not assets_present():
         raise SystemExit("assets/PYTHON.EXE not found — put the game files in assets/")
-    PlayApp(args.speed, args.scale, record=args.record).run()
+    PlayApp(args.speed, args.scale, record=args.record, mute=args.mute).run()
 
 
 if __name__ == "__main__":

@@ -53,6 +53,23 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — DIALOG VISIBILITY FIX + PC-speaker-style audio
+- **Dialogs were invisible** (owner: High Scores/About/Help "do nothing"): the
+  Toplevel was transient to the WITHDRAWN root, so it never mapped — 1x1,
+  unmapped, but it grab_set() input = an invisible modal freezing the game. Fixed
+  in play.py DialogView: parent/centre over the visible game window, size+position,
+  deiconify+lift+focus, grab only once visible. High Scores 658x172, About 360x238,
+  verified mapped + closing on OK.
+- **Audio**: the game's sound is SOUND.DRV notes (protected-mode Win16 can't touch
+  the speaker ports, so no direct PC-speaker I/O — dos_re's port-based speaker model
+  doesn't apply; reused only the square-wave idea). `win16/api/sound.py` now decodes
+  note value→freq (note 1 = C3, semitone steps) and length+tempo→ms, feeds an
+  optional backend. `win16/audio.py` SquareWaveBackend synthesizes square waves via
+  pygame+numpy (no device → logged no-op, events still captured — no silent fake).
+  Wired into play.py (`--mute` to disable). Captured the real jingle (51 notes,
+  tempo 220, 9s) and rendered it to WAV — a proper melody, octave-exact.
+- Suite: 29 (added 4 audio tests, device-free).
+
 ## 2026-07-07 — RE MACHINERY: demos + snapshots + console-first + clean Exit
 - Built the dos_re-style evidence layer for Win16. **Demos** (`win16/demo.py`):
   record/replay the GetMessage stream + dialog events; replay proven bit-exact
