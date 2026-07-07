@@ -29,6 +29,14 @@ from .ne import (
 THUNK_SEG = 0x0060          # import thunk slots live here (hooked CS:IP values)
 IMAGE_BASE_PARA = 0x0100    # first NE segment maps at this paragraph
 
+# Win16 uses selector translation to lift the 1MB real-mode ceiling: the loaded
+# program's own segments stay in low real-mode memory (< 1MB); GlobalAlloc
+# blocks live above it as selectors mapping into the linear space
+# [GLOBAL_LIN_START, WIN16_MEM_SIZE).  The gap below GLOBAL_LIN_START avoids the
+# dos_re EGA shadow region at 0x100000 (unused by Win16 but reserved).
+WIN16_MEM_SIZE = 0x400000       # 4 MB
+GLOBAL_LIN_START = 0x140000     # global heap starts here (after EGA shadow)
+
 
 class LoaderError(RuntimeError):
     pass
@@ -64,7 +72,7 @@ def load_ne(exe: NEExecutable, api: ApiRegistry, *,
             extra_handlers: bool = True) -> Win16Machine:
     """Load an NE executable into a fresh VM, ready to run from its entry point."""
     hdr = exe.header
-    mem = Memory()
+    mem = Memory(size=WIN16_MEM_SIZE, sel_base={})
     seg_bases = [0] * (len(exe.segments) + 1)
 
     # --- place segments ---

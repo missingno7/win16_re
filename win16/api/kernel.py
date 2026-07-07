@@ -180,7 +180,7 @@ def install(api: ApiRegistry) -> None:
     def LockResource(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
         h = ctx.args[0]
-        return (h << 16) if h in sys.global_blocks else 0
+        return (h << 16) if sys.is_global(h) else 0
 
     @api.register("KERNEL", 63, args="word")            # FreeResource(hGlobal)
     def FreeResource(ctx: CallContext) -> int:
@@ -220,9 +220,9 @@ def install(api: ApiRegistry) -> None:
             return 0xFFFF
         chunk = bytes(vf.data[vf.pos:vf.pos + ctx.args[2]])
         if chunk:
-            # Linear write: a read that ends near the segment's 64K boundary
-            # must continue into the next paragraphs, not wrap (huge buffers).
-            lin = ((ctx.args[1] >> 16) & 0xFFFF) * 16 + (ctx.args[1] & 0xFFFF)
+            # Linear (selector-translated) write: a read into a huge (>64K)
+            # buffer must land contiguously, not wrap at the 64K boundary.
+            lin = ctx.mem._xlat((ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF)
             ctx.mem.data[lin:lin + len(chunk)] = chunk
         vf.pos += len(chunk)
         return len(chunk)
@@ -233,7 +233,7 @@ def install(api: ApiRegistry) -> None:
         vf = sys.files.get(ctx.args[0])
         if vf is None or not vf.writable:
             return 0xFFFF
-        lin = ((ctx.args[1] >> 16) & 0xFFFF) * 16 + (ctx.args[1] & 0xFFFF)
+        lin = ctx.mem._xlat((ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF)
         data = bytes(ctx.mem.data[lin:lin + ctx.args[2]])
         end = vf.pos + len(data)
         if end > len(vf.data):
@@ -275,7 +275,7 @@ def install(api: ApiRegistry) -> None:
     def GlobalLock(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
         h = ctx.args[0]
-        return (h << 16) if h in sys.global_blocks else 0     # far ptr seg:0000
+        return (h << 16) if sys.is_global(h) else 0           # far ptr selector:0
 
     @api.register("KERNEL", 19, args="word")            # GlobalUnlock(handle)
     def GlobalUnlock(ctx: CallContext) -> int:
@@ -290,7 +290,7 @@ def install(api: ApiRegistry) -> None:
     @api.register("KERNEL", 20, args="word")            # GlobalSize(handle)
     def GlobalSize(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
-        return sys.global_blocks.get(ctx.args[0], 0)
+        return sys.global_size(ctx.args[0]) & 0xFFFF
 
     @api.register("KERNEL", 132, ret="long")            # GetWinFlags()
     def GetWinFlags(ctx: CallContext) -> int:

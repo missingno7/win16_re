@@ -331,10 +331,11 @@ def install(api: ApiRegistry) -> None:
                         ctx.mem.rb(bseg, b)))
 
         stride = ((w * 8 + 31) // 32) * 4
-        # The bits buffer can exceed 64K (microman: 512x320 = 160KB), so use
-        # LINEAR addressing from the far pointer — segment-relative offsets
-        # would wrap at 64K and tile/garble the image.
-        base_lin = ((bits >> 16) & 0xFFFF) * 16 + (bits & 0xFFFF)
+        # The bits buffer can exceed 64K (microman: 512x320 = 160KB).  Resolve
+        # the far pointer to a LINEAR base via the selector map, then read the
+        # whole (contiguous) block linearly — segment-relative offsets would
+        # wrap at 64K and tile/garble the image.
+        base_lin = ctx.mem._xlat((bits >> 16) & 0xFFFF, bits & 0xFFFF)
         mem_data = ctx.mem.data
         top0 = h - ys - cy                      # top-down y of the source region top
         for j in range(cy):

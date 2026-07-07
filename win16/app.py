@@ -26,12 +26,12 @@ WINFLAGS_NO_FPU = 0x0013
 def build_registry(*, winflags: int = WINFLAGS_NO_FPU) -> ApiRegistry:
     api = ApiRegistry()
     api.register_equate("KERNEL", 178, winflags)       # __WINFLAGS
-    # Huge-pointer stride: apps add __AHINCR to a selector to advance 64K.
-    # Our selectors ARE paragraph bases (real-mode-style flat mapping), so
-    # 64K = 0x1000 paragraphs — NOT the protected-mode value 8.  Getting this
-    # wrong corrupts every >64K buffer walk (microman's 160KB page images).
-    api.register_equate("KERNEL", 113, 12)             # __AHSHIFT
-    api.register_equate("KERNEL", 114, 0x1000)         # __AHINCR
+    # Huge-pointer stride: apps add __AHINCR to a selector to reach the next
+    # 64K.  With the selector model (win16/hugeheap.py) selectors step by 8 and
+    # consecutive ones map to consecutive 64K, so these are the real
+    # protected-mode values — a >64K buffer walk lands on the right descriptor.
+    api.register_equate("KERNEL", 113, 3)              # __AHSHIFT
+    api.register_equate("KERNEL", 114, 8)              # __AHINCR
     kernel.install(api)
     user.install(api)
     gdi.install(api)

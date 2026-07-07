@@ -80,14 +80,28 @@ class Win16System:
             self._local_heap = LocalHeap(sp0, sp0 + hdr.heap_size)
         return self._local_heap
 
+    huge_heap: object = None
+
     def __post_init__(self) -> None:
         from collections import deque
         from .objects import HandleTable
+        from win16.hugeheap import HugeHeap
+        from win16.loader import GLOBAL_LIN_START, WIN16_MEM_SIZE
         self.machine.api.services["system"] = self
         if not self.module_dos_path:
             self.module_dos_path = "C:\\" + self.machine.exe.path.name.upper()
         self.handles = HandleTable()
         self.msg_queue = deque()
+        # Global memory is selector-based over the linear space above the image.
+        # Start selector VALUES above the program's low real-mode paragraph
+        # bases (image + PSP/env/scratch) so the two never alias.
+        first_index = ((self.machine.free_para + 0x800) >> 3) + 1
+        self.huge_heap = HugeHeap(self.machine.mem.sel_base,
+                                  GLOBAL_LIN_START, WIN16_MEM_SIZE,
+                                  first_index=first_index)
+        # Segments below the first selector skip the sel_base dict lookup (the
+        # hot path stays real-mode-fast for code/stack/dgroup accesses).
+        self.machine.mem.sel_min = self.huge_heap.first_selector
 
     def call_wndproc(self, window, msg: int, wparam: int, lparam: int) -> int:
         """Send a message straight to the window's proc (SendMessage path)."""
@@ -246,53 +260,23 @@ class Win16System:
     def h_instance(self) -> int:
         return self.machine.seg_bases[self.machine.exe.header.auto_data_seg]
 
-    global_blocks: dict[int, int] = field(default_factory=dict)   # seg -> size
-    _global_paras: dict[int, int] = field(default_factory=dict)    # seg -> #paras
-    _global_free: list[tuple[int, int]] = field(default_factory=list)  # (base, n)
-
     def global_alloc(self, size: int, *, zero: bool = False) -> int:
-        """Allocate a global block; the segment value IS the handle (flat model:
-        selectors are paragraph bases).  Reuses freed blocks (first-fit) before
-        bumping the frontier — a game that loads/frees hundreds of temp buffers
-        would otherwise exhaust the VM.  Returns 0 on failure."""
-        paras = max((size + 15) >> 4, 1)
-        seg = None
-        for i, (base, n) in enumerate(self._global_free):
-            if n >= paras:
-                seg = base
-                if n == paras:
-                    del self._global_free[i]
-                else:
-                    self._global_free[i] = (base + paras, n - paras)
-                break
-        if seg is None:
-            try:
-                seg = self.machine.alloc_paragraphs(paras)
-            except Exception:  # noqa: BLE001 — out of VM memory -> API failure
-                return 0
-        self.global_blocks[seg] = size
-        self._global_paras[seg] = paras
-        if zero:
-            for i in range(size):
-                self.machine.mem.wb(seg, i, 0)
+        """Allocate a global block via the selector heap; the returned base
+        selector IS the handle.  Returns 0 on failure (out of memory)."""
+        seg = self.huge_heap.alloc(size)
+        if seg and zero:
+            base = self.huge_heap.linear_base(seg)
+            self.machine.mem.data[base:base + size] = b"\x00" * size
         return seg
 
     def global_free(self, seg: int) -> bool:
-        """Return a global block's paragraphs to the free list (coalescing)."""
-        paras = self._global_paras.pop(seg, None)
-        self.global_blocks.pop(seg, None)
-        if paras is None:
-            return False
-        self._global_free.append((seg, paras))
-        self._global_free.sort()
-        merged: list[tuple[int, int]] = []
-        for base, n in self._global_free:
-            if merged and merged[-1][0] + merged[-1][1] == base:
-                merged[-1] = (merged[-1][0], merged[-1][1] + n)
-            else:
-                merged.append((base, n))
-        self._global_free = merged
-        return True
+        return self.huge_heap.free(seg)
+
+    def global_size(self, seg: int) -> int:
+        return self.huge_heap.size_of(seg)
+
+    def is_global(self, seg: int) -> bool:
+        return self.huge_heap.is_block(seg)
 
     def ensure_psp(self) -> int:
         """Allocate a PSP-style paragraph block holding the command tail."""

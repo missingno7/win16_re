@@ -1,6 +1,19 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
+- **Memory model: selector translation (4MB).** win16 lifts the 1MB real-mode ceiling
+  via `dos_re` Memory's optional `sel_base` (selector→linear-base dict). The loaded
+  program stays real-mode in low memory; GlobalAlloc blocks are selectors mapping into
+  [0x140000, 4MB) managed by `win16/hugeheap.py` (small=1 selector; >64K=consecutive
+  selectors 8 apart → contiguous 64K so `__AHINCR=8` huge-pointer walking is correct;
+  linear+selector reclamation). `mem._xlat(seg,off)` resolves any far pointer (used by
+  SetDIBitsToDevice/_lread for huge buffers). DOS path (sel_base None) is byte-identical
+  — dos_re suite stays 116 green. To grow past 4MB, bump WIN16_MEM_SIZE in loader.py.
+  Verified: microman now boots THROUGH startup (no more `LoadPage Error = 9` memory-
+  exhaustion box) into its WAP title animation and paints a real frame; ppython
+  (the RE target) unaffected. Interpreter overhead of the selector branch is ~4%.
+  `test_microman_boots_and_renders` now gates on the first non-blank paint (it used to
+  assume a startup crash-frontier, which the selector fix removed). Full suite 38 green.
 - **win16 is now game-agnostic; multi-game testing.** `win16/app.py create_machine(exe,
   winflags)` boots ANY NE. `scripts/games.py` = the test-game registry (ppython is the
   RE target; microman/bangbang/kye/skifree are fixtures to harden win16).

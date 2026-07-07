@@ -24,6 +24,7 @@ class HugeHeap:
         self.sel_base = sel_base                    # shared with the VM Memory
         self._lin_free: list[tuple[int, int]] = [(lin_start, lin_end - lin_start)]
         self._next_index = first_index              # selector = index<<3 | RPL
+        self.first_selector = (first_index << 3) | SEL_RPL
         self._sel_free: list[tuple[int, int]] = []  # (start_selector, count)
         self._blocks: dict[int, tuple[int, int, int, int]] = {}
         #              base_selector -> (lin_base, lin_size, n_selectors, req_size)
