@@ -251,26 +251,34 @@ class WindowView:
         self.app.driver.post_input(self.win.handle, msg, mk, lparam)
 
     # -- per-tick sync ---------------------------------------------------------
+    def _composited(self):
+        """The image to display: this (top-level) window with its WS_CHILD
+        windows composited in at their offsets (SimAnt's canvas/ribbon live in
+        child windows).  Falls back to the bare surface if it has no children."""
+        from win16 import compositor
+        return compositor.composite(self.app.sys, self.win)
+
     def sync(self) -> None:
+        from win16 import compositor
         win = self.win
         if (win.x, win.y) != self._last_geo:
             self._place()
-        surf = win.surface
-        if surf.version != self._last_version:
-            self._last_version = surf.version
-            self._redraw(surf)
+        version = compositor.tree_version(self.app.sys, win)
+        if version != self._last_version:
+            self._last_version = version
+            self._redraw(self._composited())
         if self.top.title() != (win.title or win.wndclass.name):
             self.top.title(win.title or win.wndclass.name)
         if self.is_main:
             self._sync_menu_state()
 
     def force_render(self) -> None:
-        """Redraw the current surface regardless of the version gate — used to
+        """Redraw the current frame regardless of the version gate — used to
         flush the very last frame (e.g. the crash frame) onto the screen just
         before a modal box/dialog blocks further ticks."""
-        surf = self.win.surface
-        self._last_version = surf.version
-        self._redraw(surf)
+        from win16 import compositor
+        self._last_version = compositor.tree_version(self.app.sys, self.win)
+        self._redraw(self._composited())
 
     def _redraw(self, surf) -> None:
         w, h = self.win.client_size
@@ -766,7 +774,10 @@ class PlayApp:
     def _tick(self) -> None:
         self._service_dialogs()
         self._service_box()
-        live = {w.handle: w for w in self.sys.windows if w.visible}
+        # Only TOP-LEVEL windows get their own OS window; WS_CHILD windows
+        # (SimAnt's ribbon/canvas) composite into their parent's view.
+        from win16 import compositor
+        live = {w.handle: w for w in compositor.top_level_windows(self.sys)}
         for handle in [h for h in self.views if h not in live]:
             self.views.pop(handle).destroy()
         for handle, win in live.items():
