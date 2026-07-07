@@ -561,10 +561,17 @@ class MessageBoxView:
 class PlayApp:
     def __init__(self, exe_path, winflags: int, speed: float, scale: int,
                  record: str | None = None, mute: bool = False,
-                 snapshot_on_box: str | None = None) -> None:
+                 snapshot_on_box: str | None = None,
+                 game_name: str = "", hooks: bool = True) -> None:
         self.scale = scale
         self.origin_x, self.origin_y = 60, 60
         self.machine = create_machine(exe_path, winflags=winflags)
+        if hooks and game_name:
+            from gamehooks import install_game_hooks
+            n = install_game_hooks(game_name, self.machine)
+            if n:
+                print(f"[play] {n} game hook(s) installed for {game_name} "
+                      f"(--no-hooks to disable)", flush=True)
         self.sys: Win16System = self.machine.api.services["system"]
         self.driver = InteractiveDriver(self.sys, speed=speed)
         self.status = "running"
@@ -797,13 +804,16 @@ def main() -> None:
     ap.add_argument("--snapshot-on-box", metavar="TEXT", default=None,
                     help="save an inspection snapshot whenever a MessageBox whose "
                          "caption/text contains TEXT appears (e.g. 'Collision')")
+    ap.add_argument("--no-hooks", action="store_true",
+                    help="run pure ASM (skip the game's lifted-island hooks)")
     args = ap.parse_args()
     exe = game_exe(args.game)
     if not exe.exists():
         raise SystemExit(f"{exe} not found — put the game files under assets/")
     PlayApp(exe, game_winflags(args.game), args.speed, args.scale,
             record=args.record, mute=args.mute,
-            snapshot_on_box=args.snapshot_on_box).run()
+            snapshot_on_box=args.snapshot_on_box,
+            game_name=args.game, hooks=not args.no_hooks).run()
 
 
 if __name__ == "__main__":

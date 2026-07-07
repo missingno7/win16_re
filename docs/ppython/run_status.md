@@ -83,6 +83,31 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — GAME-SIDE HOOKS PROVEN: the WAP lifted islands (per-game, oracle-gated)
+- **The dos_re method now works on win16 games.**  New `gamehooks/` package: per-game
+  hook modules (`gamehooks/<name>.py`, `install(machine)`), kept OUT of the
+  game-agnostic win16 layer; play.py installs them by game name (`--no-hooks` runs
+  pure ASM).  Each module verifies code-byte signatures at its hook addresses and
+  refuses to install on mismatch.
+- `gamehooks/microman.py` lifts the two sampled WAP inner loops as ISLANDS (hook at
+  the loop head, do all iterations in one Python slice op, write back the exact final
+  register/flag/locals state, jump to the loop exit):
+  - `wap_rle_fill` (seg2:8D70→8DB2): RLE run fill, one byte + full selector recompute
+    per iteration in ASM → one descending-span slice fill.
+  - `wap_huge_copy` (seg2:926C→9299): huge-pointer dword copy (selector+=8 on wrap) →
+    one linear slice copy (with forward-overlap propagation preserved).
+  Semantics derived from live traces (artifacts/loop_tr.txt); both fire ONLY in the
+  WAP page-transition animations (boot LoadPage uses sibling loop copies — the other
+  two fill-loop clones at seg2:8CC0/8D2C are future islands if they ever sample hot).
+- **The gate** (`tests/test_microman_hooks.py`): a hooked and an unhooked machine run
+  the same 20-batch deterministic boot; window pixels must be sha256-IDENTICAL at
+  every checkpoint, and the hooked run must use materially fewer instructions.
+  Result: pixel-exact, 30.1M→22.1M instructions (-26%), wall 77.5s→58.8s for the
+  window covering the first transition.  42 tests green.
+- **SimAnt rehearsal note**: the pipeline is now end-to-end — PC-sample (wrap
+  CPU.step) → trace the hot loop live (cpu.trace at the loop head) → lift as an
+  island → A/B pixel oracle.  Same steps apply to any future game's hot engine.
+
 ## 2026-07-07 — perf split VM-side/game-side; WAV out; keyboard fixed; hook targets named
 - **Owner asked where the bottleneck is.**  Measured: the game requests a 40ms timer
   (25fps) but received 3.9 ticks/s — 6x slow, and the driver drops missed ticks, so
