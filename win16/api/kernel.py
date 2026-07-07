@@ -77,6 +77,17 @@ def install(api: ApiRegistry) -> None:
             return 1
         return handle
 
+    @api.register("KERNEL", 51, args="segptr word", ret="long")
+    def MakeProcInstance(ctx: CallContext) -> int:      # (proc, hInstance)
+        # Real KERNEL builds a DS-loading thunk; with one instance and a fixed
+        # DGROUP the proc address itself is the correct thunk (Wine does the
+        # same).
+        return ctx.args[0]
+
+    @api.register("KERNEL", 52, args="segptr")          # FreeProcInstance(proc)
+    def FreeProcInstance(ctx: CallContext) -> int:
+        return 1
+
     @api.register("KERNEL", 127, args="str str s_word str")
     def GetPrivateProfileInt(ctx: CallContext) -> int:  # (app, key, default, file)
         sys: Win16System = ctx.registry.services["system"]

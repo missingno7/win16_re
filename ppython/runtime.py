@@ -5,7 +5,7 @@ from pathlib import Path
 
 from . import _env  # noqa: F401
 
-from win16.api import gdi, kernel, user, win87em
+from win16.api import gdi, kernel, sound, user, win87em
 from win16.api.core import ApiRegistry
 from win16.api.system import Win16System
 from win16.loader import Win16Machine, load_ne
@@ -35,6 +35,7 @@ def create_registry() -> ApiRegistry:
     kernel.install(api)
     user.install(api)
     gdi.install(api)
+    sound.install(api)
     win87em.install(api)
     return api
 

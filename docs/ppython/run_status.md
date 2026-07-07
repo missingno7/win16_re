@@ -1,6 +1,33 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
+- **Gameplay gate:** `tests/test_gameplay.py` — boot→idle→WM_COMMAND(1050 New Game)→
+  level intro msgbox + painted playfield + SOUND notes. The msgbox/sound logs are
+  `api.services["messagebox_log"|"sound_log"]` (virtual-clock-stamped evidence).
+- **Menu commands** (from the MENU resource): 1050 New(F2), 1100 Sound(F3),
+  1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
+  (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
+
+## 2026-07-07 — GAMEPLAY: New Game plays itself blind — level, music, collisions, game over
+- x87 landed in dos_re (ESC D8-DF subset per static census: 59 FWAIT+ESC sites;
+  FILD/FLD/FSTP m32/m64/m80, FADDP/FMULP/FDIV(R)P/FSUB(R)P, FCOM(P)+FNSTSW,
+  FLDCW/FSTCW+RC-honouring FISTP, FINIT; doubles-for-80-bit caveat documented).
+  KEY CORRECTION: the NE file carries REAL x87 opcodes; OSFIXUPs would convert
+  them to emulator INTs on FPU-less machines — we run them natively like Wine
+  (which ignores OSFIXUPs) and __WINFLAGS could now honestly advertise a FPU.
+- Full observed lifecycle with no input: WM_COMMAND(1050) → OpenSound +
+  queue(512) → level loaded (FP layout math) → "Next Screen: Portrait of a
+  Python" → playfield blitted (walls/mice/Paulie visible in game0 PNG; the
+  radar shows the level IS a python face) → jingle (69 SOUND events) →
+  Paulie crashes unsteered: "Collision!" ×3 → "GAME OVER!" → **frontier:
+  USER.87:DialogBox (high-score dialog) — the next slice** (dialog resources,
+  MakeProcInstance done as identity, dialog proc callbacks).
+- StretchBlt = nearest-neighbour (COLORONCOLOR); GDI default BLACKONWHITE
+  caveat noted in code — check against owner playtest evidence later.
+- MessageBox auto-returns IDOK and logs. Suite: 14 passed (~22 s).
+- **Next:** DialogBox + dialog procs → keyboard input (WM_KEYDOWN steering,
+  accel F-keys) → an interactive/live viewer → then demos + the lockstep
+  verifier per the dos_re method (GetMessage is the boundary).
 - **Boot probe:** `python -m ppython.probes.boot [max_steps]` — runs from the NE entry
   point, prints the stop reason (the frontier), last trace lines, and the API call log.
 - **NE inspection:** `win16/ne.py` parses everything (segments, relocs, entry table,

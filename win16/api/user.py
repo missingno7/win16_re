@@ -259,6 +259,11 @@ def install(api: ApiRegistry) -> None:
             ctx.mem.ww(seg, (off + 2 * i) & 0xFFFF, v & 0xFFFF)
         return 1
 
+    @api.register("USER", 160, args="word")             # DrawMenuBar(hwnd)
+    def DrawMenuBar(ctx: CallContext) -> int:
+        # Menu rendering is host-side UI; the state store is already current.
+        return 1
+
     @api.register("USER", 157, args="word")             # GetMenu(hwnd)
     def GetMenu(ctx: CallContext) -> int:
         sys = _sys(ctx)
@@ -451,6 +456,57 @@ def install(api: ApiRegistry) -> None:
             m for m in sys.msg_queue if m[0] != win.handle)
         sys.windows.remove(win)
         sys.handles.remove(win.handle)
+        return 1
+
+    @api.register("USER", 1, args="word str str word")  # MessageBox
+    def MessageBox(ctx: CallContext) -> int:            # (hwnd, text, caption, type)
+        sys = _sys(ctx)
+        text = ctx.read_string(ctx.args[1]).decode("latin-1") if ctx.args[1] else ""
+        caption = ctx.read_string(ctx.args[2]).decode("latin-1") if ctx.args[2] else ""
+        ctx.registry.services.setdefault("messagebox_log", []).append(
+            (sys.clock_ms, caption, text, ctx.args[3]))
+        return 1                    # IDOK — modal UI auto-dismissed
+
+    @api.register("USER", 69, args="word")              # SetCursor(hcursor)
+    def SetCursor(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        prev = sys.machine.api.services.get("cursor", 0)
+        sys.machine.api.services["cursor"] = ctx.args[0]
+        return prev
+
+    @api.register("USER", 22, args="word")              # SetFocus(hwnd)
+    def SetFocus(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        prev = sys.machine.api.services.get("focus", 0)
+        sys.machine.api.services["focus"] = ctx.args[0]
+        return prev
+
+    @api.register("USER", 18, args="word")              # SetCapture(hwnd)
+    def SetCapture(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        prev = sys.machine.api.services.get("capture", 0)
+        sys.machine.api.services["capture"] = ctx.args[0]
+        return prev
+
+    @api.register("USER", 19)                           # ReleaseCapture()
+    def ReleaseCapture(ctx: CallContext) -> int:
+        _sys(ctx).machine.api.services["capture"] = 0
+        return 1
+
+    @api.register("USER", 34, args="word word")         # EnableWindow(hwnd, enable)
+    def EnableWindow(ctx: CallContext) -> int:
+        _sys(ctx).handles.require(ctx.args[0], Window)
+        return 0                    # was not disabled (disabled state unmodelled)
+
+    @api.register("USER", 28, args="word ptr")          # ClientToScreen(hwnd, pt)
+    def ClientToScreen(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        win = sys.handles.require(ctx.args[0], Window)
+        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
+        x = _signed(ctx.mem.rw(seg, off)) + win.x
+        y = _signed(ctx.mem.rw(seg, (off + 2) & 0xFFFF)) + win.y
+        ctx.mem.ww(seg, off, x & 0xFFFF)
+        ctx.mem.ww(seg, (off + 2) & 0xFFFF, y & 0xFFFF)
         return 1
 
     @api.register("USER", 31, args="word")              # IsIconic(hwnd)

@@ -211,6 +211,34 @@ def install(api: ApiRegistry) -> None:
             ctx.mem.ww(seg, (off + 25 + 2 * i) & 0xFFFF, v)
         return 1
 
+    @api.register("GDI", 35,                            # StretchBlt
+                  args="word s_word s_word s_word s_word word s_word s_word s_word s_word long")
+    def StretchBlt(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        (hdst, dx, dy, dw, dh, hsrc, sx, sy, sw, sh, rop) = ctx.args
+        if rop != 0x00CC0020:
+            raise NotImplementedError(f"StretchBlt rop {rop:#010x}")
+        dst, src = _dc_surface(sys, hdst), _dc_surface(sys, hsrc)
+        dx, dy, dw, dh = _signed(dx), _signed(dy), _signed(dw), _signed(dh)
+        sx, sy, sw, sh = _signed(sx), _signed(sy), _signed(sw), _signed(sh)
+        if dw <= 0 or dh <= 0 or sw <= 0 or sh <= 0:
+            raise NotImplementedError("StretchBlt with mirrored/empty extents")
+        # Nearest-neighbour sampling (COLORONCOLOR semantics).  The GDI
+        # default mode is BLACKONWHITE (AND-combining dropped pixels) — if
+        # radar pixel evidence ever disagrees, honour dc.stretch_mode here.
+        for row in range(dh):
+            syy = sy + row * sh // dh
+            if not (0 <= dy + row < dst.h and 0 <= syy < src.h):
+                continue
+            doff = ((dy + row) * dst.w + dx) * 3
+            for col in range(dw):
+                sxx = sx + col * sw // dw
+                if 0 <= dx + col < dst.w and 0 <= sxx < src.w:
+                    soff = (syy * src.w + sxx) * 3
+                    dst.pixels[doff + col * 3:doff + col * 3 + 3] = \
+                        src.pixels[soff:soff + 3]
+        return 1
+
     @api.register("GDI", 69, args="word")               # DeleteObject(handle)
     def DeleteObject(ctx: CallContext) -> int:
         sys = _sys(ctx)
