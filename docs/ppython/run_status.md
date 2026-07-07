@@ -3,11 +3,17 @@
 ## Standing mechanisms (check here before building new tooling)
 - **Interactive player:** `python scripts/play.py [--speed N] [--scale N]` — a real
   tkinter window (worker thread runs the VM, GUI thread renders every Win16 window
-  onto a 640×480 virtual desktop + forwards keyboard/mouse). Arrows steer; F2 new
-  game / F3 sound / F4 pause / F5 scores / F10 exit (via the real accelerator table).
-  Runs until it hits the DialogBox frontier (shown in the status bar), not a crash.
+  onto a 640×480 virtual desktop + forwards keyboard/mouse). **Native menu bar** built
+  from the MENU resource (`win16/menu.py`, `parse_menu`) → clicking Game/Options/etc.
+  posts WM_COMMAND to the main window; arrows steer; F2/F3/F4/F5/F10 via the real
+  accelerator table. Runs until the DialogBox frontier (shown in the status bar).
   Pacing lives in `win16/interactive.py` (`InteractiveDriver`, game-agnostic, GUI-free)
   installed as `Win16System.message_source`; headless replay leaves it None.
+- **Interpreter speed:** ~300k instr/s standalone; a gameplay frame is heavy, so play
+  is choppy (a few fps) — cProfile confirms it's ALL VM stepping (execute_opcode/
+  fetch8/rb), NOT the Python GDI. Real fix = the dos_re method (hook hot routines →
+  native). Boot to windows is ~6400 instr (instant); the main window is legitimately
+  blank until New Game.
 - **Gameplay gate:** `tests/test_gameplay.py` — boot→idle→WM_COMMAND(1050 New Game)→
   level intro msgbox + painted playfield + SOUND notes. The msgbox/sound logs are
   `api.services["messagebox_log"|"sound_log"]` (virtual-clock-stamped evidence).

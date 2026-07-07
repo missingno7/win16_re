@@ -32,6 +32,9 @@ from win16.api.core import Win16ApiGap
 from win16.api.objects import Window
 from win16.api.system import Win16System
 from win16.interactive import InteractiveDriver
+from win16.menu import parse_menu
+
+WM_COMMAND = 0x0111
 
 try:
     from dos_re.cpu import HaltExecution
@@ -82,8 +85,9 @@ class PlayApp:
         self.sys: Win16System = self.machine.api.services["system"]
         self.driver = InteractiveDriver(self.sys, speed=speed)
         self.active_hwnd = 0
-        self.status = "booting…"
+        self.status = "starting..."
         self._photo = None
+        self._menu_built = False
 
         self.root = tk.Tk()
         self.root.title("Paulie Python — VM-less port (dos_re / win16)")
@@ -143,6 +147,31 @@ class PlayApp:
                 return win
         return self.sys.windows[0] if self.sys.windows else None
 
+    # -- menu bar (built from the app's MENU resource) ---------------------
+    def _build_menubar(self, hwnd: int) -> None:
+        resources = self.machine.exe.find_resources("MENU")
+        if not resources:
+            return
+        bar = tk.Menu(self.root)
+        for item in parse_menu(resources[0].data):
+            self._add_menu_item(bar, item, hwnd)
+        self.root.config(menu=bar)
+
+    def _add_menu_item(self, parent: tk.Menu, item, hwnd: int) -> None:
+        if item.is_separator:
+            parent.add_separator()
+        elif item.is_popup:
+            sub = tk.Menu(parent, tearoff=0)
+            for child in item.children:
+                self._add_menu_item(sub, child, hwnd)
+            parent.add_cascade(label=item.text_and_accel()[0], menu=sub)
+        else:
+            text, accel = item.text_and_accel()
+            cmd_id = item.item_id
+            parent.add_command(
+                label=text, accelerator=accel or None,
+                command=lambda i=cmd_id: self.driver.post_input(hwnd, WM_COMMAND, i, 0))
+
     def _on_key_down(self, event) -> None:
         vk = keysym_to_vk(event)
         if vk is not None:
@@ -172,6 +201,15 @@ class PlayApp:
 
     # -- rendering ---------------------------------------------------------
     def _render(self) -> None:
+        if not self._menu_built:
+            main = self._main_window()
+            if main is not None:
+                self.active_hwnd = main.handle
+                self._build_menubar(main.handle)
+                self._menu_built = True
+                if self.status == "starting...":
+                    self.status = "ready - use the Game menu > New (or press F2)"
+
         desktop = Image.new("RGB", (DESK_W, DESK_H), DESKTOP_BG)
         draw = ImageDraw.Draw(desktop)
         for win in self.sys.windows:
