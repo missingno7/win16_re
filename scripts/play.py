@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox as tk_messagebox
 from tkinter import ttk
 
@@ -44,8 +45,15 @@ from win16.menu import MF_CHECKED, MF_DISABLED, MF_GRAYED, parse_menu
 # Button styles (low nibble).
 BS_CHECKBOX, BS_AUTOCHECKBOX = 0x2, 0x3
 BS_RADIOBUTTON, BS_GROUPBOX, BS_AUTORADIOBUTTON = 0x4, 0x7, 0x9
+SS_ICON = 0x3                                    # Static style low nibble
 # Notification codes packed into WM_COMMAND's HIWORD(lParam).
 BN_CLICKED, CBN_SELCHANGE = 0, 1
+
+# Win 3.1 dialog font "Helv" is the ancestor of MS Sans Serif — the closest
+# faithful substitute available on modern Windows.
+DIALOG_FONT_MAP = {"Helv": "MS Sans Serif", "MS Sans Serif": "MS Sans Serif",
+                   "System": "MS Sans Serif", "Times New Roman": "Times New Roman"}
+DIALOG_BG = "#c0c0c0"                            # Win 3.1 dialog face colour
 
 WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
 WM_COMMAND = 0x0111
@@ -255,12 +263,23 @@ class DialogView:
             (v for v in app.views.values() if v.is_main), None)
         parent_top = parent_view.top if parent_view else app.root
 
-        w, h = dlg.size_px()
-        w, h = max(w, 1) * self.scale, max(h, 1) * self.scale
         self.top = tk.Toplevel(parent_top)
         self.top.title(dlg.template.caption or "Dialog")
         self.top.resizable(False, False)
-        self.frame = tk.Frame(self.top, width=w, height=h)
+
+        # Dialog font + base units derived FROM that font, exactly as Windows
+        # maps dialog units to pixels: x_px = du * baseX/4, y_px = du * baseY/8,
+        # where baseX = the font's average char width and baseY = its height.
+        fam = DIALOG_FONT_MAP.get(dlg.template.font or "", "MS Sans Serif")
+        pt = dlg.template.point_size or 8
+        self.font = tkfont.Font(family=fam, size=pt)
+        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        self.base_x = max(round(self.font.measure(alphabet) / 52), 1)
+        self.base_y = max(self.font.metrics("linespace"), 1)
+
+        w, h = self._du_px(dlg.template.cx, dlg.template.cy)
+        w, h = max(w, 1) * self.scale, max(h, 1) * self.scale
+        self.frame = tk.Frame(self.top, width=w, height=h, bg=DIALOG_BG)
         self.frame.pack(fill="both", expand=True)
         self.frame.pack_propagate(False)
         for ctrl in dlg.controls:
@@ -288,8 +307,13 @@ class DialogView:
         self.top.protocol("WM_DELETE_WINDOW",
                            lambda: dlg.events.put(("close",)))
 
+    def _du_px(self, du_x: int, du_y: int) -> tuple[int, int]:
+        return du_x * self.base_x // 4, du_y * self.base_y // 8
+
     def _place(self, widget, ctrl) -> None:
-        x, y, w, h = ctrl.geom_px()
+        tc = ctrl.template
+        x, y = self._du_px(tc.x, tc.y)
+        w, h = self._du_px(tc.cx, tc.cy)
         s = self.scale
         widget.place(x=x * s, y=y * s, width=w * s, height=h * s)
 
@@ -297,8 +321,12 @@ class DialogView:
         cls, style, text = ctrl.cls, ctrl.style, ctrl.text
         dlg = self.dlg
         if cls == "Static":
-            lbl = tk.Label(self.frame, text=text.replace("&", ""), anchor="w",
-                           justify="left", font=("MS Sans Serif", 8))
+            if (style & 0xF) == SS_ICON:
+                self._build_icon(ctrl)
+                return
+            anchor = "center" if (style & 0xF) == 0x1 else "w"   # SS_CENTER
+            lbl = tk.Label(self.frame, text=text.replace("&", ""), anchor=anchor,
+                           justify="left", font=self.font, bg=DIALOG_BG)
             self._place(lbl, ctrl)
             self.widgets[id(ctrl)] = lbl
         elif cls == "Button":
@@ -307,17 +335,19 @@ class DialogView:
                 var = tk.IntVar(value=ctrl.checked)
                 self.vars[ctrl.ctrl_id] = var
                 w = tk.Checkbutton(self.frame, text=text.replace("&", ""),
-                                   variable=var, anchor="w", font=("MS Sans Serif", 8),
+                                   variable=var, anchor="w", font=self.font,
+                                   bg=DIALOG_BG, activebackground=DIALOG_BG,
                                    command=lambda c=ctrl: self._on_check(c))
                 self._place(w, ctrl)
                 self.widgets[id(ctrl)] = w
             elif sub == BS_GROUPBOX:
                 w = tk.LabelFrame(self.frame, text=text.replace("&", ""),
-                                  font=("MS Sans Serif", 8))
+                                  font=self.font, bg=DIALOG_BG, fg="black")
                 self._place(w, ctrl)
                 self.widgets[id(ctrl)] = w
             else:                                     # push / default button
                 w = tk.Button(self.frame, text=text.replace("&", ""),
+                              font=self.font,
                               command=lambda c=ctrl: dlg.events.put(
                                   ("command", c.ctrl_id, BN_CLICKED)))
                 self._place(w, ctrl)
@@ -327,21 +357,40 @@ class DialogView:
             self.vars[ctrl.ctrl_id] = var
             var.trace_add("write",
                           lambda *_a, c=ctrl, v=var: setattr(c, "text", v.get()))
-            e = tk.Entry(self.frame, textvariable=var, font=("MS Sans Serif", 8))
+            e = tk.Entry(self.frame, textvariable=var, font=self.font)
             self._place(e, ctrl)
             self.widgets[id(ctrl)] = e
         elif cls == "ComboBox":
             var = tk.StringVar()
             self.vars[ctrl.ctrl_id] = var
             cb = ttk.Combobox(self.frame, textvariable=var, values=list(ctrl.items),
-                              state="readonly", font=("MS Sans Serif", 8))
+                              state="readonly", font=self.font)
             cb.bind("<<ComboboxSelected>>", lambda _e, c=ctrl, w=cb: self._on_combo(c, w))
             self._place(cb, ctrl)
             self.widgets[id(ctrl)] = cb
         else:                                         # unknown class: label it
-            lbl = tk.Label(self.frame, text=f"[{cls}]")
+            lbl = tk.Label(self.frame, text=f"[{cls}]", bg=DIALOG_BG)
             self._place(lbl, ctrl)
             self.widgets[id(ctrl)] = lbl
+
+    def _build_icon(self, ctrl) -> None:
+        from win16.icon import load_named_icon
+        lbl = tk.Label(self.frame, bg=DIALOG_BG)
+        try:
+            decoded = load_named_icon(self.app.machine.exe, ctrl.text)
+        except Exception as exc:  # noqa: BLE001 — a bad icon shouldn't kill the dialog
+            print(f"[play] icon {ctrl.text!r} failed to decode: {exc}", flush=True)
+            decoded = None
+        if decoded is not None:
+            iw, ih, rgba = decoded
+            img = Image.frombytes("RGBA", (iw, ih), bytes(rgba))
+            if self.scale != 1:
+                img = img.resize((iw * self.scale, ih * self.scale), Image.NEAREST)
+            self._icon_photo = ImageTk.PhotoImage(img)   # keep a reference
+            lbl.config(image=self._icon_photo)
+        x, y = self._du_px(ctrl.template.x, ctrl.template.y)
+        lbl.place(x=x * self.scale, y=y * self.scale)
+        self.widgets[id(ctrl)] = lbl
 
     def _on_check(self, ctrl) -> None:
         ctrl.checked = self.vars[ctrl.ctrl_id].get()
@@ -358,6 +407,8 @@ class DialogView:
             if widget is None:
                 continue
             if ctrl.cls == "Static":
+                if (ctrl.style & 0xF) == SS_ICON:
+                    continue                        # image label, no text sync
                 if widget.cget("text") != ctrl.text.replace("&", ""):
                     widget.config(text=ctrl.text.replace("&", ""))
             elif ctrl.cls == "Edit":

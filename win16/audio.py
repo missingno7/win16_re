@@ -19,13 +19,21 @@ class SquareWaveBackend:
         self._pg = None
         self._np = None
         self._playing = None            # keep the Sound alive while it plays
+        self.channels = 1
         try:
             import numpy
             import pygame
             self._np, self._pg = numpy, pygame
             pygame.mixer.quit()
             pygame.mixer.init(frequency=rate, size=-16, channels=1, buffer=1024)
+            # SDL may hand back a stereo mixer regardless of the request; honour
+            # whatever it actually opened when shaping sample buffers.
+            init = pygame.mixer.get_init()
+            if init:
+                self.rate, _fmt, self.channels = init
             self.ok = True
+            print(f"[audio] square-wave output @ {self.rate}Hz, "
+                  f"{self.channels}ch", flush=True)
         except Exception as exc:  # noqa: BLE001 — a missing device is not a game bug
             print(f"[audio] output disabled (no device): "
                   f"{type(exc).__name__}: {exc}", flush=True)
@@ -60,6 +68,10 @@ class SquareWaveBackend:
         buf = self._render(notes)
         if buf.size == 0:
             return
+        np = self._np
+        if self.channels == 2:          # duplicate mono into a 2-D stereo array
+            buf = np.column_stack((buf, buf))
+        buf = np.ascontiguousarray(buf)
         self._playing = self._pg.sndarray.make_sound(buf)
         self._playing.play()
 

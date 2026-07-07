@@ -53,6 +53,22 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — audio stereo fix + dialog fidelity (font base units, icons)
+- **Audio crash fixed** (owner traceback, console-first paid off): SDL opened a
+  STEREO mixer despite channels=1; a mono 1-D buffer → "Array must be
+  2-dimensional". Now read `mixer.get_init()` and column-stack mono→stereo when
+  the device is 2ch. Verified both mono and forced-stereo paths.
+- **Dialog fidelity**: dialog-unit→pixel scaling now derives base units from the
+  actual dialog FONT (avg char width, line height) exactly like Windows
+  (x=du*baseX/4, y=du*baseY/8) instead of hardcoded (8,13) — About went 360→270px
+  wide (base_x 8→6), matching the Helv-8/MS-Sans-Serif metrics. Every control uses
+  that one font; dialog face is Win 3.1 gray (#c0c0c0); SS_CENTER honoured. "Helv"
+  maps to MS Sans Serif (its modern descendant).
+- **Icons**: `win16/icon.py` decodes GROUP_ICON directories + ICON DIBs (XOR image
+  + AND transparency mask) → RGBA. The About/ScreenSculptor SS_ICON statics now
+  show the real 32x32 Paulie head (was blank). LoadIcon path can reuse this later.
+- Suite: 32 (added 3 icon tests; audio tests from prior slice).
+
 ## 2026-07-07 — DIALOG VISIBILITY FIX + PC-speaker-style audio
 - **Dialogs were invisible** (owner: High Scores/About/Help "do nothing"): the
   Toplevel was transient to the WITHDRAWN root, so it never mapped — 1x1,
