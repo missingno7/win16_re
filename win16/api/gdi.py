@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from .core import ApiRegistry, CallContext
-from .objects import DC, Bitmap, Brush, StockObject, Surface, _signed, blit
+from .objects import (DC, Bitmap, Brush, Palette, StockObject, Surface,
+                      _signed, blit)
 from .system import Win16System
 
 STOCK_NAMES = {
@@ -288,6 +289,131 @@ def install(api: ApiRegistry) -> None:
         if idx not in caps:
             raise NotImplementedError(f"GetDeviceCaps index {idx}")
         return caps[idx] & 0xFFFF
+
+    @api.register("GDI", 443,                           # SetDIBitsToDevice
+                  args="word s_word s_word s_word s_word s_word s_word "
+                       "word word ptr ptr word")
+    def SetDIBitsToDevice(ctx: CallContext) -> int:
+        import struct
+        sys = _sys(ctx)
+        (hdc, xd, yd, cx, cy, xs, ys, start, lines, bits, bmi, coloruse) = ctx.args
+        cx, cy, xs, ys = _signed(cx), _signed(cy), _signed(xs), _signed(ys)
+        dst = _dc_surface(sys, hdc)
+        if dst is None:
+            return 0
+        dc = sys.handles.require(hdc, DC)
+
+        bseg, boff = (bmi >> 16) & 0xFFFF, bmi & 0xFFFF
+        hdr = bytes(ctx.mem.rb(bseg, (boff + i) & 0xFFFF) for i in range(40))
+        size, w, h, _pl, bpp, comp = struct.unpack_from("<IiiHHI", hdr, 0)
+        if comp != 0 or bpp != 8:
+            raise NotImplementedError(
+                f"SetDIBitsToDevice bpp={bpp} comp={comp} (only 8bpp BI_RGB)")
+        clr_used = struct.unpack_from("<I", hdr, 32)[0] or 256
+
+        # Build a 256-entry index -> (r,g,b) LUT from the DIB colour table.
+        ctoff = (boff + size) & 0xFFFF
+        pal = dc.palette
+        # fuColorUse can lie (microman passes DIB_PAL_COLORS but ships an RGBQUAD
+        # table).  Trust the DATA: it's PAL_COLORS only if the words are valid
+        # indices into the selected palette; otherwise it's RGBQUAD.
+        use_pal = coloruse == 1 and pal is not None
+        if use_pal:
+            sample = [ctx.mem.rw(bseg, (ctoff + i * 2) & 0xFFFF)
+                      for i in range(min(clr_used, 16))]
+            if any(v >= len(pal.entries) for v in sample):
+                use_pal = False
+        lut = []
+        for i in range(256):
+            if i >= clr_used:
+                lut.append((0, 0, 0))
+                continue
+            if use_pal:                         # DIB_PAL_COLORS: WORD pal indices
+                pidx = ctx.mem.rw(bseg, (ctoff + i * 2) & 0xFFFF)
+                lut.append(pal.entries[pidx] if pidx < len(pal.entries) else (0, 0, 0))
+            else:                               # DIB_RGB_COLORS: RGBQUAD (B,G,R,0)
+                b = (ctoff + i * 4) & 0xFFFF
+                lut.append((ctx.mem.rb(bseg, (b + 2) & 0xFFFF),
+                            ctx.mem.rb(bseg, (b + 1) & 0xFFFF),
+                            ctx.mem.rb(bseg, b)))
+
+        stride = ((w * 8 + 31) // 32) * 4
+        vseg, voff = (bits >> 16) & 0xFFFF, bits & 0xFFFF
+        top0 = h - ys - cy                      # top-down y of the source region top
+        for j in range(cy):
+            ty = top0 + j                       # DIB top-down row
+            r = (h - 1) - start - ty            # buffer row for that DIB scanline
+            if not (0 <= r) or not (0 <= yd + j < dst.h):
+                continue
+            src_row = (voff + r * stride) & 0xFFFF
+            dbase = ((yd + j) * dst.w + xd) * 3
+            for i in range(cx):
+                sx = xs + i
+                if not (0 <= sx < w) or not (0 <= xd + i < dst.w):
+                    continue
+                px = ctx.mem.rb(vseg, (src_row + sx) & 0xFFFF)
+                rr, gg, bb = lut[px]
+                o = dbase + i * 3
+                dst.pixels[o] = rr; dst.pixels[o + 1] = gg; dst.pixels[o + 2] = bb
+        dst.touch()
+        return cy
+
+    @api.register("GDI", 360, args="ptr")               # CreatePalette(lpLogPalette)
+    def CreatePalette(ctx: CallContext) -> int:
+        seg, off = (ctx.args[0] >> 16) & 0xFFFF, ctx.args[0] & 0xFFFF
+        count = ctx.mem.rw(seg, (off + 2) & 0xFFFF)
+        entries = []
+        for i in range(count):
+            b = (off + 4 + i * 4) & 0xFFFF
+            entries.append((ctx.mem.rb(seg, b), ctx.mem.rb(seg, (b + 1) & 0xFFFF),
+                            ctx.mem.rb(seg, (b + 2) & 0xFFFF)))
+        return _sys(ctx).handles.add(Palette(entries))
+
+    @api.register("GDI", 363, args="word word word ptr")  # GetPaletteEntries
+    def GetPaletteEntries(ctx: CallContext) -> int:     # (hpal, start, count, lppe)
+        sys = _sys(ctx)
+        pal = sys.handles.get(ctx.args[0])
+        if not isinstance(pal, Palette):
+            return 0
+        start, count, ptr = ctx.args[1], ctx.args[2], ctx.args[3]
+        seg, off = (ptr >> 16) & 0xFFFF, ptr & 0xFFFF
+        n = 0
+        for i in range(count):
+            if start + i >= len(pal.entries):
+                break
+            r, g, b = pal.entries[start + i]
+            base = (off + i * 4) & 0xFFFF
+            ctx.mem.wb(seg, base, r); ctx.mem.wb(seg, (base + 1) & 0xFFFF, g)
+            ctx.mem.wb(seg, (base + 2) & 0xFFFF, b); ctx.mem.wb(seg, (base + 3) & 0xFFFF, 0)
+            n += 1
+        return n
+
+    @api.register("GDI", 370, args="word long")         # GetNearestPaletteIndex
+    def GetNearestPaletteIndex(ctx: CallContext) -> int:  # (hpal, color)
+        pal = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(pal, Palette) or not pal.entries:
+            return 0
+        c = ctx.args[1]
+        return pal.nearest(c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
+
+    @api.register("GDI", 374, args="word")              # GetSystemPaletteUse(hdc)
+    def GetSystemPaletteUse(ctx: CallContext) -> int:
+        return 1                    # SYSPAL_STATIC
+
+    @api.register("GDI", 375, args="word word word ptr")  # GetSystemPaletteEntries
+    def GetSystemPaletteEntries(ctx: CallContext) -> int:  # (hdc, start, count, lppe)
+        # Report a plain grayscale system palette; games usually only read the
+        # count.  Enough to satisfy palette setup.
+        count, ptr = ctx.args[2], ctx.args[3]
+        if ptr:
+            seg, off = (ptr >> 16) & 0xFFFF, ptr & 0xFFFF
+            for i in range(count):
+                v = (i * 255 // max(count - 1, 1)) & 0xFF
+                base = (off + i * 4) & 0xFFFF
+                for k in range(3):
+                    ctx.mem.wb(seg, (base + k) & 0xFFFF, v)
+                ctx.mem.wb(seg, (base + 3) & 0xFFFF, 0)
+        return count
 
     @api.register("GDI", 3, args="word word")           # SetMapMode(hdc, mode)
     def SetMapMode(ctx: CallContext) -> int:

@@ -70,6 +70,35 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-07 — MICROMAN runs: reaches its message loop + renders (palette/DIB path)
+- Pushed the microman fixture from the CreatePalette frontier all the way into its
+  running game: implemented the **palette subsystem** (CreatePalette/GetPaletteEntries/
+  GetNearestPaletteIndex/GetSystemPaletteEntries/GetSystemPaletteUse + USER
+  SelectPalette/RealizePalette; DC.palette field), **SetDIBitsToDevice** (8bpp
+  BI_RGB/PAL_COLORS DIB → dest surface via a palette-resolved LUT — microman's core
+  renderer), **MMSYSTEM.2 sndPlaySound** (event-logged like SOUND.DRV), and the
+  **resource family** (FindResource/LoadResource/LockResource/FreeResource over the
+  NE resources into global memory). Result: microman boots → GetMessage loop →
+  creates its window (MicroManClass 544x390) → renders the MicroMan title via
+  SetDIBitsToDevice (confirmed non-blank screenshot). dos_re unchanged this slice.
+- **play.py is now game-agnostic**: `python scripts/play.py --game microman`
+  (default ppython). Uses win16.app.create_machine + scripts/games; is_main =
+  window-with-a-menu (already generic).
+- **Colour fix (owner: it's a 16-colour game, was rendering grayscale):**
+  microman's SetDIBitsToDevice passes fuColorUse=DIB_PAL_COLORS but ships an
+  **RGBQUAD colour table** (the standard 16-colour VGA palette). Trusting the flag,
+  we read WORD indices (garbage like 49152 ≥ 256) and fell back to gray. Fix:
+  trust the DATA — treat the table as PAL_COLORS only when the words are valid
+  palette indices, else RGBQUAD. Now renders in colour (blue "Micro Man", etc.).
+- **Caveats (documented, not hidden):** (1) pure-Python interp is slow — microman
+  runs ~10M instructions (~90s) before its first paint; (2) a later frontier is CPU
+  opcode **FF /7** (undefined on 8086) reached after the headless pump spins the
+  attract loop with no real input — likely a state divergence, not a missing opcode;
+  may differ under interactive input. Next things to chase if we push microman
+  further; ppython recovery remains the focus.
+- Suite: 33 (microman test re-pinned to boots-and-renders: asserts it exercises
+  _lopen/GetDeviceCaps/CreatePalette/SetDIBitsToDevice and runs >1.5M instr).
+
 ## 2026-07-07 — win16_re: game-agnostic launcher + MICROMAN as a hardening fixture
 - Owner reorganized assets into per-game subfolders (assets/PPYTHON, MICROMAN,
   BANGBANG, KYE, SKIFREE) and reframed the project as win16_re: win16/ is the

@@ -33,10 +33,13 @@ from tkinter import ttk
 
 from PIL import Image, ImageTk
 
-from ppython.runtime import assets_present, create_machine
+import ppython._env  # noqa: F401  (puts the dos_re framework on sys.path)
+
+from scripts.games import GAMES, game_exe, game_winflags
 from win16.api.core import Win16ApiGap
 from win16.api.objects import Window
 from win16.api.system import Win16System
+from win16.app import create_machine
 from win16.dialog import du_to_px
 from win16.interactive import InteractiveDriver
 from win16.menu import MF_CHECKED, MF_DISABLED, MF_GRAYED, parse_menu
@@ -556,12 +559,12 @@ class MessageBoxView:
 
 
 class PlayApp:
-    def __init__(self, speed: float, scale: int,
+    def __init__(self, exe_path, winflags: int, speed: float, scale: int,
                  record: str | None = None, mute: bool = False,
                  snapshot_on_box: str | None = None) -> None:
         self.scale = scale
         self.origin_x, self.origin_y = 60, 60
-        self.machine = create_machine()
+        self.machine = create_machine(exe_path, winflags=winflags)
         self.sys: Win16System = self.machine.api.services["system"]
         self.driver = InteractiveDriver(self.sys, speed=speed)
         self.status = "running"
@@ -780,7 +783,10 @@ class PlayApp:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Play Paulie Python in the VM.")
+    ap = argparse.ArgumentParser(description="Play a Win16 game in the VM.")
+    ap.add_argument("--game", default="ppython",
+                    help=f"which game to run (default: ppython). "
+                         f"known: {', '.join(sorted(GAMES))}")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="time multiplier (1.0 = real speed)")
     ap.add_argument("--scale", type=int, default=1,
@@ -792,9 +798,11 @@ def main() -> None:
                     help="save an inspection snapshot whenever a MessageBox whose "
                          "caption/text contains TEXT appears (e.g. 'Collision')")
     args = ap.parse_args()
-    if not assets_present():
-        raise SystemExit("assets/PYTHON.EXE not found — put the game files in assets/")
-    PlayApp(args.speed, args.scale, record=args.record, mute=args.mute,
+    exe = game_exe(args.game)
+    if not exe.exists():
+        raise SystemExit(f"{exe} not found — put the game files under assets/")
+    PlayApp(exe, game_winflags(args.game), args.speed, args.scale,
+            record=args.record, mute=args.mute,
             snapshot_on_box=args.snapshot_on_box).run()
 
 

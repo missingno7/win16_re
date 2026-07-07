@@ -164,6 +164,20 @@ class Brush:
 
 
 @dataclass
+class Palette:
+    entries: list[tuple[int, int, int]] = field(default_factory=list)  # RGB
+    handle: int = 0
+
+    def nearest(self, r: int, g: int, b: int) -> int:
+        best, best_d = 0, 1 << 30
+        for i, (pr, pg, pb) in enumerate(self.entries):
+            d = (pr - r) ** 2 + (pg - g) ** 2 + (pb - b) ** 2
+            if d < best_d:
+                best, best_d = i, d
+        return best
+
+
+@dataclass
 class StockObject:
     kind: str                       # e.g. "WHITE_BRUSH", "SYSTEM_FONT"
     handle: int = 0
@@ -222,4 +236,5 @@ class DC:
     bk_mode: int = 2                # OPAQUE
     stretch_mode: int = 1
     selected: dict[str, object] = field(default_factory=dict)
+    palette: object = None          # selected logical Palette (None = default)
     handle: int = 0

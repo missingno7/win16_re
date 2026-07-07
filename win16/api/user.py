@@ -648,6 +648,25 @@ def install(api: ApiRegistry) -> None:
     def GetDesktopWindow(ctx: CallContext) -> int:
         return _desktop_window(_sys(ctx)).handle
 
+    @api.register("USER", 282, args="word word word")   # SelectPalette(hdc, hpal, bg)
+    def SelectPalette(ctx: CallContext) -> int:
+        from .objects import DC, Palette
+        sys = _sys(ctx)
+        dc = sys.handles.get(ctx.args[0])
+        pal = sys.handles.get(ctx.args[1])
+        if not isinstance(dc, DC) or not isinstance(pal, Palette):
+            return 0
+        prev = dc.palette
+        dc.palette = pal
+        return prev.handle if prev is not None else 0
+
+    @api.register("USER", 283, args="word")             # RealizePalette(hdc)
+    def RealizePalette(ctx: CallContext) -> int:
+        from .objects import DC
+        dc = _sys(ctx).handles.get(ctx.args[0])
+        # Static system palette in our model: nothing to map, report 0 changed.
+        return 0 if isinstance(dc, DC) else 0
+
     @api.register("USER", 13, ret="long")               # GetTickCount()
     def GetTickCount(ctx: CallContext) -> int:
         return _sys(ctx).clock_ms & 0xFFFFFFFF

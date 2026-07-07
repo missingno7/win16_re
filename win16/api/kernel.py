@@ -143,6 +143,49 @@ def install(api: ApiRegistry) -> None:
         sys: Win16System = ctx.registry.services["system"]
         return sys.ensure_environment() << 16            # seg:0000 far pointer
 
+    @api.register("KERNEL", 60, args="word str str")    # FindResource(h, name, type)
+    def FindResource(ctx: CallContext) -> int:
+        from win16.api.user import _resource_name
+        sys: Win16System = ctx.registry.services["system"]
+        name = _resource_name(ctx, ctx.args[1])
+        rtype = _resource_name(ctx, ctx.args[2])
+        # Resolve the type to a resource type_name string.
+        RT = {1: "CURSOR", 2: "BITMAP", 3: "ICON", 4: "MENU", 5: "DIALOG",
+              6: "STRING", 9: "ACCELERATOR", 10: "RCDATA", 14: "GROUP_ICON"}
+        type_name = RT.get(rtype, f"#{rtype}") if isinstance(rtype, int) else rtype
+        res = sys.machine.exe.lookup_resource(type_name, name)
+        if res is None:
+            return 0
+        found = ctx.registry.services.setdefault("found_resources", {})
+        h = 0xF000 + len(found)                          # synthetic HRSRC
+        found[h] = res
+        return h
+
+    @api.register("KERNEL", 61, args="word word")       # LoadResource(h, hRsrc)
+    def LoadResource(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        res = ctx.registry.services.get("found_resources", {}).get(ctx.args[1])
+        if res is None:
+            return 0
+        loaded = ctx.registry.services.setdefault("loaded_resources", {})
+        if ctx.args[1] in loaded:
+            return loaded[ctx.args[1]]
+        seg = sys.global_alloc(len(res.data))
+        if seg:
+            sys.machine.mem.load(seg, 0, res.data)
+            loaded[ctx.args[1]] = seg
+        return seg
+
+    @api.register("KERNEL", 62, args="word", ret="long")  # LockResource(hGlobal)
+    def LockResource(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        h = ctx.args[0]
+        return (h << 16) if h in sys.global_blocks else 0
+
+    @api.register("KERNEL", 63, args="word")            # FreeResource(hGlobal)
+    def FreeResource(ctx: CallContext) -> int:
+        return 0                    # 0 = freed (block retained; bump allocator)
+
     @api.register("KERNEL", 85, args="str word")        # _lopen(name, mode)
     def _lopen(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
