@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# Original game files are never committed (dos_re convention).
+assets/
+# Scratch evidence; promoted oracles live in artifacts/test_oracles/ (tracked).
+artifacts/*
+!artifacts/test_oracles/
