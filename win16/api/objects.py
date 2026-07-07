@@ -88,6 +88,11 @@ class Window:
         # grow this when GetClientRect evidence demands real values.
         return self.w, self.h
 
+    def geom_px(self) -> tuple[int, int, int, int]:
+        """(screen x, screen y, width, height) — the window-like contract
+        shared with dialogs/controls so geometry APIs treat them uniformly."""
+        return self.x, self.y, self.w, self.h
+
     @property
     def surface(self) -> "Surface":
         if self._surface is None:

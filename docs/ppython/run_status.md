@@ -1,6 +1,16 @@
 # Paulie Python — run status (newest on top)
 
 ## Standing mechanisms (check here before building new tooling)
+- **Dialog engine:** `win16/dialog.py` (DLGTEMPLATE parser) + `win16/api/dialogs.py`
+  (DialogBox/EndDialog/Get-SetDlgItem*/SendDlgItemMessage/DlgDir* + Dialog/
+  DialogControlState). DialogBox runs the game's real dialog proc in the VM in a
+  modal loop (WM_INITDIALOG → control events → EndDialog); other windows' timers
+  keep firing under it. Presentation via `services["dialog_ui"]` (the player builds
+  real tkinter widgets from the template, du_to_px layout); headless leaves it None
+  and auto-answers OK/Cancel. Control state (text/checked/items/sel) lives in the
+  DialogControlState objects — the single source of truth the widgets mirror.
+  Window-like handles (dialogs, controls) resolve through `geom_px()` so geometry
+  APIs treat them uniformly.
 - **Interactive player:** `python scripts/play.py [--speed N] [--scale N]` — **each
   Win16 window is its own real tkinter window** (WindowView per handle; created/
   destroyed as the game creates/destroys windows). The Paulie Python window carries
@@ -25,6 +35,24 @@
 - **Menu commands** (from the MENU resource): 1050 New(F2), 1100 Sound(F3),
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
+
+## 2026-07-07 — DIALOG ENGINE: the real thing, no stubs (About/High Scores/Options/…)
+- Owner: menu items (About, High Scores, Options ▸ Mouse/Screen-set, Help) "did
+  nothing" — they were the DialogBox skip-stub. Replaced with a real Win16 dialog
+  engine: `win16/dialog.py` parses all 6 DLGTEMPLATEs (Static/Button/Edit/ComboBox/
+  GroupBox, dialog-unit→px), `win16/api/dialogs.py` runs the game's own dialog proc
+  in a modal loop and implements the dialog API family (Get/SetDlgItemText/Int,
+  SendDlgItemMessage for Button BM_/ComboBox CB_/Edit EM_, DlgDirListComboBox for
+  the screen-set picker). The interactive player renders real tkinter widgets
+  (`DialogView`) laid out from the template; MessageBoxes are real modal boxes;
+  WinHelp says "help unavailable" honestly. All 3 complex dialogs verified running
+  their procs headless (About→IDOK, High Scores→IDOK, Screen Chooser). The game now
+  runs THROUGH game-over + the high-score entry dialog with zero gaps (was the old
+  frontier). Dialogs/controls are windows → uniform `geom_px()` resolver for
+  GetWindowRect/GetClientRect/MoveWindow/etc.
+- Suite: 22 (added dialog parse + engine tests; gameplay gates no longer pin the
+  DialogBox frontier since it's implemented).
+- Next frontier is now past the whole death/high-score loop — re-probe to find it.
 
 ## 2026-07-07 — PLAYER: flicker fixed by change-detection, not a new backend
 - Owner reported menu flicker while the game runs. Cause was churn, not tkinter

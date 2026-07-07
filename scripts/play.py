@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import tkinter as tk
 from tkinter import messagebox as tk_messagebox
+from tkinter import ttk
 
 from PIL import Image, ImageTk
 
@@ -34,8 +35,15 @@ from ppython.runtime import assets_present, create_machine
 from win16.api.core import Win16ApiGap
 from win16.api.objects import Window
 from win16.api.system import Win16System
+from win16.dialog import du_to_px
 from win16.interactive import InteractiveDriver
 from win16.menu import MF_CHECKED, MF_DISABLED, MF_GRAYED, parse_menu
+
+# Button styles (low nibble).
+BS_CHECKBOX, BS_AUTOCHECKBOX = 0x2, 0x3
+BS_RADIOBUTTON, BS_GROUPBOX, BS_AUTORADIOBUTTON = 0x4, 0x7, 0x9
+# Notification codes packed into WM_COMMAND's HIWORD(lParam).
+BN_CLICKED, CBN_SELCHANGE = 0, 1
 
 WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
 WM_COMMAND = 0x0111
@@ -222,6 +230,128 @@ class WindowView:
             pass
 
 
+class DialogView:
+    """A real modal tkinter window rendering one Win16 Dialog.  Widgets read
+    from / write to the shared DialogControlState objects; user actions post
+    events onto the dialog's event queue for the CPU-thread modal loop."""
+
+    def __init__(self, app: "PlayApp", dlg) -> None:
+        self.app = app
+        self.dlg = dlg
+        self.scale = app.scale
+        self.widgets: dict[int, object] = {}          # ctrl_id -> tk widget
+        self.vars: dict[int, tk.Variable] = {}
+
+        w, h = dlg.size_px()
+        self.top = tk.Toplevel(app.root)
+        self.top.title(dlg.template.caption or "Dialog")
+        self.top.resizable(False, False)
+        self.top.geometry(f"{w * self.scale}x{h * self.scale}")
+        self.frame = tk.Frame(self.top, width=w * self.scale, height=h * self.scale)
+        self.frame.pack(fill="both", expand=True)
+        self.frame.pack_propagate(False)
+        for ctrl in dlg.controls:
+            self._build_control(ctrl)
+        self.top.transient(app.root)
+        try:
+            self.top.grab_set()                       # modal
+        except tk.TclError:
+            pass
+        self.top.protocol("WM_DELETE_WINDOW",
+                           lambda: dlg.events.put(("close",)))
+
+    def _place(self, widget, ctrl) -> None:
+        x, y, w, h = ctrl.geom_px()
+        s = self.scale
+        widget.place(x=x * s, y=y * s, width=w * s, height=h * s)
+
+    def _build_control(self, ctrl) -> None:
+        cls, style, text = ctrl.cls, ctrl.style, ctrl.text
+        dlg = self.dlg
+        if cls == "Static":
+            lbl = tk.Label(self.frame, text=text.replace("&", ""), anchor="w",
+                           justify="left", font=("MS Sans Serif", 8))
+            self._place(lbl, ctrl)
+            self.widgets[id(ctrl)] = lbl
+        elif cls == "Button":
+            sub = style & 0xF
+            if sub in (BS_CHECKBOX, BS_AUTOCHECKBOX, BS_RADIOBUTTON, BS_AUTORADIOBUTTON):
+                var = tk.IntVar(value=ctrl.checked)
+                self.vars[ctrl.ctrl_id] = var
+                w = tk.Checkbutton(self.frame, text=text.replace("&", ""),
+                                   variable=var, anchor="w", font=("MS Sans Serif", 8),
+                                   command=lambda c=ctrl: self._on_check(c))
+                self._place(w, ctrl)
+                self.widgets[id(ctrl)] = w
+            elif sub == BS_GROUPBOX:
+                w = tk.LabelFrame(self.frame, text=text.replace("&", ""),
+                                  font=("MS Sans Serif", 8))
+                self._place(w, ctrl)
+                self.widgets[id(ctrl)] = w
+            else:                                     # push / default button
+                w = tk.Button(self.frame, text=text.replace("&", ""),
+                              command=lambda c=ctrl: dlg.events.put(
+                                  ("command", c.ctrl_id, BN_CLICKED)))
+                self._place(w, ctrl)
+                self.widgets[id(ctrl)] = w
+        elif cls == "Edit":
+            var = tk.StringVar(value=text)
+            self.vars[ctrl.ctrl_id] = var
+            var.trace_add("write",
+                          lambda *_a, c=ctrl, v=var: setattr(c, "text", v.get()))
+            e = tk.Entry(self.frame, textvariable=var, font=("MS Sans Serif", 8))
+            self._place(e, ctrl)
+            self.widgets[id(ctrl)] = e
+        elif cls == "ComboBox":
+            var = tk.StringVar()
+            self.vars[ctrl.ctrl_id] = var
+            cb = ttk.Combobox(self.frame, textvariable=var, values=list(ctrl.items),
+                              state="readonly", font=("MS Sans Serif", 8))
+            cb.bind("<<ComboboxSelected>>", lambda _e, c=ctrl, w=cb: self._on_combo(c, w))
+            self._place(cb, ctrl)
+            self.widgets[id(ctrl)] = cb
+        else:                                         # unknown class: label it
+            lbl = tk.Label(self.frame, text=f"[{cls}]")
+            self._place(lbl, ctrl)
+            self.widgets[id(ctrl)] = lbl
+
+    def _on_check(self, ctrl) -> None:
+        ctrl.checked = self.vars[ctrl.ctrl_id].get()
+        self.dlg.events.put(("command", ctrl.ctrl_id, BN_CLICKED))
+
+    def _on_combo(self, ctrl, widget) -> None:
+        ctrl.sel = widget.current()
+        self.dlg.events.put(("command", ctrl.ctrl_id, CBN_SELCHANGE))
+
+    def sync(self) -> None:
+        """Pull live control state (the game may have changed it) into widgets."""
+        for ctrl in self.dlg.controls:
+            widget = self.widgets.get(id(ctrl))
+            if widget is None:
+                continue
+            if ctrl.cls == "Static":
+                if widget.cget("text") != ctrl.text.replace("&", ""):
+                    widget.config(text=ctrl.text.replace("&", ""))
+            elif ctrl.cls == "Edit":
+                if self.vars[ctrl.ctrl_id].get() != ctrl.text:
+                    self.vars[ctrl.ctrl_id].set(ctrl.text)
+            elif ctrl.cls == "Button" and ctrl.ctrl_id in self.vars:
+                if self.vars[ctrl.ctrl_id].get() != ctrl.checked:
+                    self.vars[ctrl.ctrl_id].set(ctrl.checked)
+            elif ctrl.cls == "ComboBox":
+                if list(widget.cget("values")) != list(ctrl.items):
+                    widget.config(values=list(ctrl.items))
+                if 0 <= ctrl.sel < len(ctrl.items):
+                    widget.current(ctrl.sel)
+
+    def destroy(self) -> None:
+        try:
+            self.top.grab_release()
+            self.top.destroy()
+        except tk.TclError:
+            pass
+
+
 class PlayApp:
     def __init__(self, speed: float, scale: int) -> None:
         self.scale = scale
@@ -232,6 +362,9 @@ class PlayApp:
         self.status = "running"
         self.stopped = False
         self.views: dict[int, WindowView] = {}
+        self.dialog_views: dict[int, DialogView] = {}
+        self._dialog_reqs: list[tuple] = []
+        self._dialog_lock = threading.Lock()
         self._pending_box: tuple | None = None
         self._box_lock = threading.Lock()
 
@@ -241,6 +374,8 @@ class PlayApp:
         # Real modal MessageBox service: the CPU thread blocks here until the
         # GUI thread shows the box and the user dismisses it.
         self.machine.api.services["messagebox_ui"] = self._messagebox_blocking
+        # Dialog engine presentation host (called from the CPU thread).
+        self.machine.api.services["dialog_ui"] = self
 
         self.worker = threading.Thread(target=self._run_cpu, daemon=True)
         self.worker.start()
@@ -286,8 +421,37 @@ class PlayApp:
         result["rc"] = 1                        # IDOK (only OK boxes observed)
         done.set()
 
+    # -- dialog host (called from the CPU thread) --------------------------------
+    def show(self, dlg) -> None:
+        with self._dialog_lock:
+            self._dialog_reqs.append(("show", dlg))
+
+    def update(self, dlg, ctrl) -> None:
+        pass                                     # pull-based: _tick re-syncs widgets
+
+    def close(self, dlg) -> None:
+        with self._dialog_lock:
+            self._dialog_reqs.append(("close", dlg))
+
+    def now_ms(self) -> int:
+        return self.driver.now_ms()
+
+    def _service_dialogs(self) -> None:
+        with self._dialog_lock:
+            reqs, self._dialog_reqs = self._dialog_reqs, []
+        for kind, dlg in reqs:
+            if kind == "show" and dlg.handle not in self.dialog_views:
+                self.dialog_views[dlg.handle] = DialogView(self, dlg)
+            elif kind == "close":
+                view = self.dialog_views.pop(dlg.handle, None)
+                if view is not None:
+                    view.destroy()
+        for view in self.dialog_views.values():
+            view.sync()
+
     # -- main tick ---------------------------------------------------------------
     def _tick(self) -> None:
+        self._service_dialogs()
         live = {w.handle: w for w in self.sys.windows if w.visible}
         for handle in [h for h in self.views if h not in live]:
             self.views.pop(handle).destroy()

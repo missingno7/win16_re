@@ -27,6 +27,16 @@ def _sys(ctx: CallContext) -> Win16System:
     return ctx.registry.services["system"]
 
 
+def _geom(sysobj, handle: int) -> tuple[int, int, int, int]:
+    """Resolve any window-like handle (Window, Dialog, control) to its
+    (x, y, w, h) geometry — they are all windows in Win16."""
+    obj = sysobj.handles.get(handle)
+    getter = getattr(obj, "geom_px", None)
+    if getter is None:
+        raise KeyError(f"handle {handle:04X} is not window-like ({type(obj).__name__})")
+    return getter()
+
+
 def _vk_to_char(vk: int) -> int | None:
     """ASCII character a virtual key produces with no shift state, or None.
     (A minimal US-layout subset — enough for typed input; grows if needed.)"""
@@ -252,20 +262,17 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 33, args="word ptr")          # GetClientRect(hwnd, rect)
     def GetClientRect(ctx: CallContext) -> int:
-        sys = _sys(ctx)
-        win = sys.handles.require(ctx.args[0], Window)
+        _x, _y, w, h = _geom(_sys(ctx), ctx.args[0])
         seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
-        w, h = win.client_size
         for i, v in enumerate((0, 0, w, h)):
             ctx.mem.ww(seg, (off + 2 * i) & 0xFFFF, v & 0xFFFF)
         return 1
 
     @api.register("USER", 32, args="word ptr")          # GetWindowRect(hwnd, rect)
     def GetWindowRect(ctx: CallContext) -> int:
-        sys = _sys(ctx)
-        win = sys.handles.require(ctx.args[0], Window)
+        x, y, w, h = _geom(_sys(ctx), ctx.args[0])
         seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
-        for i, v in enumerate((win.x, win.y, win.x + win.w, win.y + win.h)):
+        for i, v in enumerate((x, y, x + w, y + h)):
             ctx.mem.ww(seg, (off + 2 * i) & 0xFFFF, v & 0xFFFF)
         return 1
 
@@ -410,7 +417,14 @@ def install(api: ApiRegistry) -> None:
     def MoveWindow(ctx: CallContext) -> int:            # (hwnd, x, y, w, h, repaint)
         sys = _sys(ctx)
         hwnd, x, y, w, h, repaint = ctx.args
-        win = sys.handles.require(hwnd, Window)
+        obj = sys.handles.get(hwnd)
+        if not isinstance(obj, Window):
+            # A dialog (or control): record the requested position; final
+            # placement is host-managed (dialogs are centered by the host).
+            if obj is not None and hasattr(obj, "x"):
+                obj.x, obj.y = _signed(x), _signed(y)
+            return 1
+        win = obj
         win.x, win.y = _signed(x), _signed(y)
         resized = (win.w, win.h) != (_signed(w), _signed(h))
         win.w, win.h = _signed(w), _signed(h)
@@ -509,23 +523,17 @@ def install(api: ApiRegistry) -> None:
             return ui(caption, text, ctx.args[3]) & 0xFFFF
         return 1                    # headless: IDOK — modal UI auto-dismissed
 
-    @api.register("USER", 87, args="word str word segptr")
-    def DialogBox(ctx: CallContext) -> int:             # (hInst, template, parent, proc)
-        # STOPGAP until the dialog engine lands: skip the dialog, tell the
-        # host, and return -1 (the real API's failure value, which apps
-        # handle).  Logged loudly — never silently.
-        name = _resource_name(ctx, ctx.args[1])
-        _sys(ctx)  # ensure system exists
-        ctx.registry.services.setdefault("skipped_ui", []).append(
-            ("DialogBox", name))
-        return 0xFFFF                                    # -1: dialog not shown
-
     @api.register("USER", 171, args="word str word long")
     def WinHelp(ctx: CallContext) -> int:                # (hwnd, file, cmd, data)
+        # The WinHelp engine (.HLP rendering) is its own future slice.  Until
+        # then this behaves like help being unavailable — visibly: the host's
+        # modal box explains, matching real Windows' "cannot start help" box.
         helpfile = ctx.read_string(ctx.args[1]).decode("latin-1") if ctx.args[1] else ""
-        ctx.registry.services.setdefault("skipped_ui", []).append(
-            ("WinHelp", helpfile))
-        return 0                                         # help engine unavailable
+        ui = ctx.registry.services.get("messagebox_ui")
+        if ui is not None:
+            ui("Help", f"Cannot display help ({helpfile}) — the WinHelp "
+                       "engine is not implemented yet.", 0x30)
+        return 0
 
     @api.register("USER", 69, args="word")              # SetCursor(hcursor)
     def SetCursor(ctx: CallContext) -> int:
@@ -536,6 +544,8 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 22, args="word")              # SetFocus(hwnd)
     def SetFocus(ctx: CallContext) -> int:
+        # Accepts any window-like handle (dialog controls included); focus is
+        # host-managed, so this only records the previous focus.
         sys = _sys(ctx)
         prev = sys.machine.api.services.get("focus", 0)
         sys.machine.api.services["focus"] = ctx.args[0]
@@ -555,8 +565,10 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 34, args="word word")         # EnableWindow(hwnd, enable)
     def EnableWindow(ctx: CallContext) -> int:
-        _sys(ctx).handles.require(ctx.args[0], Window)
-        return 0                    # was not disabled (disabled state unmodelled)
+        # Window or dialog control; enable/disable is host-managed here.
+        if _sys(ctx).handles.get(ctx.args[0]) is None:
+            return 0
+        return 0                    # was not previously disabled
 
     @api.register("USER", 28, args="word ptr")          # ClientToScreen(hwnd, pt)
     def ClientToScreen(ctx: CallContext) -> int:
