@@ -83,6 +83,23 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — The LZSS decoder is now clean VM-free recovered code
+- **The decompressor is lifted out of the hook into pure, VM-less recovered code**
+  (`simant/recovered/lzss.py`) — the shape the source port targets: a plain
+  `decompress(compressed, out_len) -> bytes` (and a resumable `decode_chunk`) with NO
+  cpu / mem / hooks / offsets, behaving exactly like the original C `Unpack`.  It is
+  the Okumura LZSS with its fingerprint constants named (N=4096, F=18, WINDOW_START=
+  0x0FEE, THRESHOLD=2, space-filled window).
+- **The island is now a thin ADAPTER** (`simant/hooks.py`): it reads the routine's
+  DGROUP/stack state and drives `lzss.decode_chunk` over **memoryviews straight into VM
+  memory** (source, the 4KB window, output) — zero copies — then writes back the ABI exit
+  state.  Same byte-exact A/B gate (`test_unpack_island_is_byte_exact_vs_asm`, 136/136),
+  same ~20% faster-to-title.  This is the standing "shadow -> verified hook -> pure system"
+  progression: the interpreted game and a native port now share ONE decoder.
+- **Pure unit tests** (`simant/tests/test_lzss.py`) exercise the recovered function with a
+  round-trip encoder and the Okumura invariants — no VM needed, the form a native build
+  uses.  Full suite green.
+
 ## 2026-07-08 — The _Unpack LZSS island lands — byte-exact, ~18% faster load
 - **The asset-decompression bottleneck is now lifted.**  `simant/hooks.py` installs an
   island at seg7:A668 (`_Unpack`) that reimplements the Okumura LZSS decode in Python — a

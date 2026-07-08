@@ -25,6 +25,8 @@ ABI of __aFuldiv (far, callee-cleans — verified by live trace):
 """
 from __future__ import annotations
 
+from .recovered import lzss
+
 # NE segment (1-based) holding the C runtime helpers; resolved to a base at
 # install time.  SimAnt's __aF* math helpers live in segment 4.
 RT_SEG_INDEX = 4
@@ -83,18 +85,18 @@ def _make_uldiv_island(entry_off: int):
 # decoder: the caller asks for [bp+10] output bytes per call, and cross-call
 # state lives in DGROUP globals.
 #
-# The island is a faithful 1:1 transliteration of the ASM (setup A668-A698,
-# main loop A6C8, literal A6DD, match A706-A764, exit A779) so it produces the
-# identical output, window, and exit state — gated byte-exact against the ASM
-# by simant/tests/test_hooks.py.  On a mid-operation resume (entry [B7D4] != 0)
-# it passes through to the real routine (rare; keeps the delicate resume path
-# authoritative).  Exit codes written to [B7D4]: 0 clean (next call fresh),
-# 1 flag-read / 2 literal-read / 3 match-byte1 / 4 match-byte2 input-exhaust,
-# 5 mid-match (budget hit) — each the ASM's own resume re-entry code.
+# The decode ALGORITHM is recovered VM-free in `simant/recovered/lzss.py` (a
+# native port calls it directly).  This island is a thin ADAPTER: it reads the
+# routine's state from the DGROUP globals + stack, drives `lzss.decode_chunk`
+# over memoryviews straight into VM memory, and writes back the exact ABI exit
+# state — gated byte-exact against the ASM by simant/tests/test_hooks.py.  On a
+# mid-operation resume (entry [B7D4] != 0) it passes through to the real routine
+# (keeps the delicate two-sided-streaming resume path authoritative).  Exit
+# codes written to [B7D4] mirror the ASM's own resume re-entry codes (see
+# lzss.CODE_*): 0 clean, 1-4 input-exhaust points, 5 mid-match.
 UNPACK_SEG_INDEX = 7
 UNPACK_OFF = 0xA668
 UNPACK_SIG = bytes.fromhex("558bec83ec045756")   # push bp;mov bp,sp;sub sp,4;push di;push si
-N_WINDOW = 4096
 DG_SEG_INDEX = 10                                # DGROUP (auto-data) segment
 
 
@@ -104,7 +106,7 @@ def _make_unpack_island(machine):
     def island(cpu) -> None:
         m = cpu.mem
         s = cpu.s
-        rb, wb, rw, ww = m.rb, m.wb, m.rw, m.ww
+        rw, ww = m.rw, m.ww
 
         resume = rw(dg, 0xB7D4)
         if resume != 0:
@@ -133,76 +135,26 @@ def _make_unpack_island(machine):
         if in_rem >= 0x8000:
             in_rem -= 0x10000
 
-        di = out_off
-        count = 0
-        code = 0
-
-        def rd():                                 # read one source byte, advance si
-            nonlocal src_off
-            b = rb(src_seg, src_off)
-            src_off = (src_off + 1) & 0xFFFF
-            return b
-
-        while True:                               # main loop @ A6C8
-            flags >>= 1
-            if (flags & 0x100) == 0:              # need a fresh flag byte
-                in_rem -= 1
-                if in_rem < 0:
-                    code = 1
-                    break
-                flags = rd() | 0xFF00
-            if flags & 1:                         # literal (@ A6DD)
-                in_rem -= 1
-                if in_rem < 0:
-                    code = 2
-                    break
-                c = rd()
-                dx = (dx & 0xFF00) | c             # A6E4 mov dl,[si] leaves dl=c
-                wb(out_seg, di, c)
-                di = (di + 1) & 0xFFFF
-                wb(win_seg, (r + 4) & 0xFFFF, c)
-                r = (r + 1) & (N_WINDOW - 1)
-                count += 1
-                budget -= 1
-                if budget == 0:
-                    code = 0
-                    break
-            else:                                 # match (@ A706)
-                in_rem -= 1
-                if in_rem < 0:
-                    code = 3
-                    break
-                b1 = rd()
-                in_rem -= 1
-                if in_rem < 0:
-                    code = 4
-                    break
-                b2 = rd()
-                off = b1 | ((b2 >> 4) << 8)        # 12-bit window offset (cx)
-                length = (b2 & 0x0F) + thresh      # dx
-                dx = length
-                lrem = length                      # [B7D2] match countdown
-                while True:                        # copy loop @ A736
-                    c = rb(win_seg, (off + 4) & 0xFFFF)
-                    dx = c                          # A738 mov dl,[bx+4] leaves dl=c
-                    off = (off + 1) & (N_WINDOW - 1)
-                    wb(out_seg, di, c)
-                    di = (di + 1) & 0xFFFF
-                    wb(win_seg, (r + 4) & 0xFFFF, c)
-                    r = (r + 1) & (N_WINDOW - 1)
-                    count += 1
-                    budget -= 1
-                    if budget == 0:
-                        cx = off
-                        code = 5
-                        break
-                    lrem -= 1
-                    if lrem < 0:
-                        break
-                cx = off
-                if code == 5:
-                    ww(dg, 0xB7D2, lrem & 0xFFFF)  # save match countdown for resume
-                    break
+        # Drive the recovered VM-free decoder (simant/recovered/lzss.py) over
+        # memoryviews straight into VM memory — no copies.  window[i] IS the
+        # ASM's win_seg:[i+4]; source and output are contiguous from their far
+        # pointers.  The pure decoder writes the window + output in place and
+        # returns the full resumable state.
+        data = memoryview(m.data)
+        win_lin = m._xlat(win_seg, 4)
+        out_lin = m._xlat(out_seg, out_off)
+        st_ = lzss.decode_chunk(
+            data[m._xlat(src_seg, src_off):],             # source (reads <= in_rem)
+            0,
+            data[win_lin:win_lin + lzss.WINDOW_SIZE],     # 4KB sliding window
+            data[out_lin:out_lin + budget],               # output (writes <= budget)
+            0, r, flags, in_rem, budget, thresh, dx, cx)
+        code = st_.code
+        count = st_.out_pos
+        r, flags, in_rem, dx, cx = st_.r, st_.flags, st_.in_rem, st_.dx, st_.cx
+        src_off = (src_off + st_.src_pos) & 0xFFFF
+        if code == lzss.CODE_MATCH_COPY:
+            ww(dg, 0xB7D2, st_.match_rem & 0xFFFF)        # save match countdown
 
         # -- write back the exit state exactly as A779 does ------------------
         ww(dg, 0xB7D4, code)
