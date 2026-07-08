@@ -6,9 +6,10 @@ surface.  This is the model Win16 apps like SimAnt need (a child canvas inside
 a top-level frame).
 """
 from win16 import compositor
-from win16.api.objects import Surface, Window, WndClass
+from win16.api.objects import Menu, MenuItem, Surface, Window, WndClass
 
 WS_CHILD = 0x40000000
+MF_POPUP = 0x0010
 
 
 class _Sys:
@@ -67,6 +68,29 @@ def test_nested_children_and_clipping():
     # inner at canvas-local (40,40) -> frame (50,50); clipped to canvas edge 70.
     assert _px(out, 55, 55) == (0, 0, 255)
     assert _px(out, 69, 69) == (0, 0, 255)
+
+
+def test_menu_bar_drawn_above_client():
+    frame = _win(1, "Frame", 0, 0, 120, 60, rgb=(0, 0, 0))
+    frame.menu_obj = Menu(None, items=[
+        MenuItem(flags=MF_POPUP, id=0x10, text="&File", submenu=Menu(None)),
+        MenuItem(flags=MF_POPUP, id=0x11, text="&View", submenu=Menu(None)),
+    ])
+    out = compositor.composite(_Sys([frame]), frame)
+    # The output grows by exactly the menu-bar height; client sits below it.
+    assert out.h == 60 + compositor.MENU_BAR_H
+    assert out.w == 120
+    # Top strip is the menu-bar background; a title glyph paints black on it.
+    assert _px(out, 0, 0) == compositor._MENU_BG
+    ty = (compositor.MENU_BAR_H - 8) // 2
+    strip = [_px(out, x, ty + r) for x in range(compositor._MENU_PAD_X,
+             compositor._MENU_PAD_X + 4 * 8) for r in range(8)]
+    assert compositor._MENU_FG in strip            # "File" rendered
+    # The client content is shifted down by the bar, unmodified.
+    assert _px(out, 0, compositor.MENU_BAR_H) == (0, 0, 0)
+    # A childless / menuless frame is unchanged (no strip).
+    plain = _win(2, "Plain", 0, 0, 40, 40, rgb=(9, 9, 9))
+    assert compositor.composite(_Sys([plain]), plain).h == 40
 
 
 def test_top_level_selection_excludes_children():
