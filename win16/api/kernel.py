@@ -88,6 +88,38 @@ def install(api: ApiRegistry) -> None:
     def FreeProcInstance(ctx: CallContext) -> int:
         return 1
 
+    @api.register("KERNEL", 57, args="str str s_word")  # GetProfileInt(app,key,def)
+    def GetProfileInt(ctx: CallContext) -> int:
+        # Same as GetPrivateProfileInt but the fixed file is WIN.INI (absent
+        # here → default).  SimAnt reads [SimAnt] autotrack= etc. at startup.
+        sys: Win16System = ctx.registry.services["system"]
+        app, key, default = ctx.args
+        section = ctx.read_string(app).decode("latin-1").lower()
+        keyname = ctx.read_string(key).decode("latin-1").lower()
+        value = sys.profile("WIN.INI").get(section, {}).get(keyname)
+        if value is None:
+            return default & 0xFFFF
+        try:
+            return int(value.strip() or "0", 0) & 0xFFFF
+        except ValueError:
+            return default & 0xFFFF
+
+    @api.register("KERNEL", 58, args="str str str ptr word")  # GetProfileString
+    def GetProfileString(ctx: CallContext) -> int:
+        # (app, key, default, buffer, size) over WIN.INI.
+        sys: Win16System = ctx.registry.services["system"]
+        app, key, default, buf, size = ctx.args
+        if not app or not key:
+            raise NotImplementedError("profile enumeration (NULL app/key)")
+        section = ctx.read_string(app).decode("latin-1").lower()
+        keyname = ctx.read_string(key).decode("latin-1").lower()
+        value = sys.profile("WIN.INI").get(section, {}).get(keyname)
+        if value is None:
+            value = ctx.read_string(default).decode("latin-1")
+        out = value.encode("latin-1")[:max(size - 1, 0)]
+        ctx.mem.load((buf >> 16) & 0xFFFF, buf & 0xFFFF, out + b"\x00")
+        return len(out)
+
     @api.register("KERNEL", 127, args="str str s_word str")
     def GetPrivateProfileInt(ctx: CallContext) -> int:  # (app, key, default, file)
         sys: Win16System = ctx.registry.services["system"]
@@ -366,6 +398,13 @@ def install(api: ApiRegistry) -> None:
     def GetWindowsDirectory(ctx: CallContext) -> int:
         buf, cap = ctx.args
         path = b"C:\\WINDOWS"[:max(cap - 1, 0)]
+        ctx.mem.load((buf >> 16) & 0xFFFF, buf & 0xFFFF, path + b"\x00")
+        return len(path)
+
+    @api.register("KERNEL", 135, args="ptr word")       # GetSystemDirectory(buf, n)
+    def GetSystemDirectory(ctx: CallContext) -> int:
+        buf, cap = ctx.args
+        path = b"C:\\WINDOWS\\SYSTEM"[:max(cap - 1, 0)]
         ctx.mem.load((buf >> 16) & 0xFFFF, buf & 0xFFFF, path + b"\x00")
         return len(path)
 

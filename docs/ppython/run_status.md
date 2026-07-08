@@ -83,6 +83,33 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — SimAnt runs its full multi-window UI (title + ribbon), no gaps
+- **SimAnt now boots clean through startup into its running main loop and paints
+  its "windows within a window" UI** — no API gap, no crash, for 20M+ instructions.
+  Driven past the splash by the fail-loud frontier loop; each API identified from its
+  call site (args sniffed off the stack, strings read from DGROUP, callers named via
+  `SIMANTW.SYM`), not guessed.  Rendered: the **SIMANT title logo** (GenericWindow
+  522x352 child) and the **game ribbon** (RibbonWindow 627x73: Yard/Nest/Surface tabs,
+  tool buttons, bookmarks 1-7, YELLOW/BLACK/RED colony health bars) composited over the
+  AntRoot frame.  APIs added (all game-agnostic, in `win16/`):
+  - **USER**: SetWindowPos(232, honours SWP_NOMOVE/NOSIZE/SHOW/HIDE — sizes the child
+    panels), IsWindowVisible(49), BringWindowToTop(45), PeekMessage(109, non-blocking
+    filtered queue scan via new `Win16System.peek_message` — SimAnt's main loop peeks
+    mouse 0x200-0x209 PM_REMOVE), GetUpdateRgn(237, fills a region with the window's
+    update area).  USER.186 is an *unconfirmed* 1-word input gate at the head of the
+    `_StillDown` helper (over-popping it as 2 words corrupted the return address and
+    jumped into zeroed memory — the arg count matters); returns TRUE so the real
+    still-down decision is delegated to GetAsyncKeyState (USER.249, already native).
+  - **GDI**: CreateRectRgn(64) + GetRgnBox(181) on a new bounding-box `Region` object
+    (DeleteObject frees it; non-rect combines would degrade to the bbox).
+  - **KERNEL**: GetSystemDirectory(135), GetProfileInt(57)/GetProfileString(58) over
+    WIN.INI (absent -> default; SimAnt reads `[SimAnt] autotrack=` at startup).
+- The ordinal-neighbourhood self-checks held (confirmed USER.49=IsWindowVisible +
+  USER.50=FindWindow anchor 45=BringWindowToTop; USER.249=GetAsyncKeyState anchors the
+  key polling).  Full suite still green.  Next: confirm USER.186's true name; drive the
+  title/ribbon into the actual game screen (menu picks, the ant map in AntRoot), and the
+  x87 `fpu.py` frontier the simulation will need.
+
 ## 2026-07-08 — SimAnt boots + paints (the big stress target) + project renamed win16_re
 - The repo is now **win16_re** (generic Win16 RE framework, `README.md` added); paths are
   all relative so the rename was transparent.  New `simant/` package (runtime + boot test),

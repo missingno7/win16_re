@@ -134,6 +134,23 @@ class Win16System:
     def post_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> None:
         self.msg_queue.append((hwnd, msg, wparam, lparam, self.clock_ms, 0))
 
+    def peek_message(self, hwnd_filter: int, lo: int, hi: int, remove: bool):
+        """Non-blocking queue scan for PeekMessage: the first posted message
+        matching the hwnd filter (0 = any) and message range [lo, hi] (0,0 =
+        any).  Optionally removes it.  Returns the 6-tuple, or None if the
+        queue holds no matching message.  Unlike GetMessage it never blocks and
+        never synthesizes paint/timer — a game's peek loop must fall through to
+        its idle path (WaitMessage/GetMessage) when nothing is queued."""
+        for i, m in enumerate(self.msg_queue):
+            if hwnd_filter and m[0] != hwnd_filter:
+                continue
+            if (lo or hi) and not (lo <= m[1] <= hi):
+                continue
+            if remove:
+                del self.msg_queue[i]
+            return m
+        return None
+
     def pump_modal(self, *, paint: bool = True, timers: bool = False) -> bool:
         """Dispatch one pending WM_PAINT (and optionally a due WM_TIMER) to a
         window's WndProc — what a real modal loop (MessageBox/DialogBox) does so

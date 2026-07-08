@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .core import ApiRegistry, CallContext
-from .objects import Cursor, Icon, Menu, Window, WndClass, _signed
+from .objects import Cursor, Icon, Menu, Region, Window, WndClass, _signed
 from .system import Win16System
 
 WM_CREATE = 0x0001
@@ -526,6 +526,19 @@ def install(api: ApiRegistry) -> None:
         _write_msg(ctx, lpmsg, msg)
         return 1
 
+    @api.register("USER", 109, args="ptr word word word word")
+    def PeekMessage(ctx: CallContext) -> int:
+        # (lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg).  SimAnt's
+        # main loop peeks for mouse messages (0x200..0x209) with PM_REMOVE.
+        PM_REMOVE = 0x0001
+        sys = _sys(ctx)
+        lpmsg, hwnd_filter, lo, hi, remove = ctx.args
+        msg = sys.peek_message(hwnd_filter, lo, hi, bool(remove & PM_REMOVE))
+        if msg is None:
+            return 0
+        _write_msg(ctx, lpmsg, msg)
+        return 1
+
     @api.register("USER", 113, args="ptr")              # TranslateMessage(lpmsg)
     def TranslateMessage(ctx: CallContext) -> int:
         # Post a WM_CHAR for a WM_KEYDOWN whose virtual key has an ASCII form
@@ -640,6 +653,82 @@ def install(api: ApiRegistry) -> None:
         if repaint:
             win.dirty = True
         return 1
+
+    @api.register("USER", 232,
+                  args="word word word word word word word")
+    def SetWindowPos(ctx: CallContext) -> int:
+        # (hwnd, hwndInsertAfter, x, y, cx, cy, flags).  SimAnt sizes its child
+        # panels (RibbonWindow etc.) inside the main frame with this — the
+        # "windows within a window" layout.  Z-order (hwndInsertAfter) is
+        # host-managed; we honour the geometry + NOMOVE/NOSIZE/SHOW/HIDE flags.
+        SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
+        SWP_NOREDRAW, SWP_SHOWWINDOW, SWP_HIDEWINDOW = 0x0008, 0x0040, 0x0080
+        sys = _sys(ctx)
+        hwnd, _after, x, y, cx, cy, flags = ctx.args
+        win = sys.handles.get(hwnd)
+        if not isinstance(win, Window):
+            if win is not None and hasattr(win, "x") and not (flags & SWP_NOMOVE):
+                win.x, win.y = _signed(x), _signed(y)
+            return 1
+        resized = False
+        if not (flags & SWP_NOSIZE):
+            resized = (win.w, win.h) != (_signed(cx), _signed(cy))
+            win.w, win.h = _signed(cx), _signed(cy)
+        moved = False
+        if not (flags & SWP_NOMOVE):
+            moved = (win.x, win.y) != (_signed(x), _signed(y))
+            win.x, win.y = _signed(x), _signed(y)
+        if flags & SWP_SHOWWINDOW:
+            win.visible = True
+        elif flags & SWP_HIDEWINDOW:
+            win.visible = False
+        if resized:
+            win._surface = None                          # client surface rebuilds
+            cw, ch = win.client_size
+            sys.call_wndproc(win, WM_SIZE, 0, ((ch & 0xFFFF) << 16) | (cw & 0xFFFF))
+        if moved:
+            sys.call_wndproc(win, WM_MOVE, 0,
+                             ((win.y & 0xFFFF) << 16) | (win.x & 0xFFFF))
+        if (resized or moved) and not (flags & SWP_NOREDRAW):
+            win.dirty = True
+        return 1
+
+    @api.register("USER", 237, args="word word word")   # GetUpdateRgn
+    def GetUpdateRgn(ctx: CallContext) -> int:           # (hwnd, hrgn, bErase)
+        # Copy the window's pending update area into hrgn, returning the region
+        # type.  We track dirtiness as a bool, so the update region is the whole
+        # client rect when dirty (SIMPLEREGION) or empty (NULLREGION).  Does NOT
+        # validate the window (only BeginPaint/ValidateRgn do).
+        NULLREGION, SIMPLEREGION = 1, 2
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        rgn = sys.handles.get(ctx.args[1])
+        if not isinstance(rgn, Region):
+            return 0                                     # ERROR (bad region)
+        if isinstance(win, Window) and win.dirty:
+            cw, ch = win.client_size
+            rgn.x1, rgn.y1, rgn.x2, rgn.y2 = 0, 0, cw, ch
+            return SIMPLEREGION
+        rgn.x1 = rgn.y1 = rgn.x2 = rgn.y2 = 0
+        return NULLREGION
+
+    @api.register("USER", 45, args="word")              # BringWindowToTop(hwnd)
+    def BringWindowToTop(ctx: CallContext) -> int:
+        # Raise the window to the top of the z-order.  Draw order is the window
+        # list order (later = on top), so move it to the end.
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        if win in sys.windows:
+            sys.windows.remove(win)
+            sys.windows.append(win)
+        return 1
+
+    @api.register("USER", 49, args="word")              # IsWindowVisible(hwnd)
+    def IsWindowVisible(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        return 1 if isinstance(win, Window) and win.visible else 0
 
     @api.register("USER", 42, args="word word")         # ShowWindow(hwnd, cmd)
     def ShowWindow(ctx: CallContext) -> int:
@@ -889,6 +978,17 @@ def install(api: ApiRegistry) -> None:
         seg, off = (ctx.args[0] >> 16) & 0xFFFF, ctx.args[0] & 0xFFFF
         ctx.mem.ww(seg, off, x & 0xFFFF)
         ctx.mem.ww(seg, (off + 2) & 0xFFFF, y & 0xFFFF)
+        return 1
+
+    @api.register("USER", 186, args="word")
+    def _user_186_input_gate(ctx: CallContext) -> int:
+        # SimAnt's _StillDown helper (identified via SIMANTW.SYM) calls this to
+        # decide whether to poll the EXTENDED buttons (RBUTTON/INSERT/SPACE) in
+        # addition to LBUTTON, via GetAsyncKeyState (USER.249).  Its exact USER
+        # identity is unconfirmed (a hardware-input/enable gate); one word per
+        # the pascal stack balance at the call site (over-popping crashed the
+        # return).  Returning TRUE delegates the real "still down" decision to
+        # GetAsyncKeyState (0 headless).  TODO: confirm the ordinal name.
         return 1
 
     @api.register("USER", 249, args="word")             # GetAsyncKeyState(vk)

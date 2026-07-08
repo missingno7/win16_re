@@ -186,6 +186,25 @@ class Brush:
 
 
 @dataclass
+class Region:
+    """A GDI region — currently a single bounding rectangle (SimAnt uses
+    rectangular regions for clip/invalidation).  Non-rectangular combines
+    degrade to their bounding box until a case needs true region algebra."""
+    x1: int = 0
+    y1: int = 0
+    x2: int = 0
+    y2: int = 0
+    handle: int = 0
+
+    @property
+    def bounds(self) -> tuple[int, int, int, int]:
+        return self.x1, self.y1, self.x2, self.y2
+
+    def is_empty(self) -> bool:
+        return self.x2 <= self.x1 or self.y2 <= self.y1
+
+
+@dataclass
 class Palette:
     entries: list[tuple[int, int, int]] = field(default_factory=list)  # RGB
     handle: int = 0

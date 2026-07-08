@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from .core import ApiRegistry, CallContext
-from .objects import (DC, Bitmap, Brush, Font, Palette, StockObject, Surface,
-                      _signed, blit)
+from .objects import (DC, Bitmap, Brush, Font, Palette, Region, StockObject,
+                      Surface, _signed, blit)
 from .system import Win16System
 
 STOCK_NAMES = {
@@ -528,6 +528,24 @@ def install(api: ApiRegistry) -> None:
         if ctx.args[1] != 1:
             raise NotImplementedError(f"SetMapMode {ctx.args[1]} (only MM_TEXT)")
         return 1                    # previous mode = MM_TEXT
+
+    @api.register("GDI", 181, args="word ptr")          # GetRgnBox(hrgn, lpRect)
+    def GetRgnBox(ctx: CallContext) -> int:
+        NULLREGION, SIMPLEREGION = 1, 2
+        rgn = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(rgn, Region):
+            return 0                                     # ERROR
+        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
+        for i, v in enumerate(rgn.bounds):
+            ctx.mem.ww(seg, (off + 2 * i) & 0xFFFF, v & 0xFFFF)
+        return NULLREGION if rgn.is_empty() else SIMPLEREGION
+
+    @api.register("GDI", 64, args="word word word word")  # CreateRectRgn
+    def CreateRectRgn(ctx: CallContext) -> int:         # (x1, y1, x2, y2)
+        x1, y1, x2, y2 = (_signed(a) for a in ctx.args)
+        # GDI normalizes so x1<=x2, y1<=y2.
+        rgn = Region(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        return _sys(ctx).handles.add(rgn)
 
     @api.register("GDI", 69, args="word")               # DeleteObject(handle)
     def DeleteObject(ctx: CallContext) -> int:

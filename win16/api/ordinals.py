@@ -11,6 +11,9 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
     "KERNEL": {
         1: "FatalExit",
         3: "GetVersion",
+        57: "GetProfileInt",
+        58: "GetProfileString",
+        135: "GetSystemDirectory",
         5: "LocalAlloc",
         6: "LocalReAlloc",
         7: "LocalFree",
@@ -55,6 +58,11 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
     "USER": {
         1: "MessageBox",
         5: "InitApp",
+        45: "BringWindowToTop",
+        49: "IsWindowVisible",
+        109: "PeekMessage",
+        232: "SetWindowPos",
+        237: "GetUpdateRgn",
         6: "PostQuitMessage",
         10: "SetTimer",
         12: "KillTimer",
@@ -137,6 +145,8 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
     "GDI": {
         2: "SetBkMode",
         3: "SetMapMode",
+        64: "CreateRectRgn",
+        181: "GetRgnBox",
         7: "SetStretchBltMode",
         9: "SetTextColor",
         29: "PatBlt",
