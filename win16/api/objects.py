@@ -74,7 +74,13 @@ class Window:
     parent: int
     menu: int
     visible: bool = False
-    dirty: bool = False             # update region pending (whole client for now)
+    dirty: bool = False             # True iff update_rect is not None
+    # The accumulated update region as its bounding rect (client coords), per
+    # real USER: InvalidateRect unions rects in; BeginPaint validates (clears).
+    # WAP games (SimAnt) invalidate each object's own small rect and read the
+    # region back via GetUpdateRgn/GetRgnBox — the rects must round-trip.
+    update_rect: tuple | None = None            # (l, t, r, b) or None = clean
+    update_erase: bool = False                  # an RDW_ERASE is pending
     extra: bytearray = field(default_factory=bytearray)
     scroll: dict[int, tuple[int, int, int]] = field(default_factory=dict)
     #        bar -> (min, max, pos);  bar: 0=SB_HORZ, 1=SB_VERT

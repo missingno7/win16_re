@@ -408,7 +408,16 @@ def install(api: ApiRegistry) -> None:
         import numpy as np
         sys = _sys(ctx)
         (hdc, xd, yd, cx, cy, xs, ys, start, lines, bits, bmi, coloruse) = ctx.args
-        cx, cy, xs, ys = _signed(cx), _signed(cy), _signed(xs), _signed(ys)
+        # ALL of the coordinates are signed 16-bit — the destination origin
+        # (xd, yd) included.  A negative origin is legitimate: SimAnt's SELECT-A-
+        # GAME dialog paints at a client origin of (-1, -1), so its band blits
+        # arrive with xd = 0xFFFF.  Omitting xd/yd from this sign-extension read
+        # -1 as +65535, pushing every band fully off-surface (a blank white
+        # dialog).  This was masked while GDI.181 wrongly WROTE the region box
+        # over the paint rect (clobbering the -1 origin to 0); once 181 became
+        # the correct read-only RectInRegion, the real -1 flowed through here.
+        xd, yd, cx, cy, xs, ys = (_signed(xd), _signed(yd), _signed(cx),
+                                  _signed(cy), _signed(xs), _signed(ys))
         dst = _dc_surface(sys, hdc)
         if dst is None:
             return 0
@@ -571,7 +580,27 @@ def install(api: ApiRegistry) -> None:
             raise NotImplementedError(f"SetMapMode {ctx.args[1]} (only MM_TEXT)")
         return 1                    # previous mode = MM_TEXT
 
-    @api.register("GDI", 181, args="word ptr")          # GetRgnBox(hrgn, lpRect)
+    @api.register("GDI", 181, args="word ptr")          # RectInRegion(hrgn, lpRect)
+    def RectInRegion(ctx: CallContext) -> int:
+        # READS the rect and tests whether any part lies inside the region —
+        # it never writes.  This ordinal was briefly misidentified as GetRgnBox
+        # (which is GDI.134), whose lpRect WRITE stamped the update-region box
+        # over every WAP object's position rect (SimAnt's ribbon buttons piled
+        # at 0,0; the logo's bottom half lost its +176).  Identified via a
+        # winevdm +relay trace of the same call site, confirmed by Wine's
+        # gdi.exe16.spec: 181 = RectInRegionOld -> RectInRegion16.
+        rgn = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(rgn, Region):
+            return 0
+        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
+        l, t, r, b = (_signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF))
+                      for i in range(4))
+        if rgn.is_empty() or r <= l or b <= t:
+            return 0
+        return 1 if (l < rgn.x2 and r > rgn.x1 and
+                     t < rgn.y2 and b > rgn.y1) else 0
+
+    @api.register("GDI", 134, args="word ptr")          # GetRgnBox(hrgn, lpRect)
     def GetRgnBox(ctx: CallContext) -> int:
         NULLREGION, SIMPLEREGION = 1, 2
         rgn = _sys(ctx).handles.get(ctx.args[0])

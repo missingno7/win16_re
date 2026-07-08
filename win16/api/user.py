@@ -112,6 +112,32 @@ def _map_point(sysobj, ctx, sign: int) -> int:
     return 1
 
 
+def _invalidate(win, rect=None, erase: bool = False) -> None:
+    """Real-USER invalidation: union `rect` (client coords; None = whole
+    client) into the window's update region, remembering a pending erase.
+    BeginPaint validates (clears) it; GetUpdateRgn copies it out.  WAP games
+    invalidate each object's OWN rect and read it back through the region —
+    collapsing this to a whole-client bool destroyed those rects (SimAnt's
+    ribbon buttons / logo halves all redrew at the region box's 0,0)."""
+    cw, ch = win.client_size
+    r = (0, 0, cw, ch) if rect is None else rect
+    r = (max(r[0], 0), max(r[1], 0), min(r[2], cw), min(r[3], ch))
+    if r[2] <= r[0] or r[3] <= r[1]:
+        return
+    u = win.update_rect
+    win.update_rect = r if u is None else (
+        min(u[0], r[0]), min(u[1], r[1]), max(u[2], r[2]), max(u[3], r[3]))
+    win.update_erase = win.update_erase or erase
+    win.dirty = True
+
+
+def _validate(win) -> None:
+    """Clear the update region (what BeginPaint does)."""
+    win.update_rect = None
+    win.update_erase = False
+    win.dirty = False
+
+
 def _fill_window_bg(sysobj, win) -> None:
     """Paint a window's surface with its class background brush.  Applied on
     creation and after every resize (a resize rebuilds the surface as black),
@@ -415,7 +441,7 @@ def install(api: ApiRegistry) -> None:
             return 0
         if win.style & WS_VISIBLE:
             win.visible = True
-            win.dirty = True
+            _invalidate(win, erase=True)
         return hwnd
 
     @api.register("USER", 64, args="word word s_word s_word word")
@@ -542,7 +568,7 @@ def install(api: ApiRegistry) -> None:
         win = sys.handles.require(ctx.args[0], Window)
         menu = sys.handles.get(ctx.args[1])
         win.menu_obj = menu if isinstance(menu, Menu) else None
-        win.dirty = True
+        _invalidate(win, erase=True)
         return 1
 
     @api.register("USER", 154, args="word word word")   # CheckMenuItem(menu, id, flags)
@@ -740,7 +766,7 @@ def install(api: ApiRegistry) -> None:
         sys.call_wndproc(win, WM_MOVE, 0,
                          ((win.y & 0xFFFF) << 16) | (win.x & 0xFFFF))
         if repaint:
-            win.dirty = True
+            _invalidate(win, erase=True)
         return 1
 
     @api.register("USER", 232,
@@ -780,24 +806,24 @@ def install(api: ApiRegistry) -> None:
             sys.call_wndproc(win, WM_MOVE, 0,
                              ((win.y & 0xFFFF) << 16) | (win.x & 0xFFFF))
         if (resized or moved) and not (flags & SWP_NOREDRAW):
-            win.dirty = True
+            _invalidate(win, erase=True)
         return 1
 
     @api.register("USER", 237, args="word word word")   # GetUpdateRgn
     def GetUpdateRgn(ctx: CallContext) -> int:           # (hwnd, hrgn, bErase)
-        # Copy the window's pending update area into hrgn, returning the region
-        # type.  We track dirtiness as a bool, so the update region is the whole
-        # client rect when dirty (SIMPLEREGION) or empty (NULLREGION).  Does NOT
-        # validate the window (only BeginPaint/ValidateRgn do).
+        # Copy the window's ACCUMULATED update region (the union of invalidated
+        # rects, in client coords) into hrgn, returning the region type.  Does
+        # NOT validate (only BeginPaint does).  SimAnt's WAP engine invalidates
+        # each object's own rect and reads it back through this region — the
+        # rects must round-trip, not collapse to the whole client.
         NULLREGION, SIMPLEREGION = 1, 2
         sys = _sys(ctx)
         win = sys.handles.get(ctx.args[0])
         rgn = sys.handles.get(ctx.args[1])
         if not isinstance(rgn, Region):
             return 0                                     # ERROR (bad region)
-        if isinstance(win, Window) and win.dirty:
-            cw, ch = win.client_size
-            rgn.x1, rgn.y1, rgn.x2, rgn.y2 = 0, 0, cw, ch
+        if isinstance(win, Window) and win.update_rect is not None:
+            rgn.x1, rgn.y1, rgn.x2, rgn.y2 = win.update_rect
             return SIMPLEREGION
         rgn.x1 = rgn.y1 = rgn.x2 = rgn.y2 = 0
         return NULLREGION
@@ -847,7 +873,7 @@ def install(api: ApiRegistry) -> None:
         was = win.visible
         win.visible = ctx.args[1] != 0                  # 0 = SW_HIDE
         if win.visible and not was:
-            win.dirty = True
+            _invalidate(win, erase=True)
         return 1 if was else 0
 
     @api.register("USER", 81, args="word ptr word")     # FillRect(hdc, lpRect, hBrush)
@@ -1104,16 +1130,16 @@ def install(api: ApiRegistry) -> None:
         ctx.mem.ww(seg, (off + 2) & 0xFFFF, y & 0xFFFF)
         return 1
 
-    @api.register("USER", 186, args="word")
-    def _user_186_input_gate(ctx: CallContext) -> int:
-        # SimAnt's _StillDown helper (identified via SIMANTW.SYM) calls this to
-        # decide whether to poll the EXTENDED buttons (RBUTTON/INSERT/SPACE) in
-        # addition to LBUTTON, via GetAsyncKeyState (USER.249).  Its exact USER
-        # identity is unconfirmed (a hardware-input/enable gate); one word per
-        # the pascal stack balance at the call site (over-popping crashed the
-        # return).  Returning TRUE delegates the real "still down" decision to
-        # GetAsyncKeyState (0 headless).  TODO: confirm the ordinal name.
-        return 1
+    @api.register("USER", 186, args="word")             # SwapMouseButton(fSwap)
+    def SwapMouseButton(ctx: CallContext) -> int:
+        # Identified via winevdm's user.exe16.spec (the ordinal-name oracle);
+        # an earlier placeholder returned constant TRUE, which told SimAnt's
+        # _StillDown the mouse was LEFT-HANDED and swapped its button polling.
+        # Real semantics: set the swap state, return the PREVIOUS one.
+        services = _sys(ctx).machine.api.services
+        prev = services.get("mouse_buttons_swapped", 0)
+        services["mouse_buttons_swapped"] = 1 if ctx.args[0] else 0
+        return prev
 
     @api.register("USER", 106, args="word")             # GetKeyState(vk)
     def GetKeyState(ctx: CallContext) -> int:
@@ -1157,31 +1183,35 @@ def install(api: ApiRegistry) -> None:
     def InvalidateRect(ctx: CallContext) -> int:
         sys = _sys(ctx)
         win = sys.handles.require(ctx.args[0], Window)
-        # Update region granularity is whole-client for now; the rect (and the
-        # erase flag) will matter when pixel evidence demands them.
-        win.dirty = True
+        rect = None
+        if ctx.args[1]:
+            seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
+            rect = tuple(_signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF))
+                         for i in range(4))
+        _invalidate(win, rect, erase=bool(ctx.args[2]))
         return 1
 
     @api.register("USER", 39, args="word ptr")          # BeginPaint(hwnd, lpPaint)
     def BeginPaint(ctx: CallContext) -> int:
-        from .objects import Brush
         sys = _sys(ctx)
         win = sys.handles.require(ctx.args[0], Window)
         hdc = sys.new_dc(window=win)
-        # Erase the background with the class brush (real USER does this when
-        # the update region is marked for erase).  hbrBackground may be a real
-        # brush, a stock brush, or the (COLOR_xxx+1) system-colour encoding.
-        from .gdi import class_background_rgb
-        rgb = class_background_rgb(sys, win.wndclass.h_background)
-        if rgb is not None:
-            win.surface.fill(rgb)
-        win.dirty = False
-        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
+        # Real USER: rcPaint = the update region's box; the background is
+        # erased ONLY when an invalidation requested it (RDW_ERASE pending);
+        # BeginPaint then validates (clears) the update region.
         w, h = win.client_size
+        rc = win.update_rect or (0, 0, w, h)
+        if win.update_erase or win.update_rect is None:
+            from .gdi import class_background_rgb
+            rgb = class_background_rgb(sys, win.wndclass.h_background)
+            if rgb is not None:
+                win.surface.fill(rgb)
+        _validate(win)
+        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
         mem = ctx.mem
         mem.ww(seg, off, hdc)                            # hdc
         mem.ww(seg, off + 2, 0)                          # fErase (already erased)
-        for i, v in enumerate((0, 0, w, h)):             # rcPaint
+        for i, v in enumerate(rc):                       # rcPaint = update box
             mem.ww(seg, (off + 4 + 2 * i) & 0xFFFF, v & 0xFFFF)
         for i in range(10):                              # fRestore/fIncUpdate/reserved
             mem.ww(seg, (off + 12 + 2 * i) & 0xFFFF, 0)

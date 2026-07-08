@@ -83,6 +83,52 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — SOLVED: logo, ribbon buttons AND the SELECT-A-GAME dialog — two VM bugs, winevdm +relay as differential oracle
+- **The winevdm oracle went from source-reading to EXECUTION.**  otvdm v0.9.0 runs on this
+  Win11 box, so `WINEDEBUG=+relay otvdm SIMANTW.EXE` produced a 2.7M-line ground-truth API
+  trace of the REAL game.  The trace is now a standing instrument: when an ordinal's
+  identity or behaviour is in doubt, diff our call site against winevdm's relay log +
+  its `.spec` files.  (Downloaded to scratchpad; the .spec ordinal maps confirmed every
+  prior RE guess.)
+- **BUG #1 — ordinal misidentification (GDI.181).**  We had 181 as GetRgnBox (which WRITES
+  the region bbox into the caller's lpRect).  winevdm's `gdi.exe16.spec` + relay trace:
+  **181 = RectInRegionOld → RectInRegion16**, a READ-ONLY hit-test; real GetRgnBox is
+  GDI.134.  The bogus WRITE stamped the update-region box (0,0,W,H) over each WAP object's
+  position rect every paint — SimAnt's ribbon buttons piled at (0,0); the logo's bottom
+  half lost its +176 offset.  Fixed: 181 = real RectInRegion (reads the rect, returns
+  intersect 0/1, never writes); added 134 = GetRgnBox alongside.  Title logo (full ant +
+  complete SIMANT wordmark + all ribbon buttons) now pixel-correct.
+- **BUG #2 — unsigned dest origin in SetDIBitsToDevice (GDI.443).**  Fixing 181 turned the
+  SELECT-A-GAME dialog WHITE.  Not a region-cull (RectInRegion returned 1 for every dialog
+  object; all 33 band blits fired) — the blits' DEST X was 0xFFFF.  The dialog paints at a
+  client origin of (-1,-1); the 181-write had been silently clobbering that -1 to 0.  With
+  the correct read-only 181, the real -1 reached GDI.443, whose handler sign-extended
+  cx/cy/xs/ys but NOT the destination origin xd/yd — so -1 read as +65535 and every band
+  landed fully off-surface.  Fixed: xd/yd are sign-extended too.  Dialog now renders fully.
+- **Method note:** both bugs were latent, masked by a compensating bug.  The A/B that
+  cracked it: hold everything else fixed, flip ONLY ordinal 181 between write-box and
+  read-only, and diff the resulting blit DEST coords (0 vs 0xFFFF) — the discriminator was
+  the coordinate, not the return value or the draw count.  Full SimAnt gate (45) + framework/
+  microman (56) green; no other game regressed.
+
+## 2026-07-08 — Real USER update-region semantics (winevdm as the API oracle)
+- **Owner suggested mining winevdm (github.com/otya128/winevdm)** — the right call: it
+  bundles Wine's 16-bit USER, giving authoritative semantics for exactly the APIs under
+  suspicion.  Verified from its `user/window.c`: InvalidateRect16 = RedrawWindow(RDW_
+  INVALIDATE [+RDW_ERASE]) — rects ACCUMULATE into an update region; GetUpdateRgn16
+  copies that region out; BeginPaint validates (clears) it, erases ONLY when an erase is
+  pending, and reports rcPaint = the update box.  **winevdm is now the standing API-
+  semantics oracle: when a USER/GDI behaviour is in doubt, read its source, don't guess.**
+- **Implemented faithfully** (win16/api/): `Window.update_rect` (accumulated union, client
+  coords) + `update_erase` replace the info-destroying bool; InvalidateRect honours its
+  lpRect + erase args; GetUpdateRgn copies the real region; BeginPaint erases only when
+  asked, writes rcPaint = update box, and validates; every internal full-invalidate goes
+  through the new `_invalidate()`.  Full suite green (incl. ppython + microman pixel A/Bs).
+- **SimAnt logo/buttons: not yet healed by this** — [RESOLVED in the entry ABOVE this one].
+  The "GetRgnBox dozens of times per band" observation was the tell: those calls were
+  ordinal 181, which is NOT GetRgnBox — it is read-only RectInRegion.  The whole damage-
+  stamp corruption was a single-ordinal misID, plus a masked signed-origin bug in GDI.443.
+
 ## 2026-07-08 — ROOT MECHANISM FOUND: WAP damage-stamp destroys object rects (logo + ribbon buttons)
 - **One mechanism explains BOTH owner bugs** (logo halves overlapping at y=0 AND the ribbon
   buttons crawled into the top-left corner), exactly as the owner predicted.  Full chain,
