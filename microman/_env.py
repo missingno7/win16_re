@@ -1,9 +1,16 @@
-"""Locate the sibling dos_re framework checkout and put it on sys.path.
+"""Locate the vendored dos_re framework (a git submodule of this repo) and put
+it on sys.path.
 
-Override with the DOS_RE_PATH environment variable.  Nothing is vendored:
-this repo uses the framework in place, per dos_re/START_HERE.md's
-separate-repo workflow.  (Same shim as ppython/_env.py — each game package
-is self-contained so it can be run without importing the other.)
+dos_re is pinned in-repo at `dos_re/` (a real git submodule of
+https://github.com/missingno7/dos_re.git) — `git clone --recurse-submodules`
+(or `git submodule update --init`) is all a fresh checkout needs; no sibling
+directory or manual setup required.  (Same shim as ppython/_env.py — each game
+package is self-contained so it can be run without importing the other.)
+
+For active co-development of dos_re itself, set DOS_RE_PATH to point at a
+separate working checkout instead (e.g. one with uncommitted framework changes
+being tested against this repo before they land upstream) — this is a
+deliberate opt-in escape hatch, not the default.
 """
 from __future__ import annotations
 
@@ -11,14 +18,15 @@ import os
 import sys
 from pathlib import Path
 
-_DEFAULT = Path(r"D:\Games\DOS\dos_re")
+_SUBMODULE = Path(__file__).resolve().parent.parent / "dos_re"
 
 
 def ensure_dos_re() -> Path:
-    root = Path(os.environ.get("DOS_RE_PATH", _DEFAULT))
+    root = Path(os.environ["DOS_RE_PATH"]) if "DOS_RE_PATH" in os.environ else _SUBMODULE
     if not (root / "dos_re" / "cpu.py").exists():
-        raise ImportError(
-            f"dos_re framework not found at {root} — set DOS_RE_PATH to its checkout")
+        hint = ("DOS_RE_PATH points at a bad checkout" if "DOS_RE_PATH" in os.environ
+                else "run `git submodule update --init` in this repo")
+        raise ImportError(f"dos_re framework not found at {root} — {hint}")
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     return root

@@ -7,7 +7,7 @@ agents and humans working in this repo. Start with [`CLAUDE.md`](CLAUDE.md)
 ## What this repository is
 
 An **oracle-driven reverse-engineering framework for 16-bit Windows (NE)
-games** — the [`dos_re`](../DOS/dos_re) method (proven on DOS: Prehistorik 2,
+games** — the [`dos_re`](dos_re) method (proven on DOS: Prehistorik 2,
 Overkill) carried onto Windows 3.x. A Win16 game runs inside the `dos_re`
 8086/80186 VM; the operating system it calls (KERNEL / USER / GDI / SOUND /
 MMSYSTEM) is a **Python hook layer**, and individual hot ASM routines are
@@ -15,9 +15,11 @@ replaced with verified Python reimplementations. The original binary stays the
 oracle: a hooked run is accepted only when it reproduces the original's
 behaviour byte-for-byte.
 
-The framework (`win16/`) uses the `dos_re` VM from its sibling checkout at
-`D:\Games\DOS\dos_re` (put on `sys.path` by `conftest.py` / each package's
-`_env.py`; nothing is vendored).
+The framework (`win16/`) uses the `dos_re` VM as a **git submodule** pinned at
+`dos_re/` (https://github.com/missingno7/dos_re.git; put on `sys.path` by
+`conftest.py` / each package's `_env.py`). `git submodule update --init` after
+cloning; `DOS_RE_PATH` overrides to a separate checkout when actively
+co-developing dos_re itself.
 
 ## Working principles
 

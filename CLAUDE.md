@@ -1,7 +1,7 @@
 # CLAUDE.md — win16_re: oracle-driven reverse-engineering for 16-bit Windows games
 
 A **16-bit Windows 3.x (NE)** reverse-engineering framework, applying the oracle-driven
-method proven on DOS games by [`dos_re`](D:/Games/DOS/dos_re) (Prehistorik 2, Overkill).
+method proven on DOS games by [`dos_re`](dos_re) (Prehistorik 2, Overkill).
 `win16/` is the **game-agnostic** layer (NE loader + the Windows API surface + memory
 model + rendering + compositing + demos/snapshots/audio); it is the Win16 analogue of
 dos_re itself. Read [`AGENTS.md`](AGENTS.md) and [`docs/README.md`](docs/README.md) first.
@@ -18,10 +18,12 @@ the byte-exact recovery focus. The other games are their own packages:
 
 Boot any game with `scripts/boot.py <game>` to find the next `win16/` gap.
 
-**The method is dos_re's** — read `D:/Games/DOS/dos_re/docs/ai_porting_charter.md` there
-for the full phased method. This repo *uses* the framework from its sibling checkout at
-`D:\Games\DOS\dos_re` (added to `sys.path` by `conftest.py` / each package's `_env.py`;
-nothing is vendored).
+**The method is dos_re's** — read [`dos_re/docs/ai_porting_charter.md`](dos_re/docs/ai_porting_charter.md)
+for the full phased method. dos_re is a **git submodule** of this repo, pinned at
+`dos_re/` (https://github.com/missingno7/dos_re.git) — `git clone --recurse-submodules`
+(or `git submodule update --init`) is all a fresh checkout needs. Each package's
+`_env.py` (+ `conftest.py`) puts it on `sys.path`; `DOS_RE_PATH` is a deliberate opt-in
+escape hatch for co-developing dos_re itself against a separate working checkout.
 
 ## What is different from a DOS port
 

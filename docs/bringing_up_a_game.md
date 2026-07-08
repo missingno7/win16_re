@@ -86,7 +86,7 @@ instruction count — see [`pitfalls.md`](pitfalls.md) for why those are brittle
 Booting is the environment; recovering the game's own logic is the port. That
 is the lifting loop — [`lifted_islands.md`](lifted_islands.md) and, for the full
 phased method (equivalence contracts, the flip, the enhanced layer),
-[`dos_re/docs/ai_porting_charter.md`](../../DOS/dos_re/docs/ai_porting_charter.md).
+[`dos_re/docs/ai_porting_charter.md`](../dos_re/docs/ai_porting_charter.md).
 
 ## Where floating point shows up
 

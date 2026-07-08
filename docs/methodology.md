@@ -3,7 +3,7 @@
 This is the honesty discipline that keeps recovery from drifting into fiction.
 It is dos_re's methodology applied to Win16; the full crystallization pyramid,
 hook lifecycle, and altitude rules live in
-[`dos_re/docs/methodology.md`](../../DOS/dos_re/docs/methodology.md) and are not
+[`dos_re/docs/methodology.md`](../dos_re/docs/methodology.md) and are not
 repeated here. This page is the Win16-flavoured summary.
 
 ## The one rule

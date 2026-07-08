@@ -1,7 +1,7 @@
 # win16_re documentation
 
 The reverse-engineering method for 16-bit Windows (NE) games, adapted from
-[`dos_re`](../../DOS/dos_re) (whose docs are the deeper reference for the
+[`dos_re`](../dos_re) (whose docs are the deeper reference for the
 shared principles — evidence ladders, the lifting loop, the enhanced-layer
 endgame). Read these when they apply; don't re-derive what dos_re already
 wrote down.
@@ -32,11 +32,11 @@ Related, outside `docs/`:
 These are documented once, in dos_re, and apply here unchanged. Read them there
 when you reach that phase:
 
-- [`dos_re/docs/methodology.md`](../../DOS/dos_re/docs/methodology.md) — the
+- [`dos_re/docs/methodology.md`](../dos_re/docs/methodology.md) — the
   full crystallization pyramid and hook lifecycle.
-- [`dos_re/docs/ai_porting_charter.md`](../../DOS/dos_re/docs/ai_porting_charter.md)
+- [`dos_re/docs/ai_porting_charter.md`](../dos_re/docs/ai_porting_charter.md)
   — the complete method: the proof spine, the determinism trap, the phased
   roadmap, the equivalence contracts (gameplay byte-exact, rendering
   pixel-exact, audio event-exact, input semantic-exact).
-- [`dos_re/docs/pitfalls.md`](../../DOS/dos_re/docs/pitfalls.md) — the 24
+- [`dos_re/docs/pitfalls.md`](../dos_re/docs/pitfalls.md) — the 24
   general mistakes; ours in [`pitfalls.md`](pitfalls.md) are the Win16 additions.

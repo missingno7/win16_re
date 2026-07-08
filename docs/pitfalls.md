@@ -1,6 +1,6 @@
 # Pitfalls — the mistakes this project made, and the rule that fixed each
 
-The general list is [`dos_re/docs/pitfalls.md`](../../DOS/dos_re/docs/pitfalls.md).
+The general list is [`dos_re/docs/pitfalls.md`](../dos_re/docs/pitfalls.md).
 These are the **Win16-specific** additions — each one actually happened in this
 repo, cost real debugging time, and left a rule.
 
