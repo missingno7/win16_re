@@ -83,6 +83,37 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — SimAnt hooking infrastructure + first island (__aFuldiv)
+- **SimAnt is now the sole test target.**  `pytest.ini` scopes the default run to
+  `simant/tests` + the game-AGNOSTIC framework tests SimAnt relies on (compositor,
+  audio, hugeheap, localheap, msgbox).  ppython/microman tests are intentionally not
+  collected (run `pytest microman/tests tests` for them); they may break without
+  blocking SimAnt.  Default suite **35 green in <1s**.
+- **Hooking infrastructure stood up, mirroring microman's** (the standing lifted-island
+  method):
+  - `simant/probes/profile.py` — PC-sampling profiler.  Buckets the CPU by
+    (NE-segment, offset) across SimAnt's SIX code segments and names each hot bucket
+    from the symbol file.  `python -m simant.probes.profile`.
+  - `simant/probes/symbols.py` — reads the shipped **SIMANTW.SYM** (MAPSYM) to turn any
+    `seg:offset` into the nearest routine name (flat nearest-preceding; approximate but
+    dense).  This is what named `_StillDown`/`_DialogWaitInit` during USER.186 bring-up.
+  - `simant/hooks.py` — signature-verified island registry + `install(machine)`; refuses
+    to install on a prologue-byte mismatch.  `simant/runtime.install_hooks` wires it to
+    the generic `scripts/games.install_game_hooks('simant', m)` and play.py `--hooks`.
+- **First island: `__aFuldiv`** — the profiler's runaway #1 (~14% of steady-state
+  samples): the Microsoft C far 32-bit UNSIGNED long-divide runtime helper, called
+  constantly for the map/coordinate math.  Lifted to one exact Python `//`.  ABI nailed
+  from a live trace (far, callee-cleans: `retf 8`; dividend/divisor on the stack;
+  quotient in DX:AX; BX/SI/DI/BP preserved; CX clobbered).  Engages hard — **91,628
+  fires over 6M steady-state steps**, game still paints, no crash.
+- **The A/B oracle gate** (`simant/tests/test_hooks.py`): runs the ORIGINAL ASM routine
+  and the island over 14 input pairs (both code paths) and requires an identical
+  register RESULT.  Scoped to the ABI contract (result + preserved regs + `retf` unwind),
+  NOT the caller-clobbered CX scratch — on the full-32-bit path the ASM leaves an
+  algorithm-internal intermediate in CX that no caller observes and that only the loop
+  the island skips could reproduce.  Next islands: `_CenterAnt`, the `__ftol`/`__aFldiv`
+  siblings, and the `_XferTileColor`/`_FloorTiles` render loops the profiler ranks next.
+
 ## 2026-07-08 — SimAnt runs its full multi-window UI (title + ribbon), no gaps
 - **SimAnt now boots clean through startup into its running main loop and paints
   its "windows within a window" UI** — no API gap, no crash, for 20M+ instructions.

@@ -31,3 +31,10 @@ def load_exe() -> NEExecutable:
 
 def create_machine() -> Win16Machine:
     return _create_machine(EXE_PATH, winflags=WINFLAGS_NO_FPU)
+
+
+def install_hooks(machine) -> int:
+    """Install SimAnt's lifted-island hooks; returns the number installed.
+    (Called by scripts/games.install_game_hooks and play.py --hooks.)"""
+    from . import hooks
+    return hooks.install(machine)
