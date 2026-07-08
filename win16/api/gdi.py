@@ -62,6 +62,45 @@ def brush_object_rgb(brush) -> tuple[int, int, int] | None:
     raise NotImplementedError(f"brush {kind!r} has no fill colour")
 
 
+# Windows 3.1 default system colours, indexed by COLOR_* (GetSysColor index).
+# A WNDCLASS hbrBackground is commonly (HBRUSH)(COLOR_xxx + 1) rather than a
+# real brush handle; resolving that to a fill colour is what keeps window
+# backgrounds their intended grey/white instead of an unpainted black.
+SYS_COLORS = {
+    0: (0xC0, 0xC0, 0xC0),   # SCROLLBAR
+    1: (0x00, 0x80, 0x80),   # BACKGROUND (desktop)
+    2: (0x00, 0x00, 0x80),   # ACTIVECAPTION
+    3: (0x80, 0x80, 0x80),   # INACTIVECAPTION
+    4: (0xC0, 0xC0, 0xC0),   # MENU
+    5: (0xFF, 0xFF, 0xFF),   # WINDOW
+    6: (0x00, 0x00, 0x00),   # WINDOWFRAME
+    7: (0x00, 0x00, 0x00),   # MENUTEXT
+    8: (0x00, 0x00, 0x00),   # WINDOWTEXT
+    9: (0xFF, 0xFF, 0xFF),   # CAPTIONTEXT
+    10: (0xC0, 0xC0, 0xC0),  # ACTIVEBORDER
+    11: (0xC0, 0xC0, 0xC0),  # INACTIVEBORDER
+    12: (0x80, 0x80, 0x80),  # APPWORKSPACE
+    13: (0x00, 0x00, 0x80),  # HIGHLIGHT
+    14: (0xFF, 0xFF, 0xFF),  # HIGHLIGHTTEXT
+    15: (0xC0, 0xC0, 0xC0),  # BTNFACE
+    16: (0x80, 0x80, 0x80),  # BTNSHADOW
+    17: (0x80, 0x80, 0x80),  # GRAYTEXT
+    18: (0x00, 0x00, 0x00),  # BTNTEXT
+}
+
+
+def class_background_rgb(sysobj, h_background: int):
+    """Resolve a WNDCLASS hbrBackground to an (r,g,b) fill, or None for no
+    background.  Accepts a real Brush/StockObject handle OR the common
+    (COLOR_xxx + 1) system-colour encoding."""
+    obj = sysobj.handles.get(h_background)
+    if obj is not None:
+        return brush_object_rgb(obj)
+    if 1 <= h_background <= len(SYS_COLORS):
+        return SYS_COLORS[h_background - 1]      # (COLOR_xxx + 1) convention
+    return None
+
+
 def _brush_rgb(sys: Win16System, hdc: int) -> tuple[int, int, int]:
     dc = sys.handles.require(hdc, DC)
     return brush_object_rgb(dc.selected.get("brush"))

@@ -60,6 +60,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         5: "InitApp",
         45: "BringWindowToTop",
         49: "IsWindowVisible",
+        106: "GetKeyState",
         109: "PeekMessage",
         229: "GetTopWindow",
         230: "GetNextWindow",

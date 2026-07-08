@@ -82,6 +82,17 @@ def _get_window(sysobj, hwnd: int, cmd: int) -> int:
     return 0
 
 
+def _fill_window_bg(sysobj, win) -> None:
+    """Paint a window's surface with its class background brush.  Applied on
+    creation and after every resize (a resize rebuilds the surface as black),
+    so areas the app never draws show the class's grey/white — not an
+    unpainted black — exactly as the hbrBackground brush would on real USER."""
+    from .gdi import class_background_rgb
+    rgb = class_background_rgb(sysobj, win.wndclass.h_background)
+    if rgb is not None:
+        win.surface.fill(rgb)
+
+
 def _geom(sysobj, handle: int) -> tuple[int, int, int, int]:
     """Resolve any window-like handle (Window, Dialog, control) to its
     (x, y, w, h) geometry — they are all windows in Win16."""
@@ -364,6 +375,9 @@ def install(api: ApiRegistry) -> None:
                      extra=bytearray(wndclass.wnd_extra))
         hwnd = sys.handles.add(win)
         sys.windows.append(win)
+        # Paint the initial background with the class brush so areas the app
+        # never draws show its intended grey/white, not an unpainted black.
+        _fill_window_bg(sys, win)
         cs_ptr = _build_createstruct(ctx, sys, win, lp_param, cls_ptr, title_ptr)
         if sys.call_wndproc(win, WM_CREATE, 0, cs_ptr) & 0xFFFF == 0xFFFF:
             sys.windows.remove(win)
@@ -686,6 +700,7 @@ def install(api: ApiRegistry) -> None:
         win.w, win.h = _signed(w), _signed(h)
         if resized:
             win._surface = None                          # client surface rebuilds
+            _fill_window_bg(sys, win)
             cw, ch = win.client_size
             sys.call_wndproc(win, WM_SIZE, 0, ((ch & 0xFFFF) << 16) | (cw & 0xFFFF))
         sys.call_wndproc(win, WM_MOVE, 0,
@@ -724,6 +739,7 @@ def install(api: ApiRegistry) -> None:
             win.visible = False
         if resized:
             win._surface = None                          # client surface rebuilds
+            _fill_window_bg(sys, win)
             cw, ch = win.client_size
             sys.call_wndproc(win, WM_SIZE, 0, ((ch & 0xFFFF) << 16) | (cw & 0xFFFF))
         if moved:
@@ -1051,6 +1067,14 @@ def install(api: ApiRegistry) -> None:
         # GetAsyncKeyState (0 headless).  TODO: confirm the ordinal name.
         return 1
 
+    @api.register("USER", 106, args="word")             # GetKeyState(vk)
+    def GetKeyState(ctx: CallContext) -> int:
+        # State of a key AT THE LAST message (vs GetAsyncKeyState's live poll).
+        # We derive both from the same message-fed key set, so bit 15 = down.
+        # (Toggle bit 0 for lock keys is not tracked until a game needs it.)
+        services = _sys(ctx).machine.api.services
+        return 0x8000 if ctx.args[0] in services.get("async_keys", set()) else 0
+
     @api.register("USER", 249, args="word")             # GetAsyncKeyState(vk)
     def GetAsyncKeyState(ctx: CallContext) -> int:
         # Bit 15: key is down NOW.  Bit 0: key went down since the last call
@@ -1097,11 +1121,12 @@ def install(api: ApiRegistry) -> None:
         win = sys.handles.require(ctx.args[0], Window)
         hdc = sys.new_dc(window=win)
         # Erase the background with the class brush (real USER does this when
-        # the update region is marked for erase).
-        bg = sys.handles.get(win.wndclass.h_background)
-        if isinstance(bg, Brush):
-            c = bg.color
-            win.surface.fill((c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF))
+        # the update region is marked for erase).  hbrBackground may be a real
+        # brush, a stock brush, or the (COLOR_xxx+1) system-colour encoding.
+        from .gdi import class_background_rgb
+        rgb = class_background_rgb(sys, win.wndclass.h_background)
+        if rgb is not None:
+            win.surface.fill(rgb)
         win.dirty = False
         seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
         w, h = win.client_size
