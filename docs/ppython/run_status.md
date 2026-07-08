@@ -83,6 +83,34 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — MILESTONE: SimAnt reaches IN-GAME (Quick Game) + snapshot-anywhere
+- **In-game reached.** Start -> "Select a Game" -> Quick Game now renders live
+  gameplay: the nest view with a dug ant tunnel, the surface panel, the caste
+  slider ("Soldiers 40%"), live palette readouts.  ~44.8M instructions in.
+- **The click recipe** (important — WAP polls the mouse, it does NOT use the
+  WM_LBUTTONDOWN lParam): set `services['cursor_pos']` to the object's SCREEN
+  coords and hold VK_LBUTTON (`services['async_keys']={0x01}`) across a few
+  frames, then release + post WM_LBUTTONUP.  Quick Game = screen (337,186)
+  (dialog 0x13c at frame (138,116) + object center (199,70)).  Open Select-a-Game
+  first by clicking body window 0x118 at (250,150).  Driver: scratchpad
+  `to_ingame.py`.
+- **API frontier closed** (each ID confirmed against winevdm .spec): USER.156 was
+  mis-registered GetSubMenu -> it is **GetSystemMenu** (GetSubMenu=159); added
+  RemoveMenu(412)/DeleteMenu(413)/GetMenuItemCount(263), SetWindowText(37),
+  GetScrollPos(63), ScrollWindow(61), EqualRect(244), InvalidateRgn(126)/
+  ValidateRgn(128); GDI SaveDC(30)/RestoreDC(39)/IntersectClipRect(22); INT 2Fh
+  serviced as unhandled-multiplex.  dos_re gained **PUSHA/POPA** (0x60/0x61).
+- **Next frontier: SetTimer-with-TimerProc** (the sim-tick callback) — needed for
+  the ant simulation to animate.  Requires calling a VM callback on each timer.
+- **Snapshot anywhere** (owner ask): F9 used to time out on the menus/in-game
+  because it only parked at a GetMessage boundary, but those loops busy-poll
+  PeekMessage.  The vmsnap machinery already round-trips from ANY instruction
+  boundary (proven bit-exact in-game: digest+instr+CS:IP match after restore);
+  only the interactive PAUSE was the limit.  Fix: `InteractiveDriver.check_pause()`
+  called between 4096-instr chunks parks the CPU thread at an instruction
+  boundary too.  Modal DialogBox/MessageBox stay inspection-only (nested Python
+  loop).  Commits: dos_re `c8f5cf8`, win16_re `79e0655` + `4a7f882`.
+
 ## 2026-07-08 — Performance: SimAnt is spin-bound, and a byte-exact +27% interpreter win
 - **Window sizing** (owner ask): SimAnt is resolution-adaptive — it creates the
   AntRoot frame, calls `ShowWindow(SW_SHOWMAXIMIZED)`, then sizes RibbonWindow +
