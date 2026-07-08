@@ -79,7 +79,7 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
     hk = runtime.create_machine()
     hk.cpu.trace_enabled = False
-    assert hooks.install(hk) == 2               # __aFuldiv + _Unpack
+    assert hooks.install(hk) == 3               # __aFuldiv + _Unpack + bytecopy
     isl = _run_island(hk, dividend, divisor)
 
     assert asm["ax"] | (asm["dx"] << 16) == (dividend // divisor) & 0xFFFFFFFF
@@ -89,8 +89,8 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
 def test_install_counts_and_verifies():
     m = runtime.create_machine()
-    assert hooks.install(m) == 2
-    assert runtime.install_hooks(runtime.create_machine()) == 2
+    assert hooks.install(m) == 3
+    assert runtime.install_hooks(runtime.create_machine()) == 3
 
 
 def _capture_unpack_output(with_island, max_calls, step_budget):
@@ -170,3 +170,61 @@ def test_install_refuses_wrong_code():
                (cs << 4) + hooks.AFULDIV_OFF + 16] = bytes(16)
     with pytest.raises(AssertionError):
         hooks.install(m)
+
+
+# ---- the byte-memcpy island (seg2:3460) --------------------------------------
+from dos_re.cpu import ZF as _ZF                       # noqa: E402
+
+
+def _run_bytecopy(with_island, src_seg, src_off, dst_seg, dst_off, n, pattern):
+    """Set up the loop's frame (src/dst huge pointers @bp-8/-6/-12/-10, SI=n)
+    with `pattern` at the source, run to the loop exit, and report the copied
+    region + exit registers/frame.  with_island hooks seg2:3460 (one step);
+    otherwise the real ASM loop runs."""
+    m = runtime.create_machine()
+    m.cpu.trace_enabled = False
+    cs2 = m.seg_bases[hooks.BYTECOPY_SEG_INDEX]
+    if with_island:
+        hooks.install(m)
+    s = m.cpu.s
+    src_lin = m.mem._xlat(src_seg, src_off)
+    m.mem.data[src_lin:src_lin + n] = pattern
+    s.cs, s.ip, s.bp, s.si, s.ax = cs2, hooks.BYTECOPY_OFF, 0xC000, n & 0xFFFF, 0x5500
+    for off, v in ((-8, src_off), (-6, src_seg), (-12, dst_off), (-10, dst_seg)):
+        m.mem.ww(s.ss, (s.bp + off) & 0xFFFF, v)
+    if with_island:
+        m.cpu.step()
+    else:
+        for _ in range(n * 15 + 200):
+            m.cpu.step()
+            if (s.cs & 0xFFFF, s.ip & 0xFFFF) == (cs2, hooks.BYTECOPY_EXIT):
+                break
+        else:
+            raise AssertionError("ASM byte-copy loop did not reach its exit")
+    assert (s.cs & 0xFFFF, s.ip & 0xFFFF) == (cs2, hooks.BYTECOPY_EXIT)
+    dst_lin = m.mem._xlat(dst_seg, dst_off)
+    return bytes(m.mem.data[dst_lin:dst_lin + n]), dict(
+        ax=s.ax, bx=s.bx, es=s.es, si=s.si, zf=m.cpu.get_flag(_ZF),
+        src_off=m.mem.rw(s.ss, (s.bp - 8) & 0xFFFF),
+        dst_off=m.mem.rw(s.ss, (s.bp - 12) & 0xFFFF))
+
+
+# (src_seg, src_off, dst_seg, dst_off, n) — real-mode segments in scratch RAM.
+# Includes the real 960-byte tile-row case, a 1-byte edge, and an OVERLAPPING
+# forward copy (dst 16 bytes after src) that must smear exactly like the ASM.
+_COPY_CASES = [
+    (0x7000, 0x0004, 0x7100, 0x0000, 960),      # the observed tile-row copy
+    (0x7000, 0x0000, 0x7100, 0x0000, 1),
+    (0x7000, 0x0000, 0x7100, 0x0000, 300),
+    (0x7000, 0x0010, 0x7000, 0x0000, 200),      # dst before src (no smear)
+    (0x7000, 0x0000, 0x7000, 0x0010, 200),      # dst after src -> smears
+]
+
+
+@pytest.mark.parametrize("src_seg, src_off, dst_seg, dst_off, n", _COPY_CASES)
+def test_bytecopy_island_matches_asm(src_seg, src_off, dst_seg, dst_off, n):
+    pattern = bytes((i * 37 + 11) & 0xFF for i in range(n))
+    asm = _run_bytecopy(False, src_seg, src_off, dst_seg, dst_off, n, pattern)
+    isl = _run_bytecopy(True, src_seg, src_off, dst_seg, dst_off, n, pattern)
+    assert isl[0] == asm[0], "copied bytes differ"
+    assert isl[1] == asm[1], f"exit state differs: island {isl[1]} != asm {asm[1]}"

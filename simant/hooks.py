@@ -25,7 +25,11 @@ ABI of __aFuldiv (far, callee-cleans — verified by live trace):
 """
 from __future__ import annotations
 
+from dos_re.cpu import AF, CF, OF, PF, SF, ZF
+
 from .recovered import lzss
+
+_ARITH = CF | PF | AF | ZF | SF | OF
 
 # NE segment (1-based) holding the C runtime helpers; resolved to a base at
 # install time.  SimAnt's __aF* math helpers live in segment 4.
@@ -191,6 +195,63 @@ def _make_unpack_island(machine):
     return island
 
 
+# -- a far byte-memcpy (seg2:3460) — the tile/map block copy -----------------
+#
+# A compiler-emitted far byte-copy loop (the profiler mislabels the region;
+# the neighbouring hot 24% is actually a GetTickCount frame-pacing busy-wait,
+# NOT a tile blit, and is left alone because accelerating it would shift the
+# RNG-seeded worldgen).  This loop copies SI bytes from a huge source pointer
+# (offset @bp-8, selector @bp-6) to a huge dest pointer (offset @bp-12,
+# selector @bp-10), each advancing one byte at a time with a +8 selector bump
+# on every 64K wrap.  Observed: 960-byte tile rows, ~9.5% of load.  Consecutive
+# hugeheap selectors map to contiguous linear memory, so the whole run is one
+# linear block move (the island detects the rare overlapping-forward case and
+# falls back to a smearing byte copy to stay byte-exact).
+BYTECOPY_SEG_INDEX = 2
+BYTECOPY_OFF = 0x3460
+BYTECOPY_SIG = bytes.fromhex(                    # les..jnz, 37 bytes
+    "c45ef88346f80173058146fa0800268a07c45ef48346f40173058146f608002688074e75db")
+BYTECOPY_EXIT = BYTECOPY_OFF + len(BYTECOPY_SIG)  # 0x3485 (after jnz not taken)
+
+
+def _make_bytecopy_island(machine):
+    def island(cpu) -> None:
+        m = cpu.mem
+        s = cpu.s
+        ss, bp = s.ss, s.bp
+        rw, ww, xlat = m.rw, m.ww, m._xlat
+
+        n = s.si or 0x10000                      # SI==0 loops the full 64K
+        src_off, src_sel = rw(ss, (bp - 8) & 0xFFFF), rw(ss, (bp - 6) & 0xFFFF)
+        dst_off, dst_sel = rw(ss, (bp - 12) & 0xFFFF), rw(ss, (bp - 10) & 0xFFFF)
+        src_lin, dst_lin = xlat(src_sel, src_off), xlat(dst_sel, dst_off)
+
+        d = m.data
+        if src_lin < dst_lin < src_lin + n:      # overlapping forward -> smear
+            for i in range(n):
+                d[dst_lin + i] = d[src_lin + i]
+        else:                                    # non-overlapping linear move
+            d[dst_lin:dst_lin + n] = bytes(d[src_lin:src_lin + n])
+
+        # Advance both huge pointers exactly as the per-byte adds + selector
+        # bumps would, and set the registers/flags the loop exit leaves.
+        ww(ss, (bp - 8) & 0xFFFF, (src_off + n) & 0xFFFF)
+        ww(ss, (bp - 6) & 0xFFFF, (src_sel + 8 * ((src_off + n) >> 16)) & 0xFFFF)
+        ww(ss, (bp - 12) & 0xFFFF, (dst_off + n) & 0xFFFF)
+        ww(ss, (bp - 10) & 0xFFFF, (dst_sel + 8 * ((dst_off + n) >> 16)) & 0xFFFF)
+        s.ax = (s.ax & 0xFF00) | d[src_lin + n - 1]      # AL = last byte copied
+        s.bx = (dst_off + n - 1) & 0xFFFF                # last dest offset used
+        s.es = (dst_sel + 8 * ((dst_off + n - 1) >> 16)) & 0xFFFF
+        s.si = 0
+        # `dec si` -> 0 then `jnz` not taken: ZF/PF set, others clear; CF from
+        # the last pointer add is 0 for any run that does not overflow a 16-bit
+        # offset into a >0xFFFF selector (never happens for these buffers).
+        s.flags = (s.flags & ~_ARITH) | ZF | PF
+        s.ip = BYTECOPY_EXIT & 0xFFFF
+
+    return island
+
+
 # Registry of (segment index, entry offset, signature, island factory, name).
 # Each factory takes (machine, off) and returns the hook fn.
 _ISLANDS = [
@@ -198,6 +259,8 @@ _ISLANDS = [
      lambda machine, off: _make_uldiv_island(off), "__aFuldiv"),
     (UNPACK_SEG_INDEX, UNPACK_OFF, UNPACK_SIG,
      lambda machine, off: _make_unpack_island(machine), "_Unpack"),
+    (BYTECOPY_SEG_INDEX, BYTECOPY_OFF, BYTECOPY_SIG,
+     lambda machine, off: _make_bytecopy_island(machine), "bytecopy"),
 ]
 
 

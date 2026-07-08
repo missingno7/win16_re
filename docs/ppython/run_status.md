@@ -83,6 +83,27 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — Byte-copy island — load now ~35% faster; tile "blit" was a timing wait
+- **Owner asked to island the "tile color blit" + tiles.**  Tracing corrected the profiler's
+  (offset-based, cross-segment) symbol labels: the hot 24% at seg2:47xx labelled
+  `_XferTileColor`/`_WaitedEnough` is NOT a blit — it is a **GetTickCount frame-pacing
+  busy-wait** (`while (!WaitedEnough()) ;`, dividing ticks by 55 via __aFuldiv).  Left
+  alone: accelerating it would shift the RNG stream (worldgen is seeded from GetTickCount),
+  so it is not a clean lift.
+- **The tiles ARE liftable**: seg2:3460 (`_FloorTiles` region) is a compiler-emitted far
+  byte-memcpy — SI bytes, huge source ptr (@bp-8/-6) -> huge dest (@bp-12/-10), selector-
+  wrapping — copying 960-byte tile rows (~9.5% of load).  New `bytecopy` island does the
+  whole run as one linear block move (with an overlapping-forward smear fallback to stay
+  exact).  Byte-exact unit gate (`test_bytecopy_island_matches_asm`) covers the real
+  960-byte case, a 1-byte edge, dst-before-src, and an overlapping smear vs the ASM.
+- **Payoff: ~35% faster to the title** (18.3s -> 11.8s) with all three islands
+  (__aFuldiv + _Unpack + bytecopy); 19% from _Unpack alone.  Note this is a pure
+  interpreter speedup (skipping slow *interpreted* loops) — a memcpy has nothing to
+  "recover" for a native port, so it stays in hooks.py, not recovered/.
+- **File I/O is NOT a bottleneck** (owner's other question): measured 0.0% of load —
+  `_lread`/DOS-read are already native Python block-copies (`mem.data[lin:lin+n]=chunk`),
+  not interpreted ASM.  Only interpreted CPU loops are worth islanding.
+
 ## 2026-07-08 — The LZSS decoder is now clean VM-free recovered code
 - **The decompressor is lifted out of the hook into pure, VM-less recovered code**
   (`simant/recovered/lzss.py`) — the shape the source port targets: a plain
