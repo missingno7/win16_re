@@ -78,6 +78,14 @@ class Win16Machine:
             handler(CallContext(cpu, self.api, "DOS", num,
                                 f"int21_{ah:02X}", args=()))
             return
+        if num == 0x2F:
+            # DOS multiplex.  SimAnt probes AH=45h subfunctions for a companion
+            # TSR/driver that is not present in this VM.  With no handler
+            # installed, the default IVT handler is an IRET that leaves the
+            # registers as-is — an honest "no such service", which lets the game
+            # take its no-TSR fallback path.  (No faking: the service genuinely
+            # is not there.)  CF is left clear.
+            return
         raise Win16ApiGap(
             f"INT {num:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X} — no Win16 service installed")
 

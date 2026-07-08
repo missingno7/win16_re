@@ -88,6 +88,7 @@ class Window:
     #        bar -> (min, max, pos);  bar: 0=SB_HORZ, 1=SB_VERT
     props: dict[str, int] = field(default_factory=dict)   # SetProp/GetProp store
     menu_obj: Menu | None = None
+    sysmenu_obj: Menu | None = None     # window system menu (GetSystemMenu)
     _surface: "Surface" = None
     handle: int = 0
 
@@ -286,4 +287,6 @@ class DC:
     stretch_mode: int = 1
     selected: dict[str, object] = field(default_factory=dict)
     palette: object = None          # selected logical Palette (None = default)
+    clip_rect: tuple | None = None  # (l,t,r,b) intersect-clip; None = unclipped
+    save_stack: list = field(default_factory=list)   # SaveDC/RestoreDC states
     handle: int = 0

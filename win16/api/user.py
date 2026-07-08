@@ -453,6 +453,13 @@ def install(api: ApiRegistry) -> None:
         win.scroll[bar] = (_signed(lo), _signed(hi), pos)
         return 1
 
+    @api.register("USER", 63, args="word word")         # GetScrollPos(hwnd, bar)
+    def GetScrollPos(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        return win.scroll.get(ctx.args[1], (0, 0, 0))[2] & 0xFFFF
+
     @api.register("USER", 62, args="word word s_word word")
     def SetScrollPos(ctx: CallContext) -> int:          # (hwnd, bar, pos, redraw)
         sys = _sys(ctx)
@@ -553,7 +560,7 @@ def install(api: ApiRegistry) -> None:
             menu.item_flags[item.id] = item.flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED)
         return 1
 
-    @api.register("USER", 156, args="word word")        # GetSubMenu(hMenu, pos)
+    @api.register("USER", 159, args="word word")        # GetSubMenu(hMenu, pos)
     def GetSubMenu(ctx: CallContext) -> int:
         sys = _sys(ctx)
         menu = sys.handles.require(ctx.args[0], Menu)
@@ -561,6 +568,150 @@ def install(api: ApiRegistry) -> None:
         if 0 <= pos < len(menu.items) and menu.items[pos].submenu is not None:
             return menu.items[pos].submenu.handle
         return 0
+
+    @api.register("USER", 126, args="word word word")   # InvalidateRgn(hwnd, hrgn, erase)
+    def InvalidateRgn(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        hrgn, erase = ctx.args[1], bool(ctx.args[2])
+        if hrgn == 0:
+            _invalidate(win, None, erase=erase)         # whole client
+        else:
+            rgn = sys.handles.get(hrgn)
+            if isinstance(rgn, Region):
+                _invalidate(win, (rgn.x1, rgn.y1, rgn.x2, rgn.y2), erase=erase)
+        return 1
+
+    @api.register("USER", 128, args="word word")        # ValidateRgn(hwnd, hrgn)
+    def ValidateRgn(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        hrgn = ctx.args[1]
+        if hrgn == 0:                                   # NULL region = whole window
+            _validate(win)
+            return 1
+        rgn = sys.handles.get(hrgn)
+        u = win.update_rect
+        # Single-bbox update model: clear only if the region fully covers the
+        # pending update box (else keep it — repainting more is safe, skipping
+        # needed repaint is not).
+        if isinstance(rgn, Region) and u is not None and \
+                rgn.x1 <= u[0] and rgn.y1 <= u[1] and rgn.x2 >= u[2] and rgn.y2 >= u[3]:
+            _validate(win)
+        return 1
+
+    @api.register("USER", 61, args="word s_word s_word ptr ptr")  # ScrollWindow
+    def ScrollWindow(ctx: CallContext) -> int:          # (hwnd, dx, dy, rc, clip)
+        # Shift the client pixels by (dx, dy) and invalidate the exposed strips
+        # for repaint — the real USER behaviour SimAnt's map-scroll relies on.
+        # The optional scroll/clip rects are treated as the whole client (the
+        # game scrolls the full map window); refine if a caller needs sub-rects.
+        import numpy as np
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        dx, dy = _signed(ctx.args[1]), _signed(ctx.args[2])
+        surf = win.surface
+        w, h = surf.w, surf.h
+        cw, ch = w - abs(dx), h - abs(dy)
+        if cw > 0 and ch > 0 and (dx or dy):
+            arr = np.frombuffer(surf.pixels, dtype=np.uint8).reshape(h, w, 3)
+            sx, sy = max(0, -dx), max(0, -dy)
+            dxo, dyo = max(0, dx), max(0, dy)
+            moved = arr[sy:sy + ch, sx:sx + cw].copy()
+            arr[dyo:dyo + ch, dxo:dxo + cw] = moved
+            surf.touch()
+        if dy > 0:
+            _invalidate(win, (0, 0, w, dy), erase=True)
+        elif dy < 0:
+            _invalidate(win, (0, h + dy, w, h), erase=True)
+        if dx > 0:
+            _invalidate(win, (0, 0, dx, h), erase=True)
+        elif dx < 0:
+            _invalidate(win, (w + dx, 0, w, h), erase=True)
+        return 1
+
+    @api.register("USER", 244, args="ptr ptr")          # EqualRect(lprc1, lprc2)
+    def EqualRect(ctx: CallContext) -> int:
+        def rd(p):
+            seg, off = (p >> 16) & 0xFFFF, p & 0xFFFF
+            return tuple(_signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF))
+                         for i in range(4))
+        return 1 if rd(ctx.args[0]) == rd(ctx.args[1]) else 0
+
+    @api.register("USER", 37, args="word ptr")          # SetWindowText(hwnd, lpsz)
+    def SetWindowText(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if isinstance(win, Window):
+            ptr = ctx.args[1]
+            win.title = ctx.read_string(ptr).decode("latin-1") if ptr else ""
+        return 1
+
+    @api.register("USER", 263, args="word")             # GetMenuItemCount(hMenu)
+    def GetMenuItemCount(ctx: CallContext) -> int:
+        menu = _sys(ctx).handles.get(ctx.args[0])
+        return len(menu.items) if isinstance(menu, Menu) else 0xFFFF   # -1 err
+
+    def _remove_menu_item(sys, hmenu, item, flags) -> int:
+        # Shared by RemoveMenu/DeleteMenu: drop the item at position `item`
+        # (MF_BYPOSITION) or with command id `item` (MF_BYCOMMAND, the default).
+        menu = sys.handles.get(hmenu)
+        if not isinstance(menu, Menu):
+            return 0
+        MF_BYPOSITION = 0x0400
+        if flags & MF_BYPOSITION:
+            if 0 <= item < len(menu.items):
+                menu.items.pop(item)
+                return 1
+            return 0
+        for i, it in enumerate(menu.items):
+            if it.id == item:
+                menu.items.pop(i)
+                return 1
+        return 0
+
+    @api.register("USER", 412, args="word word word")   # RemoveMenu(hMenu, item, flags)
+    def RemoveMenu(ctx: CallContext) -> int:
+        # SimAnt strips SC_* items from a game window's system menu (via
+        # GetSystemMenu) to make it non-resizable.  We don't render the system
+        # menu, so removes on our (empty) copy are harmless no-ops.
+        return _remove_menu_item(_sys(ctx), ctx.args[0], ctx.args[1], ctx.args[2])
+
+    @api.register("USER", 413, args="word word word")   # DeleteMenu(hMenu, item, flags)
+    def DeleteMenu(ctx: CallContext) -> int:
+        # Like RemoveMenu but also destroys a popup submenu; for our flat model
+        # the drop is identical (the submenu Menu is left for GC).
+        return _remove_menu_item(_sys(ctx), ctx.args[0], ctx.args[1], ctx.args[2])
+
+    @api.register("USER", 156, args="word word")        # GetSystemMenu(hwnd, bRevert)
+    def GetSystemMenu(ctx: CallContext) -> int:
+        # Returns a handle to the window's system menu for modification (the
+        # title-bar/close menu).  SimAnt calls GetSystemMenu(gameWindow, FALSE)
+        # on entering a game to customise it, then AppendMenu/EnableMenuItem on
+        # the result — so we hand back a real, lazily-created Menu it can edit
+        # (we don't render the system menu, but the game must be able to build
+        # it).  bRevert=TRUE resets to the default and returns NULL, per USER.
+        # (Ordinal 156 is GetSystemMenu, NOT GetSubMenu — that is 159; the swap
+        # fail-loud-crashed the game the instant Quick Game started.)
+        sys = _sys(ctx)
+        win = sys.handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        if ctx.args[1]:                                 # bRevert: reset to default
+            if win.sysmenu_obj is not None:
+                sys.handles.remove(win.sysmenu_obj.handle)
+                win.sysmenu_obj = None
+            return 0
+        if win.sysmenu_obj is None:
+            win.sysmenu_obj = Menu(None)
+            sys.handles.add(win.sysmenu_obj)
+        return win.sysmenu_obj.handle
 
     @api.register("USER", 158, args="word word")        # SetMenu(hwnd, hMenu)
     def SetMenu(ctx: CallContext) -> int:

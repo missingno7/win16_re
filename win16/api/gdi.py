@@ -166,6 +166,49 @@ def install(api: ApiRegistry) -> None:
         _hdc, w, h = ctx.args
         return _sys(ctx).handles.add(Bitmap(Surface(max(w, 1), max(h, 1))))
 
+    @api.register("GDI", 30, args="word")               # SaveDC(hdc)
+    def SaveDC(ctx: CallContext) -> int:
+        # Push the DC's mutable attribute state; RestoreDC pops back to it.
+        # SimAnt brackets its game-window drawing with SaveDC/RestoreDC.
+        dc = _sys(ctx).handles.require(ctx.args[0], DC)
+        dc.save_stack.append((dc.text_color, dc.bk_color, dc.bk_mode,
+                              dc.stretch_mode, dict(dc.selected), dc.palette,
+                              dc.clip_rect))
+        return len(dc.save_stack)
+
+    @api.register("GDI", 39, args="word s_word")        # RestoreDC(hdc, level)
+    def RestoreDC(ctx: CallContext) -> int:
+        dc = _sys(ctx).handles.require(ctx.args[0], DC)
+        st = dc.save_stack
+        level = _signed(ctx.args[1])
+        idx = len(st) + level if level < 0 else level - 1   # rel (-1=last) / abs
+        if not 0 <= idx < len(st):
+            return 0
+        (dc.text_color, dc.bk_color, dc.bk_mode, dc.stretch_mode,
+         selected, dc.palette, dc.clip_rect) = st[idx]
+        dc.selected = dict(selected)
+        del st[idx:]                                    # discard idx and later
+        return 1
+
+    @api.register("GDI", 22,                            # IntersectClipRect
+                  args="word s_word s_word s_word s_word")
+    def IntersectClipRect(ctx: CallContext) -> int:
+        # Narrow the DC clip to its intersection with (l,t,r,b).  We track the
+        # rect (so SaveDC/RestoreDC round-trip it and the region-type return is
+        # right — the game skips drawing on an empty clip); enforcement in blits
+        # is a presentation approximation not yet needed (our surfaces already
+        # bound writes).
+        NULLREGION, SIMPLEREGION = 1, 2
+        _sys_ = _sys(ctx)
+        hdc, l, t, r, b = ctx.args
+        dc = _sys_.handles.require(hdc, DC)
+        l, t, r, b = _signed(l), _signed(t), _signed(r), _signed(b)
+        if dc.clip_rect is not None:
+            cl, ct, cr, cb = dc.clip_rect
+            l, t, r, b = max(l, cl), max(t, ct), min(r, cr), min(b, cb)
+        dc.clip_rect = (l, t, r, b)
+        return NULLREGION if r <= l or b <= t else SIMPLEREGION
+
     @api.register("GDI", 45, args="word word")          # SelectObject(hdc, hobj)
     def SelectObject(ctx: CallContext) -> int:
         sys = _sys(ctx)
