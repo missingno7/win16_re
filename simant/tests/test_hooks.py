@@ -79,7 +79,7 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
     hk = runtime.create_machine()
     hk.cpu.trace_enabled = False
-    assert hooks.install(hk) == 1
+    assert hooks.install(hk) == 2               # __aFuldiv + _Unpack
     isl = _run_island(hk, dividend, divisor)
 
     assert asm["ax"] | (asm["dx"] << 16) == (dividend // divisor) & 0xFFFFFFFF
@@ -89,8 +89,78 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
 def test_install_counts_and_verifies():
     m = runtime.create_machine()
-    assert hooks.install(m) == 1
-    assert runtime.install_hooks(runtime.create_machine()) == 1
+    assert hooks.install(m) == 2
+    assert runtime.install_hooks(runtime.create_machine()) == 2
+
+
+def _capture_unpack_output(with_island, max_calls, step_budget):
+    """Boot SimAnt (optionally with the _Unpack island) and return the list of
+    (output_bytes, exit_globals) for each of the first `max_calls` _Unpack
+    calls — the decompressor's observable result, per call."""
+    from dos_re.cpu import CPU8086
+    m = runtime.create_machine()
+    m.cpu.trace_enabled = False
+    cs7 = m.seg_bases[hooks.UNPACK_SEG_INDEX]
+    dg = m.seg_bases[hooks.DG_SEG_INDEX]
+    st = m.cpu.s
+    out = []
+    pend = {}
+
+    if with_island:
+        isl = hooks._make_unpack_island(m)
+
+        def hook(cpu):
+            sp = cpu.s.sp
+            pend["a"] = (cpu.mem.rw(cpu.s.ss, (sp + 4) & 0xFFFF),
+                         cpu.mem.rw(cpu.s.ss, (sp + 6) & 0xFFFF),
+                         cpu.mem.rw(cpu.s.ss, (sp + 8) & 0xFFFF))
+            pend["ret"] = (cpu.mem.rw(cpu.s.ss, sp),
+                           cpu.mem.rw(cpu.s.ss, (sp + 2) & 0xFFFF))
+            return isl(cpu)
+        m.cpu.replacement_hooks[(cs7, hooks.UNPACK_OFF)] = hook
+
+    orig = CPU8086.step
+
+    def watch(self):
+        cs, ip = st.cs & 0xFFFF, st.ip & 0xFFFF
+        if not with_island and cs == cs7 and ip == hooks.UNPACK_OFF:
+            sp = st.sp
+            pend["a"] = (m.mem.rw(st.ss, (sp + 4) & 0xFFFF),
+                         m.mem.rw(st.ss, (sp + 6) & 0xFFFF),
+                         m.mem.rw(st.ss, (sp + 8) & 0xFFFF))
+            pend["ret"] = (m.mem.rw(st.ss, sp), m.mem.rw(st.ss, (sp + 2) & 0xFFFF))
+        if "a" in pend and (cs, ip) == (pend["ret"][1], pend["ret"][0]):
+            oo, osg, budget = pend.pop("a")
+            pend.pop("ret")
+            data = bytes(m.mem.rb(osg, (oo + i) & 0xFFFF) for i in range(budget))
+            exitg = tuple(m.mem.rw(dg, a) for a in
+                          (0xB7CA, 0xB7CC, 0xB7C4, 0xB7C8, 0xB7CE, 0xB7D0, 0xB7D4))
+            out.append((data, exitg))
+        orig(self)
+
+    CPU8086.step = watch
+    try:
+        while len(out) < max_calls and m.cpu.instruction_count < step_budget:
+            m.cpu.run(400_000)
+    except Exception:  # noqa: BLE001 — a frontier past the load is acceptable
+        pass
+    finally:
+        CPU8086.step = orig
+    return out[:max_calls]
+
+
+def test_unpack_island_is_byte_exact_vs_asm():
+    """The A/B decompression gate: booting with the _Unpack island must produce
+    the IDENTICAL decompressed output and exit state, call for call, as the real
+    ASM routine — the byte-exact proof that the LZSS island is a recovery."""
+    CALLS, BUDGET = 30, 4_000_000
+    plain = _capture_unpack_output(False, CALLS, BUDGET)
+    island = _capture_unpack_output(True, CALLS, BUDGET)
+    assert len(plain) >= CALLS, f"only {len(plain)} _Unpack calls captured"
+    assert len(island) == len(plain)
+    for i, (p, k) in enumerate(zip(plain, island)):
+        assert k[0] == p[0], f"call {i}: island output differs ({len(k[0])} vs {len(p[0])} bytes)"
+        assert k[1] == p[1], f"call {i}: island exit state differs {k[1]} vs {p[1]}"
 
 
 def test_install_refuses_wrong_code():

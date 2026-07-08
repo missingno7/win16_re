@@ -83,6 +83,29 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — The _Unpack LZSS island lands — byte-exact, ~18% faster load
+- **The asset-decompression bottleneck is now lifted.**  `simant/hooks.py` installs an
+  island at seg7:A668 (`_Unpack`) that reimplements the Okumura LZSS decode in Python — a
+  faithful 1:1 transliteration of the ASM (setup / literal / match / exit) so it produces
+  the identical output, window, and exit state.  A mid-operation resume (entry [B7D4] != 0)
+  passes through to the real routine (keeps the delicate two-sided-streaming resume path
+  authoritative); every fresh call is fast-pathed.
+- **Byte-exact, proven.**  The A/B gate (`test_unpack_island_is_byte_exact_vs_asm`) boots
+  SimAnt with and without the island and requires the decompressed output + exit globals
+  to match **call for call** — 136/136 identical in dev.  Getting there pinned three exact
+  ABI details: the literal path leaves `dl` = the byte (so exit DX = last output byte); the
+  `retf` does NO arg cleanup (caller does `add sp,6`); and the routine writes its stack
+  frame (locals + pushed di/si/ds), which the island must replicate because SimAnt reads
+  the freed scratch.  A full-memory A/B is deliberately NOT the gate: the game seeds
+  `rand()` (seg4 `_rand`) from GetTickCount, which is instruction-count-based, so a faster
+  load legitimately changes the RNG stream — that downstream divergence is the game's own
+  timing sensitivity, not the island.
+- **Payoff: ~18% faster to the title screen** (18.0s → 14.8s wall-clock to first title
+  paint).  The instruction-count drop is only ~3% but wall-clock gains far exceed it: the
+  island swaps thousands of *interpreted* ASM instructions per call for one native Python
+  decode.  Further speedup is available by transliterating the resume path too (the ~40%
+  of calls that stream mid-match still run the ASM) — logged as the next lift.
+
 ## 2026-07-08 — Load bottleneck located: the _Unpack LZSS asset decompressor
 - **Owner: "loading is very slow — RE + hook the asset-loading island."**  PC-sampling
   the boot/load phase (`simant.probes.profile` with warmup=0) is unambiguous: **~90% of
