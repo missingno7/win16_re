@@ -83,6 +83,32 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — SimAnt logo: two halves overlap — deep WAP investigation (NOT yet fixed)
+- **Symptom (owner):** the SIMANT title logo shows only its top half; the bottom half
+  (legs + "© 1991 MAXIS") is drawn first then covered.  Confirmed via a blit trace of
+  window 312: 43 SetDIBitsToDevice bands, `B166 B158 … B0` (bottom, source selector 8557)
+  drawn FIRST, then `A160 … A0` (top, 854f) over it — both land in y=0..166.  Rendering
+  each source buffer separately confirms 854f=top, 8557=bottom.  The bottom half's Y is
+  short by exactly **176** (the top half's height): it should be at y=176..342.
+- **Ruled out (each checked, not guessed):**
+  - *Decompression* — the _Unpack LZSS island is byte-exact vs the ASM (136/136), so the
+    asset bytes are correct.
+  - *Huge-pointer / hugeheap mapping* — 854f and 8557 are SEPARATE GlobalAlloc blocks
+    (8557 is a standalone 8939-byte block; they map 0x804 apart, not 64K), each rendering
+    correctly on its own.  Not one >64K buffer wrapping wrong.
+  - *Transparency* — the two halves occupy the SAME y band with different content, so a
+    colour-key overlay would still mash them, not stack them.  They MUST be placed at
+    different Y.
+- **Localised to the WAP sprite-layout.** The logo is a WAP composite (`_win_DrawBitMap`
+  seg7:BD5A, from `_ShowIntro`) that recursively draws ~32 child sprites, each passed
+  position (0,0) (x=[bp+6], y=[bp+8] from a display-list node's `es:[si+2]`), so a
+  sprite's on-screen Y is intrinsic to its own strip data; leaf blit is `0E99:10a2` ->
+  the seg2 band-draw (SetDIBitsToDevice).  The bottom sprite's strips carry Y=0..166 where
+  they should carry 176..342 — the +176 origin is lost in the WAP page-layout math (it did
+  NOT surface as a fresh 0xA6 inside the leaf draw, so it is set further up, when the
+  display list / strip Y is built).  Next lead: the WAP display-list construction.  Nothing
+  committed — investigation only, tree clean.
+
 ## 2026-07-08 — Byte-copy island — load now ~35% faster; tile "blit" was a timing wait
 - **Owner asked to island the "tile color blit" + tiles.**  Tracing corrected the profiler's
   (offset-based, cross-segment) symbol labels: the hot 24% at seg2:47xx labelled
