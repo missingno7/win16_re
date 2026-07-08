@@ -51,8 +51,15 @@ class InteractiveDriver:
         self._resume.set()                  # release a parked CPU thread
 
     def pause_at_boundary(self, timeout: float = 3.0) -> bool:
-        """Ask the CPU thread to park at its next GetMessage boundary (the
-        quiescent point for snapshots).  Returns True once parked."""
+        """Ask the CPU thread to park at its next quiescent point — either a
+        GetMessage boundary OR an instruction-chunk boundary (see check_pause).
+        The latter lets a snapshot be taken while the game BUSY-POLLS via
+        PeekMessage (SimAnt's menus and in-game loops never call GetMessage for
+        long stretches), which used to time out here.  Returns True once parked.
+        An instruction boundary is as valid a snapshot point as a message one:
+        no Python handler loop is open between top-level CPU steps.  (A modal
+        DialogBox/MessageBox IS a nested Python loop — save_snapshot still
+        refuses those, and the CPU won't reach these checks inside one anyway.)"""
         self._pause_requested = True
         with self._cond:
             self._cond.notify()
@@ -63,7 +70,22 @@ class InteractiveDriver:
         self.paused.clear()
         self._resume.set()
 
-    # -- CPU thread side (called inside GetMessage) ------------------------
+    # -- CPU thread side ---------------------------------------------------
+    def _park(self) -> None:
+        """Block the CPU thread here until resume() — the caller has reached a
+        quiescent point the host asked to pause at."""
+        self.paused.set()
+        self._resume.wait()
+        self._resume.clear()
+
+    def check_pause(self) -> None:
+        """Called by the CPU worker between instruction chunks: park here if a
+        pause was requested.  This is the busy-poll snapshot point — the game
+        may spin in PeekMessage without ever hitting GetMessage, so `_next`
+        alone would never see the request."""
+        if self._pause_requested:
+            self._park()
+
     def _drain_input(self) -> None:
         with self._cond:
             pending, self._input = self._input, []
@@ -74,9 +96,7 @@ class InteractiveDriver:
     def _next(self, sysobj):
         while True:
             if self._pause_requested:
-                self.paused.set()
-                self._resume.wait()
-                self._resume.clear()
+                self._park()
             self._drain_input()
             if not self.running or sysobj.quit_posted is not None:
                 return None

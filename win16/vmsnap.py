@@ -8,10 +8,17 @@ therefore three artifacts in a directory:
     state.json      CPUState (incl. x87), allocator frontier, metadata
     system.pickle   the Win16System object graph (machine ref stripped)
 
-Snapshots must be taken at a message boundary (inside GetMessage, before the
-next message) — that is the only architected quiescent point.  Taking one
-while a modal dialog is open is refused loudly (dialog event queues are
-transient host state).
+A snapshot can be taken at ANY CPU instruction boundary — memory + CPUState (SP/
+IP included) fully capture the VM, and no Python handler loop spans two top-level
+steps, so the object graph pickles cleanly.  The interactive host (play.py, F9)
+parks the CPU thread at either a GetMessage boundary OR an instruction-chunk
+boundary (see InteractiveDriver.check_pause), so snapshots work even while the
+game busy-polls PeekMessage (SimAnt's menus / in-game loops).
+
+The ONE exception is a modal DialogBox/MessageBox: it runs a NESTED Python
+message loop, so its call-stack state is not on the resumable path.  Taking a
+snapshot while one is open is refused loudly here (use an inspection snapshot +
+demos for those).
 """
 from __future__ import annotations
 

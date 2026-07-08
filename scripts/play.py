@@ -649,8 +649,13 @@ class PlayApp:
         cpu = self.machine.cpu
         cpu.trace_enabled = False
         try:
+            # Run in small chunks so a snapshot pause (F9) can park at an
+            # instruction boundary even while the game busy-polls PeekMessage
+            # (menus, in-game) and never calls GetMessage.  4096 instrs bounds
+            # the pause latency to well under a frame.
             while self.driver.running:
-                cpu.step()
+                self.driver.check_pause()
+                cpu.run(4096)
             self.status = "stopped"
         except HaltExecution:
             self.status = "app exited cleanly (DOS terminate)"
@@ -698,8 +703,9 @@ class PlayApp:
     def take_snapshot(self) -> None:
         from win16.vmsnap import SnapshotError, save_snapshot
         if not self.driver.pause_at_boundary():
-            print("[play] snapshot failed: CPU did not reach a message "
-                  "boundary (mid-frame or modal dialog open)", file=sys.stderr)
+            print("[play] snapshot failed: CPU did not reach a quiescent point "
+                  "in time (stuck in a modal dialog/message box, or halted)",
+                  file=sys.stderr)
             return
         try:
             stamp = time.strftime("%H%M%S")
