@@ -1,5 +1,28 @@
 # Paulie Python — run status (newest on top)
 
+## 2026-07-09 — dos_re is now a real git submodule (was an undeclared sibling checkout)
+- **Owner caught it:** win16_re silently required `D:\Games\DOS\dos_re` to exist on
+  disk (hardcoded default in each package's `_env.py`) — an unversioned, invisible-
+  to-git dependency.  Checking it, the local sibling checkout had actually drifted 3
+  commits behind `origin/main` with nobody noticing (no data loss though: dos_re's
+  PUSHA/POPA + interpreter-speedup work are confirmed ancestors of origin/main).
+- **Fixed:** `git submodule add https://github.com/missingno7/dos_re.git dos_re`,
+  pinned at `9c9247b`.  `ppython/_env.py` / `simant/_env.py` / `microman/_env.py` now
+  default to the vendored path (`Path(__file__).parent.parent / "dos_re"`);
+  `DOS_RE_PATH` is kept as an explicit opt-in escape hatch for co-developing dos_re
+  against a separate working checkout (not the default).  `git clone
+  --recurse-submodules` is now sufficient for a fresh checkout — verified end-to-end
+  (fresh clone, gate green, only the expected assets-not-present skips, zero
+  reference to the old sibling path).
+- **Noticed but out of scope:** three doc cross-references (`docs/methodology.md`,
+  `docs/pitfalls.md`, `docs/bringing_up_a_game.md`) point at `dos_re/docs/
+  methodology.md` / `ai_porting_charter.md` / `pitfalls.md`, none of which exist in
+  the current dos_re docs layout (it was reorganized into `architecture.md`,
+  `hooks_and_verification.md`, `demos_and_snapshots.md`, `state_mirrors.md`,
+  `glossary.md` — pre-existing drift, not introduced by the submodule move). Fixed
+  the relative path prefix (`../../DOS/dos_re` → `../dos_re`) but left the target
+  filenames as-is; a follow-up should re-map them to dos_re's current doc set.
+
 ## Standing mechanisms (check here before building new tooling)
 - **Memory model: selector translation (4MB).** win16 lifts the 1MB real-mode ceiling
   via `dos_re` Memory's optional `sel_base` (selector→linear-base dict). The loaded
