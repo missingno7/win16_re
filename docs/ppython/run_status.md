@@ -83,6 +83,35 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — Performance: SimAnt is spin-bound, and a byte-exact +27% interpreter win
+- **Window sizing** (owner ask): SimAnt is resolution-adaptive — it creates the
+  AntRoot frame, calls `ShowWindow(SW_SHOWMAXIMIZED)`, then sizes RibbonWindow +
+  the root panel from the MAXIMIZED client rect.  We ignored the maximize (only
+  flipped visibility), so children were laid out to the 627-wide create rect, not
+  the full 640-wide screen — why it looked smaller than otvdm (which mirrors the
+  host desktop, hence its huge maximize).  Fixed: ShowWindow now grows a real
+  top-level frame to SM_CXSCREEN×SM_CYSCREEN and re-fires WM_SIZE.  Host-window
+  drag-resize (tkinter → WM_SIZE feedback) is a separate follow-on if wanted.
+- **Where the time goes** (profiled, islands ON): NOT computation.  Over 5.8M
+  steady-state instructions the game calls GetTickCount **64,890×** while the
+  message clock advances **0 ms** — it is SPIN-WAITING on the 18.2 Hz frame timer
+  (`_TickCount = GetTickCount()/55`).  The profiler's "hot routines" (`_win_Events`,
+  `_win_IsWinOpen`, the 47xx cluster) are the pump/pacing spin.  `__aFuldiv` (the
+  one pure math leaf) is already an island; there is **no clean pure-compute island
+  left** to lift.  The one big game-code lever is the frame-pacing spin itself —
+  which the bytecopy-island comment already flagged as deliberately left alone
+  (accelerating it shifts the RNG-seeded worldgen).  Owner chose the safe lever:
+- **Speed up the interpreter** (dos_re `fa7b97d`): cProfile showed ~all time in the
+  CPU core (`execute_opcode`/`step`/`fetch8`/memory), only ~1.7% in our hooks.
+  Four trace-off-hot-path changes, **byte-exact** (SimAnt DGROUP+regs at 9.84M
+  instrs SHA-256-identical before/after; dos_re 118 + SimAnt 45 green): gate the
+  debug disassembly f-strings on `trace_enabled` (never built in gameplay, ~+20%),
+  inline fetch8's selector fast-path, hoist the hottest opcodes (Jcc/XCHG/MOV/INC-
+  DEC) to the front of the if-ladder, and skip the hook-key tuple alloc when no
+  hooks.  **249K → 317K instr/s (+27%)**, helping the spin AND all real work with
+  zero worldgen risk.  Method note: a state-digest gate (hash DGROUP+regs at a
+  fixed instr count) made the ladder reorder safe to verify — any slip => mismatch.
+
 ## 2026-07-08 — SOLVED: logo, ribbon buttons AND the SELECT-A-GAME dialog — two VM bugs, winevdm +relay as differential oracle
 - **The winevdm oracle went from source-reading to EXECUTION.**  otvdm v0.9.0 runs on this
   Win11 box, so `WINEDEBUG=+relay otvdm SIMANTW.EXE` produced a 2.7M-line ground-truth API
