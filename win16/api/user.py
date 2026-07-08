@@ -870,8 +870,28 @@ def install(api: ApiRegistry) -> None:
     def ShowWindow(ctx: CallContext) -> int:
         sys = _sys(ctx)
         win = sys.handles.require(ctx.args[0], Window)
+        cmd = ctx.args[1]
         was = win.visible
-        win.visible = ctx.args[1] != 0                  # 0 = SW_HIDE
+        win.visible = cmd != 0                          # 0 = SW_HIDE
+        # SW_SHOWMAXIMIZED / SW_MAXIMIZE (3): grow the frame to the whole screen
+        # and re-fire WM_SIZE so the app re-lays-out to the MAXIMIZED client.
+        # SimAnt is resolution-adaptive — it maximizes its top-level frame on
+        # show and sizes RibbonWindow / the root panel from the resulting client
+        # rect.  Ignoring the command left it laid out to the un-maximized create
+        # size (627 wide) instead of the full screen (why it looked smaller than
+        # otvdm, which honours the maximize).  Only a real top-level frame
+        # maximizes; child windows keep their given rect.
+        if cmd == 3 and win.parent == 0 and not win.maximized:
+            win.restore_rect = (win.x, win.y, win.w, win.h)
+            win.maximized = True
+            win.x, win.y = 0, 0
+            win.w, win.h = SYSTEM_METRICS[0], SYSTEM_METRICS[1]
+            win._surface = None                          # client surface rebuilds
+            _fill_window_bg(sys, win)
+            SIZE_MAXIMIZED = 2
+            cw, ch = win.client_size
+            sys.call_wndproc(win, WM_SIZE, SIZE_MAXIMIZED,
+                             ((ch & 0xFFFF) << 16) | (cw & 0xFFFF))
         if win.visible and not was:
             _invalidate(win, erase=True)
         return 1 if was else 0

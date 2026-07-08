@@ -81,6 +81,8 @@ class Window:
     # region back via GetUpdateRgn/GetRgnBox — the rects must round-trip.
     update_rect: tuple | None = None            # (l, t, r, b) or None = clean
     update_erase: bool = False                  # an RDW_ERASE is pending
+    maximized: bool = False                     # SW_SHOWMAXIMIZED applied
+    restore_rect: tuple | None = None           # (x, y, w, h) before maximize
     extra: bytearray = field(default_factory=bytearray)
     scroll: dict[int, tuple[int, int, int]] = field(default_factory=dict)
     #        bar -> (min, max, pos);  bar: 0=SB_HORZ, 1=SB_VERT
