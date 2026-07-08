@@ -82,6 +82,36 @@ def _get_window(sysobj, hwnd: int, cmd: int) -> int:
     return 0
 
 
+def _abs_origin(sysobj, win) -> tuple[int, int]:
+    """A window's absolute (screen) top-left in the app's logical coordinate
+    space — its own (x,y) plus every ancestor's, walking the parent chain.
+    Child positions are relative to the parent's client area (no non-client
+    insets are modelled)."""
+    x = y = 0
+    w = win
+    while isinstance(w, Window):
+        x += w.x
+        y += w.y
+        w = sysobj.handles.get(w.parent) if w.parent else None
+    return x, y
+
+
+def _map_point(sysobj, ctx, sign: int) -> int:
+    """ClientToScreen (sign +1) / ScreenToClient (sign -1): translate the POINT
+    at lpPoint by the window's absolute origin, in place."""
+    hwnd, pt_ptr = ctx.args
+    win = sysobj.handles.get(hwnd)
+    if not isinstance(win, Window):
+        return 0
+    ox, oy = _abs_origin(sysobj, win)
+    seg, off = (pt_ptr >> 16) & 0xFFFF, pt_ptr & 0xFFFF
+    px = _signed(ctx.mem.rw(seg, off)) + sign * ox
+    py = _signed(ctx.mem.rw(seg, (off + 2) & 0xFFFF)) + sign * oy
+    ctx.mem.ww(seg, off, px & 0xFFFF)
+    ctx.mem.ww(seg, (off + 2) & 0xFFFF, py & 0xFFFF)
+    return 1
+
+
 def _fill_window_bg(sysobj, win) -> None:
     """Paint a window's surface with its class background brush.  Applied on
     creation and after every resize (a resize rebuilds the surface as black),
@@ -405,6 +435,10 @@ def install(api: ApiRegistry) -> None:
         lo, hi, old = win.scroll.get(bar, (0, 0, 0))
         win.scroll[bar] = (lo, hi, _signed(pos))
         return old & 0xFFFF
+
+    @api.register("USER", 29, args="word ptr")          # ScreenToClient(hwnd, pt)
+    def ScreenToClient(ctx: CallContext) -> int:
+        return _map_point(_sys(ctx), ctx, -1)
 
     @api.register("USER", 33, args="word ptr")          # GetClientRect(hwnd, rect)
     def GetClientRect(ctx: CallContext) -> int:
@@ -831,6 +865,27 @@ def install(api: ApiRegistry) -> None:
             _fill_rect(dst, r[0], r[1], r[2] - r[0], r[3] - r[1], rgb)
         return 1
 
+    @api.register("USER", 82, args="word ptr")          # InvertRect(hdc, lpRect)
+    def InvertRect(ctx: CallContext) -> int:
+        from .gdi import _dc_surface
+        sys = _sys(ctx)
+        hdc, rc_ptr = ctx.args
+        dst = _dc_surface(sys, hdc)
+        if dst is None:
+            return 0
+        seg, off = (rc_ptr >> 16) & 0xFFFF, rc_ptr & 0xFFFF
+        l, t, r, b = (_signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF))
+                      for i in range(4))
+        x0, y0 = max(l, 0), max(t, 0)
+        x1, y1 = min(r, dst.w), min(b, dst.h)
+        if x0 >= x1 or y0 >= y1:
+            return 1
+        import numpy as np
+        arr = np.frombuffer(dst.pixels, dtype=np.uint8).reshape(dst.h, dst.w, 3)
+        arr[y0:y1, x0:x1] ^= 0xFF                        # invert each channel
+        dst.touch()
+        return 1
+
     @api.register("USER", 124, args="word")             # UpdateWindow(hwnd)
     def UpdateWindow(ctx: CallContext) -> int:
         """Flush a pending update: if the window has an invalid region, send
@@ -976,14 +1031,7 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 28, args="word ptr")          # ClientToScreen(hwnd, pt)
     def ClientToScreen(ctx: CallContext) -> int:
-        sys = _sys(ctx)
-        win = sys.handles.require(ctx.args[0], Window)
-        seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
-        x = _signed(ctx.mem.rw(seg, off)) + win.x
-        y = _signed(ctx.mem.rw(seg, (off + 2) & 0xFFFF)) + win.y
-        ctx.mem.ww(seg, off, x & 0xFFFF)
-        ctx.mem.ww(seg, (off + 2) & 0xFFFF, y & 0xFFFF)
-        return 1
+        return _map_point(_sys(ctx), ctx, +1)
 
     @api.register("USER", 31, args="word")              # IsIconic(hwnd)
     def IsIconic(ctx: CallContext) -> int:

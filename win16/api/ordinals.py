@@ -58,8 +58,11 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
     "USER": {
         1: "MessageBox",
         5: "InitApp",
+        28: "ClientToScreen",
+        29: "ScreenToClient",
         45: "BringWindowToTop",
         49: "IsWindowVisible",
+        82: "InvertRect",
         106: "GetKeyState",
         109: "PeekMessage",
         229: "GetTopWindow",

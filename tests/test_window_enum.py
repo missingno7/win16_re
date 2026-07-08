@@ -7,16 +7,17 @@ top-to-bottom Z-order is the reverse — pinned here on a synthetic tree.
 from types import SimpleNamespace
 
 from win16.api.objects import HandleTable, Window
-from win16.api.user import _get_window, _z_children
+from win16.api.user import _abs_origin, _get_window, _z_children
 
 GW_HWNDFIRST, GW_HWNDLAST, GW_HWNDNEXT, GW_HWNDPREV, GW_CHILD = 0, 1, 2, 3, 5
 
 
-def _win(handle, parent):
-    # Window has many fields; only handle/parent matter for enumeration.
+def _win(handle, parent, x=0, y=0):
+    # Window has many fields; only handle/parent/x/y matter for these helpers.
     w = Window.__new__(Window)
     w.handle = handle
     w.parent = parent
+    w.x, w.y = x, y
     return w
 
 
@@ -49,6 +50,23 @@ def test_getwindow_enumeration_walks_all_children_once():
         order.append(hw)
         hw = _get_window(sysobj, hw, GW_HWNDNEXT)
     assert order == [22, 21, 20]
+
+
+def test_abs_origin_walks_the_parent_chain():
+    # 276@(6,4) top-level; 280@(0,73) child; 318@(138,43) grandchild.
+    # Screen origin of 318 = 6+0+138, 4+73+43 = (144, 120).  A flat (immediate
+    # win.x/y only) mapping would wrongly give (138, 43) — the bug this fixes.
+    handles = HandleTable()
+    wins = []
+    for h, p, x, y in [(276, 0, 6, 4), (280, 276, 0, 73), (318, 280, 138, 43)]:
+        w = _win(h, p, x, y)
+        handles._objects[h] = w
+        wins.append(w)
+    from types import SimpleNamespace
+    sysobj = SimpleNamespace(windows=wins, handles=handles)
+    assert _abs_origin(sysobj, handles.get(318)) == (144, 120)
+    assert _abs_origin(sysobj, handles.get(280)) == (6, 77)
+    assert _abs_origin(sysobj, handles.get(276)) == (6, 4)
 
 
 def test_prev_and_child_and_bad_handle():
