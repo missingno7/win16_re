@@ -83,7 +83,41 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
-## 2026-07-08 — SimAnt logo: two halves overlap — deep WAP investigation (NOT yet fixed)
+## 2026-07-08 — ROOT MECHANISM FOUND: WAP damage-stamp destroys object rects (logo + ribbon buttons)
+- **One mechanism explains BOTH owner bugs** (logo halves overlapping at y=0 AND the ribbon
+  buttons crawled into the top-left corner), exactly as the owner predicted.  Full chain,
+  every step traced (not guessed):
+  1. WAP object nodes (44 bytes each; rect at +0, visible flags at +0x24) are loaded RAW
+     from WINGANT.DAT (one 1923-byte `_lread`) with CORRECT rects — the ribbon buttons are
+     x=13/61/97/133, y=21 (a button row); the logo halves y=0..176/176..352.
+  2. `_win_Recalc` (seg7:E6E2; WAP window id 0x2200 = the ribbon, per SetProp(278,·,0x2200))
+     stamps 0x8000 into every rect (pass 1), then pass 2 RESTORES them correctly.  Fine.
+  3. The paint path (fn returning to seg7:BC2B) creates a region, `GetUpdateRgn(hwnd,hrgn)`,
+     stores hrgn in DGROUP `[CD84]`, and then — gated on `[CD84] != 0` — for EACH object
+     node does `GetRgnBox(hrgn, &node.rect)`: the DAMAGE BOX (0,0,627,73 = full client)
+     is written OVER the object's rect, object drawn, next node (~25K instrs apart).
+  4. **The restore that must follow never happens** — watched to 7.5M instructions: the
+     rects stay = damage box forever.  Objects then draw at rect.x1,y1 = (0,0): buttons
+     pile at top-left; the logo bottom half loses its +176.
+  5. `[CD84]` is set per paint cycle (seg2:3EE7) and cleared at cycle end (seg2:3F91) —
+     the damage path is ACTIVE by design in SimAnt.  **microman (same WAP engine) renders
+     correctly because it NEVER enters this path** — GetUpdateRgn/CreateRectRgn/GetRgnBox
+     were first implemented today, for SimAnt; the engine gates on their availability.
+- **Open question (the actual fix)**: what restores/repositions node rects after the
+  damage-stamp on real Windows.  Candidates: seg7 fn 0E99:0F98 (runs only when a draw
+  returns 0 — an update-queue helper?), the per-object draw fn (near call ~seg7:B6E0)
+  possibly recomputing the rect from sprite strips, or a region API we answer differently
+  (our GetUpdateRgn returns the FULL client rect whenever `win.dirty` — one bool — where
+  real USER tracks an accumulating region that BeginPaint empties).  Next: statically
+  reverse the stamping loop fn + the per-object draw path, and compare the node struct
+  use against microman's working flow.
+- **Real VM bug found + fixed along the way (dos_re)**: `Memory._notify_write` masked
+  every watcher address with `& 0xFFFFF` (real-mode legacy), so write-watch traces of
+  selector-space (>1MB) memory silently missed ALL hits — this hid the stamping writes
+  for half the investigation.  Mask now applies only when `sel_base is None`; dos_re
+  suite 118 green.
+
+## 2026-07-08 — SimAnt logo: two halves overlap — deep WAP investigation (superseded above)
 - **Symptom (owner):** the SIMANT title logo shows only its top half; the bottom half
   (legs + "© 1991 MAXIS") is drawn first then covered.  Confirmed via a blit trace of
   window 312: 43 SetDIBitsToDevice bands, `B166 B158 … B0` (bottom, source selector 8557)
