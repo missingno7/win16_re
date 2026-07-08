@@ -114,6 +114,25 @@
   the island skips could reproduce.  Next islands: `_CenterAnt`, the `__ftol`/`__aFldiv`
   siblings, and the `_XferTileColor`/`_FloorTiles` render loops the profiler ranks next.
 
+## 2026-07-08 — SimAnt reaches its SELECT-A-GAME menu (title dismiss + window enum + 1bpp)
+- **SimAnt now boots -> title -> (click) -> the "SELECT A GAME" menu**, fully rendered
+  (Tutorial/Quick/Full/Experimental/Load Game icons + CANCEL), ribbon correct throughout,
+  ~41M instructions, no gap.  Owner playtest drove past the title and hit new frontiers;
+  each resolved from its call site + `SIMANTW.SYM`:
+  - **USER window enumeration**: GetTopWindow(229, wrapped by the app's `_MyGetTopWindow`),
+    GetNextWindow(230), GetWindow(262) — SimAnt walks a parent's children (close/redraw)
+    with GetTopWindow + GW_HWNDNEXT.  Shared `_get_window`/`_z_children` helpers: our
+    window list is draw order (last = topmost), so top-to-bottom Z-order is the reverse.
+    Pinned by `tests/test_window_enum.py`.
+  - **1bpp (monochrome) DIBs** in SetDIBitsToDevice (8 px/byte, MSB = leftmost) — the
+    SELECT-A-GAME dialog's mono glyphs/masks.  Joins the existing 4/8bpp paths.
+- The owner also reported the ribbon buttons "in the top-left" and the title logo drawing
+  half — but the composited render (exactly what play.py shows via `compositor.composite`)
+  is correct at every stage checked (ribbon buttons in place, full logo), so this looks
+  already-resolved by the window/compositor work or was a transient first-frame/real-time
+  artifact; flagged to re-verify in live play.  Next: wire a game-mode pick (Quick Game)
+  into the actual simulation screen, then the x87 `fpu.py` the sim needs.
+
 ## 2026-07-08 — SimAnt runs its full multi-window UI (title + ribbon), no gaps
 - **SimAnt now boots clean through startup into its running main loop and paints
   its "windows within a window" UI** — no API gap, no crash, for 20M+ instructions.

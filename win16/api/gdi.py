@@ -378,10 +378,10 @@ def install(api: ApiRegistry) -> None:
         bseg, boff = (bmi >> 16) & 0xFFFF, bmi & 0xFFFF
         hdr = ctx.mem.block(bseg, boff, 40)
         size, w, h, _pl, bpp, comp = struct.unpack_from("<IiiHHI", hdr, 0)
-        if comp != 0 or bpp not in (4, 8):
+        if comp != 0 or bpp not in (1, 4, 8):
             raise NotImplementedError(
-                f"SetDIBitsToDevice bpp={bpp} comp={comp} (only 4/8bpp BI_RGB)")
-        ncolors = 1 << bpp                          # 16 (4bpp) or 256 (8bpp)
+                f"SetDIBitsToDevice bpp={bpp} comp={comp} (only 1/4/8bpp BI_RGB)")
+        ncolors = 1 << bpp                          # 2 / 16 / 256
         clr_used = min(struct.unpack_from("<I", hdr, 32)[0] or ncolors, ncolors)
 
         # 256-entry index -> (r,g,b) LUT from the DIB colour table (cached).
@@ -450,9 +450,12 @@ def install(api: ApiRegistry) -> None:
             cols = np.arange(xs + i_lo, xs + i_hi)                     # source columns
             if bpp == 8:
                 idx = mem_np[rows[:, None] + cols]
-            else:                                # 4bpp: 2 px/byte, high nibble first
+            elif bpp == 4:                       # 4bpp: 2 px/byte, high nibble first
                 raw = mem_np[rows[:, None] + (cols >> 1)]
                 idx = np.where(cols & 1, raw & 0x0F, raw >> 4)
+            else:                                # 1bpp: 8 px/byte, MSB = leftmost
+                raw = mem_np[rows[:, None] + (cols >> 3)]
+                idx = (raw >> (7 - (cols & 7))) & 1
             dst3d[yd + j_lo:yd + j_hi, xd + i_lo:xd + i_hi] = lut[idx]
         dst.touch()
         return cy

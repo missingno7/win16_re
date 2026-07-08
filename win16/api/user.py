@@ -42,6 +42,46 @@ def _desktop_window(sys: Win16System) -> Window:
     return win
 
 
+def _z_children(sysobj, parent_handle: int) -> list:
+    """A parent's child windows in TOP-to-bottom Z-order.  Our window list is
+    draw order (last drawn = on top), so top-to-bottom is the reverse."""
+    kids = [w for w in sysobj.windows
+            if isinstance(w, Window) and w.parent == parent_handle]
+    kids.reverse()
+    return kids
+
+
+# GetWindow / GetNextWindow command codes.
+_GW_HWNDFIRST, _GW_HWNDLAST, _GW_HWNDNEXT, _GW_HWNDPREV, _GW_OWNER, _GW_CHILD = \
+    0, 1, 2, 3, 4, 5
+
+
+def _get_window(sysobj, hwnd: int, cmd: int) -> int:
+    """USER GetWindow/GetNextWindow: the window related to hwnd by `cmd`, or 0.
+    Siblings share a parent and are ordered top-to-bottom in Z-order."""
+    win = sysobj.handles.get(hwnd)
+    if not isinstance(win, Window):
+        return 0
+    if cmd == _GW_CHILD:
+        kids = _z_children(sysobj, hwnd)
+        return kids[0].handle if kids else 0
+    if cmd == _GW_OWNER:
+        return 0                                # owner (not parent) — untracked
+    sibs = [w.handle for w in _z_children(sysobj, win.parent)]
+    if win.handle not in sibs:
+        return 0
+    i = sibs.index(win.handle)
+    if cmd == _GW_HWNDFIRST:
+        return sibs[0]
+    if cmd == _GW_HWNDLAST:
+        return sibs[-1]
+    if cmd == _GW_HWNDNEXT:
+        return sibs[i + 1] if i + 1 < len(sibs) else 0
+    if cmd == _GW_HWNDPREV:
+        return sibs[i - 1] if i > 0 else 0
+    return 0
+
+
 def _geom(sysobj, handle: int) -> tuple[int, int, int, int]:
     """Resolve any window-like handle (Window, Dialog, control) to its
     (x, y, w, h) geometry — they are all windows in Win16."""
@@ -711,6 +751,26 @@ def install(api: ApiRegistry) -> None:
             return SIMPLEREGION
         rgn.x1 = rgn.y1 = rgn.x2 = rgn.y2 = 0
         return NULLREGION
+
+    @api.register("USER", 229, args="word")             # GetTopWindow(hwnd)
+    def GetTopWindow(ctx: CallContext) -> int:
+        # The child window at the TOP of the parent's Z-order, or 0 if it has no
+        # children.  SimAnt wraps this as _MyGetTopWindow (per SIMANTW.SYM).  Our
+        # window list is draw order (last = drawn last = topmost), so top-to-
+        # bottom Z-order is the reversed list; the top child is its first entry.
+        sys = _sys(ctx)
+        kids = _z_children(sys, ctx.args[0])
+        return kids[0].handle if kids else 0
+
+    @api.register("USER", 262, args="word word")        # GetWindow(hwnd, cmd)
+    def GetWindow(ctx: CallContext) -> int:
+        return _get_window(_sys(ctx), ctx.args[0], ctx.args[1])
+
+    @api.register("USER", 230, args="word word")        # GetNextWindow(hwnd,flag)
+    def GetNextWindow(ctx: CallContext) -> int:
+        # GetNextWindow is GetWindow restricted to GW_HWNDNEXT(2)/GW_HWNDPREV(3);
+        # SimAnt walks a parent's children with it (after GetTopWindow).
+        return _get_window(_sys(ctx), ctx.args[0], ctx.args[1])
 
     @api.register("USER", 45, args="word")              # BringWindowToTop(hwnd)
     def BringWindowToTop(ctx: CallContext) -> int:
