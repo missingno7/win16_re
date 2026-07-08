@@ -83,6 +83,31 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-08 — Load bottleneck located: the _Unpack LZSS asset decompressor
+- **Owner: "loading is very slow — RE + hook the asset-loading island."**  PC-sampling
+  the boot/load phase (`simant.probes.profile` with warmup=0) is unambiguous: **~90% of
+  load time is one loop at seg7:A668 `_Unpack`** (the resolver mislabels it `_CenterAnt`
+  — the offset-based symbol lookup collides across segments; the real routine has a
+  `_Unpack` symbol at its head).  It is the **classic Okumura LZSS decompressor**:
+  - 4KB sliding window (`and bx,0FFFh`), window **initialised with spaces (0x20)**, decode
+    pointer **r0 = 0x0FEE = N−F = 4096−18** (the LZSS fingerprint), THRESHOLD=2, F=18.
+  - Per step: `shr ax,1; test ah,1` pulls the next flag bit; bit=1 → literal (copy a
+    source byte to output AND to `window[r+4]`); bit=0 → match (12-bit offset + 4-bit
+    length back-reference from the window).  Flag byte reloaded as `c | 0xFF00`.
+  - **Resumable/streaming**: state lives in DGROUP globals (`[B7C0]` window seg, `[B7C4:6]`
+    src far ptr, `[B7C8]` input len, `[B7CA]` r, `[B7CC]` flag buffer, `[B7CE/D0]` match
+    carry, `[B7D4]` mid-match flag); output far ptr + output len come on the stack
+    (`[bp+6]`, `[bp+10]`).  Entry seg7:A668 (`push bp;mov bp,sp;sub sp,4;push di;push si`),
+    exit `mov [B7C8],ax; pop di; pop bp; retf`.
+- **A first-pass textbook Okumura decoder reproduces ~72% of the captured output** — close,
+  but NOT byte-exact yet: the exact match offset/length bit-packing and the streaming
+  call boundaries still need pinning (a decompressor that is 72% right silently corrupts
+  every asset, so it is NOT shipped — the byte-exact bar holds).  **Next: build the island
+  with an A/B gate** — run the ORIGINAL `_Unpack` and the Python island over the same
+  compressed input and diff the full decompressed output + the DGROUP exit state, byte for
+  byte, before trusting it (the microman/`__aFuldiv` island pattern).  Expected payoff:
+  the whole load is dominated by this loop, so lifting it should cut load time sharply.
+
 ## 2026-07-08 — SimAnt hooking infrastructure + first island (__aFuldiv)
 - **SimAnt is now the sole test target.**  `pytest.ini` scopes the default run to
   `simant/tests` + the game-AGNOSTIC framework tests SimAnt relies on (compositor,
