@@ -1,5 +1,17 @@
 # Paulie Python — run status (newest on top)
 
+## 2026-07-09 — Quick Game "sized for a smaller window" on first show: missing WM_SIZE
+- Owner: on first show the QG content expects a smaller window than actual; a manual
+  resize fixes it.  Confirmed: DIB blit = 400×304 into a 423×346 window → a 24,758-px
+  white L-strip (right 23px + bottom 42px = the window's white background).  The game
+  sizes its view to the client only on WM_SIZE (post-resize DIB = 464×352 fills 463×
+  348); on first show it never gets one, so it keeps a default 400×304 frame.
+- **Fix (play.py):** real Windows sends WM_SIZE when a window is first sized, so post
+  one with the actual client size when a resizable WindowView is created (scoped to
+  `_can_resize`; fixed panels already match their creation size).  Verified on
+  snap_204728: after the nudge the game re-renders 432×352 and fills (0 white px).
+- Owner also confirmed the earlier version-fence fixed the ghosting.
+
 ## 2026-07-09 — Quick Game "ghosting" is a presentation-thread race, not a render bug
 - Owner: redrawing/ghosting on the Quick Game view (snaps 204728 / 204832 / 204849).
 - **The game's rendering is correct.**  Diffing the "clean" (204832) and "ghosting"
