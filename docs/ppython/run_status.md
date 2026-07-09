@@ -20,16 +20,25 @@
   the target window's surface) is a fast, repeatable way to find a rendering bug
   without re-booting to in-game (~150s/boot).  Scripts under scratchpad.
 
-## 2026-07-09 — OPEN: ghosting when scrolling the in-game "Quick Game" view
-- Owner reports trails/ghosting when moving the map view.  The view (hwnd 0x14a, 423×
-  346) is painted via `SetDIBitsToDevice` (GDI.443) — one full-map DIB blit; idle it
-  repaints ~once and never calls `ScrollWindow`, so the smear is tied to the scroll
-  interaction itself and is NOT reproducible from a static snapshot.  Blit ROPs
-  (SRCCOPY/AND/PAINT/INVERT/NOTSRCCOPY) are all implemented, so it is not an
-  unhandled-ROP raise.  Next step: capture a snapshot WHILE the ghosting is on screen
-  to inspect the smeared surface + the exact SetDIBitsToDevice args that produced it.
-  Suspects: partial-update DIB args (xSrc/ySrc/scan lines) leaving stale pixels, or a
-  scroll path that shifts only part of the client.
+## 2026-07-09 — ghosting when scrolling "Quick Game": overlapping self-BitBlt (candidate fix)
+- Owner supplied a mid-ghost snapshot (`snap_171018`): a faint dotted vertical trail
+  below the tunnel + a sharp-edged horizontal band in the map view.
+- **Localised:** the view (hwnd 0x14a) is painted by ONE full 400×304 4bpp
+  `SetDIBitsToDevice` (start=0, lines=304); the terrain decodes cleanly (right colours,
+  clean dithering), so it is NOT a DIB-decode bug.  The ghost is stale content in
+  SimAnt's *persistent* frame buffer (idle → the buffer is re-blitted, not recomputed,
+  so the trail survives) — i.e. a scroll SHIFT corrupted the buffer.
+- **Fix (candidate):** `blit()` (win16/api/objects.py) copied rows top-to-bottom
+  reading live from `dst.pixels`, so an overlapping self-BitBlt (scroll a surface by
+  BitBlt-ing itself shifted down) read already-overwritten rows → vertical smear.  Now
+  reads from a pristine source snapshot when `src is dst`.  `tests/test_blit.py`.
+- **Caveat:** could NOT reproduce the scroll headlessly — arrow keys and mouse-at-edge
+  (with LBUTTON) did not trigger a scroll / any self-BitBlt from `snap_171018` (the
+  runs even halted early with an empty exception under injected input).  So this is the
+  strongest-candidate fix by mechanism, NOT a verified one.  If it still ghosts after
+  owner re-test, next suspects: the scroll is the game's own VM memcpy of the buffer
+  (would be faithful — look elsewhere), or a partial `SetDIBitsToDevice` band; get the
+  owner's exact pan method (drag / edge / follow-ant) to reproduce.
 
 ## 2026-07-09 — in-game panels are now REAL OS windows (owner's call over painted chrome)
 - Owner preferred native windows to the painted caption bars.  Captioned WS_CHILD
