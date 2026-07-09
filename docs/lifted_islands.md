@@ -7,9 +7,10 @@ reimplementation of one hot ASM loop, hooked at its CS:IP via the dos_re CPU's
 `replacement_hooks`, doing all the loop's work in one shot and writing back the
 exact register/flag/memory state the ASM would have produced.
 
-The worked example is [`../microman/hooks.py`](../microman/hooks.py) (WAP's
-byte-fill / byte-copy / dword-copy inner loops), gated by
-[`../microman/tests/test_hooks.py`](../microman/tests/test_hooks.py).
+The worked examples are in [`../simant/hooks.py`](../simant/hooks.py) — the
+`__aFuldiv` 32-bit divide helper, the `_Unpack` LZSS asset decompressor, a far
+byte-memcpy, and the `_Windows_MakeTable4x4` / `_1x1` terrain tile expanders —
+each gated byte-exact by [`../simant/tests/test_hooks.py`](../simant/tests/test_hooks.py).
 
 ## The pipeline
 

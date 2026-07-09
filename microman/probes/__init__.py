@@ -1,1 +1,0 @@
-"""MicroMan probes/harnesses."""

@@ -1,9 +1,9 @@
-"""The test-game registry.
+"""The game registry.
 
-Paulie Python is the RE target (its adapter lives in `ppython/`); the other
-games are fixtures used only to exercise and harden the game-agnostic `win16/`
-layer — run them with `scripts/boot.py <name>`.  Each entry is the EXE path
-relative to assets/ plus its boot __WINFLAGS.
+SimAnt is the sole target of this project (adapter in `simant/`); run it with
+`scripts/boot.py simant`.  Each entry is the EXE path relative to assets/ plus
+its boot __WINFLAGS.  (The other games this framework was hardened on have been
+moved out to a separate project.)
 """
 from __future__ import annotations
 
@@ -16,13 +16,7 @@ ASSETS = REPO_ROOT / "assets"
 
 GAMES = {
     # name        (exe path under assets/,        winflags)
-    "ppython":    ("PPYTHON/PYTHON.EXE",          WINFLAGS_NO_FPU),
-    "microman":   ("MICROMAN/MICROMAN.EXE",       WINFLAGS_NO_FPU),
-    "simant":     ("ANTWIN/SIMANTW.EXE",          WINFLAGS_NO_FPU),  # brought up
-    # Not yet brought up — listed so `boot.py` can reach them:
-    "bangbang":   ("BANGBANG/BANGBANG.EXE",       WINFLAGS_NO_FPU),
-    "kye":        ("KYE/KYE.EXE",                 WINFLAGS_NO_FPU),
-    "skifree":    ("SKIFREE/SKI.EXE",             WINFLAGS_NO_FPU),
+    "simant":     ("ANTWIN/SIMANTW.EXE",          WINFLAGS_NO_FPU),
 }
 
 

@@ -27,9 +27,9 @@ Correctness beats speed. Traceability beats cleverness. Small verified progress
 beats large intuitive rewrites.
 
 - **`win16/` stays game-agnostic.** No game addresses, filenames, formats, or
-  per-title behaviour in the shared layer. Game knowledge lives in a game
-  package (`ppython/`, `microman/`, `simant/`). A game's `recovered/` logic
-  never imports the VM.
+  per-title behaviour in the shared layer. Game knowledge lives in the game
+  package (`simant/` — the sole target). `simant/recovered/` logic never
+  imports the VM.
 - **Do not make the OS layer more general than a real game requires.** A new
   API / DOS service / opcode is added only when a concrete program calls it,
   identified from its *actual call site* (not guessed), with the observed
@@ -62,18 +62,20 @@ win16/            the game-agnostic Win16 layer (see docs/win16_layer.md):
   interactive.py    real-time driver (wall-clock message pacing)
   demo.py, vmsnap.py  record/replay + full-machine snapshots (the verification baseline)
   audio.py          host audio backend (square-wave + WAV)
-ppython/          Paulie Python — the byte-exact RE target (adapter + recovered/)
-microman/         MicroMan — a WAP fixture; carries the lifted-island method (hooks/)
-simant/           SimAnt — the big stress target (a full commercial Win16 app)
+simant/           SimAnt — the byte-exact RE target and SOLE focus: adapter +
+                  recovered/ + hooks.py (lifted islands) + probes/ (profiler,
+                  SIMANTW.SYM lookup) + tests/ (island A/B oracles)
 scripts/          play.py (interactive), boot.py (frontier probe), games.py (registry)
-docs/             the method; docs/README.md is the index; docs/ppython/run_status.md the journal
-tests/            pytest; game-specific tests live under each game package's tests/
-assets/           original game files (gitignored, never committed)
+docs/             the method; docs/README.md is the index; docs/simant/run_status.md the journal
+tests/            shared win16/-layer pytest
+assets/           original game files (gitignored, never committed) — ANTWIN/ = SimAnt
 ```
+(Other games this framework was hardened on — Paulie Python, MicroMan, and a few
+more — have been moved out to a separate project; SimAnt is the only game here.)
 
-Each game is its own package exposing `runtime.py` (`create_machine`,
+The game package `simant/` exposes `runtime.py` (`create_machine`,
 `assets_present`, `GAME_NAME`, optional `install_hooks`). `win16/` never imports
-from a game package. `scripts/games.py` is the registry the launcher/probe use.
+from it. `scripts/games.py` is the registry the launcher/probe use.
 
 ## Standard commands
 

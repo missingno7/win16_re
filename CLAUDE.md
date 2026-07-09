@@ -6,17 +6,20 @@ method proven on DOS games by [`dos_re`](dos_re) (Prehistorik 2, Overkill).
 model + rendering + compositing + demos/snapshots/audio); it is the Win16 analogue of
 dos_re itself. Read [`AGENTS.md`](AGENTS.md) and [`docs/README.md`](docs/README.md) first.
 
-**The RE target is Paulie Python 1.0** (`assets/PPYTHON/PYTHON.EXE`, adapter `ppython/`) —
-the byte-exact recovery focus. The other games are their own packages:
-- **`microman/`** (MicroMan, a WAP demo) — a fixture that hardens `win16/` and carries the
-  lifted-island method (`microman/hooks.py`; see [`docs/lifted_islands.md`](docs/lifted_islands.md)).
-- **`simant/`** (Maxis SimAnt, `assets/ANTWIN/SIMANTW.EXE`) — the **big stress target**: a
-  full commercial Win16 app (6 code segs, KEYBOARD+WIN87EM, raw INT 21h I/O, programmatic
-  menus, 16-colour DIBs, **child windows within a window**). It boots and paints its
-  splash; bringing it further is what drives `win16/` toward completeness.
-- BANGBANG / KYE / SKIFREE are registered but not yet brought up.
+**The RE target is Maxis SimAnt** (`assets/ANTWIN/SIMANTW.EXE`, adapter `simant/`) — the
+**sole target** of this project.  A full commercial Win16 app (6 code segs,
+KEYBOARD+WIN87EM, native inline x87, raw INT 21h I/O, programmatic menus, 16-colour DIBs,
+**child windows within a window**, huge-pointer tile renderers).  It boots, runs in-game,
+and its source is being recovered routine-by-routine — clean, readable, byte-exact Python
+in [`simant/recovered/`](simant/recovered) with hot-loop islands in
+[`simant/hooks.py`](simant/hooks.py) (see [`docs/lifted_islands.md`](docs/lifted_islands.md)),
+each gated byte-exact by an A/B oracle.
 
-Boot any game with `scripts/boot.py <game>` to find the next `win16/` gap.
+Boot it with `scripts/boot.py simant` to find the next `win16/` gap.
+
+> This framework was first hardened on other games (Paulie Python, MicroMan, a few more);
+> those have been **moved out** to a separate project.  SimAnt is the only game here now —
+> if any doc still centres another game, it is stale.
 
 **The method is dos_re's** — read [`dos_re/docs/ai_porting_charter.md`](dos_re/docs/ai_porting_charter.md)
 for the full phased method. dos_re is a **git submodule** of this repo, pinned at
@@ -61,18 +64,16 @@ win16/            game-agnostic Win16 layer (candidate for promotion into dos_re
   demo.py           record/replay the GetMessage+dialog stream (the RE baseline)
   vmsnap.py         full-machine snapshots + game-observable digest
   audio.py          host audio backend (square-wave + WAV, incl. SND_MEMORY)
-ppython/          the RE target adapter (addresses, formats, recovered logic)
-  recovered/        pure recovered game logic — never imports dos_re or win16 VM bits
-  bridge/           typed views over VM memory (the ONE place offsets live)
-  codecs/           native decoders for game asset formats
-  probes/           throwaway observation scripts
-microman/         WAP fixture: runtime.py + hooks.py (lifted islands) + tests/
-simant/           SimAnt stress target: runtime.py + tests/ (boots + paints splash)
+simant/           the RE TARGET: runtime.py + _env.py (dos_re on sys.path)
+  recovered/        pure recovered SimAnt logic — never imports dos_re or win16 VM bits
+  hooks.py          lifted islands (hot ASM routines reimplemented, byte-exact)
+  probes/           profile.py (PC-sampler) + symbols.py (SIMANTW.SYM name lookup)
+  tests/            island A/B oracles + boot/splash
 scripts/          play.py (interactive; --record, --resume, F9), boot.py (frontier probe),
                   replay.py (headless), games.py (the game registry + hook loader)
-docs/             the method (docs/README.md is the index); docs/ppython/ the ledgers
-tests/            shared-layer pytest; game-specific tests live under <game>/tests/
-assets/           the original game files (gitignored, never committed)
+docs/             the method (docs/README.md is the index); docs/simant/ the ledgers
+tests/            shared win16/-layer pytest
+assets/           the original game files (gitignored, never committed) — ANTWIN/ = SimAnt
 ```
 
 **This is an AI-operated harness.** Only a human is needed to *play* (generate input);
@@ -85,11 +86,11 @@ deterministic verification baseline.
 
 - Never commit red: `python -m pytest -q` green before every commit; one verified
   slice = one focused commit.
-- Never weaken an oracle/test to make a slice pass. Blocked ⇒ revert + entry in
-  `docs/ppython/blockers.md`.
+- Never weaken an oracle/test to make a slice pass. Blocked ⇒ revert + note it in
+  `docs/simant/` (the ledgers).
 - Fail loud, never fake: an unimplemented API/opcode/format raises; no silent
   plausible fallbacks. Implement observed behaviour, not datasheet generality.
-- `win16/` never learns this game (no PYTHON.EXE addresses/format knowledge);
-  `ppython/recovered/` never imports the VM.
-- Update `docs/ppython/run_status.md` (newest on top) as you go; the next session
+- `win16/` never learns this game (no SIMANTW.EXE addresses/format knowledge);
+  `simant/recovered/` never imports the VM.
+- Update `docs/simant/run_status.md` (newest on top) as you go; the next session
   resumes from git + the ledgers alone.

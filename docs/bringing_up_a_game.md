@@ -12,7 +12,7 @@ honest frontier is the value.
 ## 0. Register the game and make a package
 
 Add it to `scripts/games.py` (`name → (exe path under assets/, winflags)`).
-Create a package mirroring `microman/`: `_env.py` (copy), `__init__.py`,
+Create a package mirroring `simant/`: `_env.py` (copy), `__init__.py`,
 `runtime.py` (`EXE_PATH`, `GAME_NAME`, `assets_present`, `create_machine`,
 optional `install_hooks`), and `tests/`.
 

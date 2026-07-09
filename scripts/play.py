@@ -1099,8 +1099,8 @@ class PlayApp:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Play a Win16 game in the VM.")
-    ap.add_argument("--game", default="ppython",
-                    help=f"which game to run (default: ppython). "
+    ap.add_argument("--game", default="simant",
+                    help=f"which game to run (default: simant). "
                          f"known: {', '.join(sorted(GAMES))}")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="time multiplier (1.0 = real speed)")

@@ -17,7 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from ppython.runtime import assets_present, create_machine
+from simant.runtime import assets_present, create_machine
 from win16.demo import DemoDivergence, DemoEnded, DemoPlayer
 from win16.vmsnap import digest, save_snapshot
 
@@ -33,7 +33,7 @@ def main() -> None:
                     help="save a machine snapshot of the end state")
     args = ap.parse_args()
     if not assets_present():
-        raise SystemExit("assets/PYTHON.EXE not found")
+        raise SystemExit("assets/ANTWIN/SIMANTW.EXE not found")
 
     player = DemoPlayer(args.demo)
     print(f"[replay] {args.demo}: {len(player.records)} records (exe {player.exe})")

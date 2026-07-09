@@ -17,18 +17,18 @@ the Windows 3.x New-Executable format.
 | Layer | What it is |
 |-------|-----------|
 | `win16/` | The **game-agnostic** framework: NE loader, the selector-based memory model (static single-app protected mode, 4 MB), the full Win16 API surface, windowing, dialogs, menus, palette/DIB rendering, audio, demos, snapshots. Knows about *no specific game*. |
-| `ppython/` | A game package: **Paulie Python**, the byte-exact RE target. |
-| `microman/` | A game package: **MicroMan** (a WAP demo) — a fixture that hardens `win16/` and carries the lifted-island method (per-game hot-path hooks) on a real graphics engine. Holds its own `runtime`, `hooks`, and `tests/`. |
-| `scripts/` | `play.py` (play a game interactively — real window, keyboard, mouse, audio, F9 snapshots, `--resume`), `boot.py` (bring-up frontier probe), `games.py` (the game registry). |
+| `simant/` | The game package: **Maxis SimAnt**, the byte-exact RE target and sole focus — adapter (`runtime`, `_env`), recovered logic (`recovered/`), lifted islands (`hooks.py`), profiler + symbol lookup (`probes/`), and `tests/`. |
+| `scripts/` | `play.py` (play interactively — real window, keyboard, mouse, audio, F9 snapshots, `--resume`), `boot.py` (bring-up frontier probe), `games.py` (the game registry). |
 
-Each new game is its own package (`<game>/runtime.py` = EXE path, boot flags,
-`create_machine`, optional `install_hooks`). The `win16/` layer never imports
-from a game package.
+All game-specific knowledge lives in `simant/` (`runtime.py` = EXE path, boot
+flags, `create_machine`, `install_hooks`); the `win16/` layer never imports from
+it.  (Other games this framework was hardened on have been moved to a separate
+project — SimAnt is the sole target here.)
 
 ## Running a game
 
 ```
-python scripts/play.py --game microman --scale 2      # play it
+python scripts/play.py --game simant --scale 2      # play it
 python scripts/play.py --resume artifacts/snapshots/<snap>   # resume a snapshot
 python scripts/boot.py <game> [max_steps]             # bring-up frontier report
 ```
@@ -48,5 +48,5 @@ to the console (the game itself only needs the user to provide input).
 ## Status
 
 Live bring-up notes and the standing-mechanisms registry are in
-[`docs/ppython/run_status.md`](docs/ppython/run_status.md). The test suite is the
+[`docs/simant/run_status.md`](docs/simant/run_status.md). The test suite is the
 gate — run `python -m pytest -q` before any commit; never commit red.
