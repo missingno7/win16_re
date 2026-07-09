@@ -106,6 +106,25 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-09 — Fixes: snapshot pickle crash + sim-tick overrun (GetTickCount overshoot) (8dc8b50)
+- **F9 snapshot crashed** ("cannot pickle _thread.RLock"): the driver sets
+  input_drainer + yield_check (bound methods holding a Condition) on sysobj, and
+  save_snapshot only detached machine + message_source.  Now detaches all four.
+- **"Quick Game starts but never progresses" → CallbackOverrun (20M steps).** The
+  sim tick paces each frame by spinning on GetTickCount; GetTickCount used
+  max(clock_ms, instr_floor), and the interpreter runs ~2× faster than
+  INSTR_PER_MS, so the floor overshot real time (~41s at 21s wall).  Inside the
+  nested tick the game then thought thousands of frames were due → processed them
+  all → overrun.  New Win16System.tick_count(): interactive hosts track the wall
+  clock (kept current inside a callback by check_pause on 8192-step chunks),
+  headless keeps the instruction floor (busy-waits still elapse; demo replay
+  deterministic).  USER.13 + the WM_TIMER clock + TimerProc dwtime all use it.
+- **NOT verified in-game by me** (headless reach is too slow); owner must confirm
+  the ants now move.  Owner's "windows still flat / not resizable" report is a
+  VERSION lag — the panel/resize/scrollbar work (4c7fdec/ad4da75) is newer than
+  the yield_check commit their RLock came from; needs `git pull` + `git submodule
+  update --init` (the FPU fix lives in the dos_re submodule).
+
 ## 2026-07-09 — FPU: SimAnt uses native inline x87; completed the emulator (was the ant-stall)
 - **Do we have FPU? Yes, but it was incomplete.** SimAnt's FP is NOT INT 34-3D —
   disassembling the 111 OSFIXUP sites shows `fwait; es: <x87>` (native inline x87,
