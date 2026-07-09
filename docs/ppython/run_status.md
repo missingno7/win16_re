@@ -20,6 +20,21 @@
   the target window's surface) is a fast, repeatable way to find a rendering bug
   without re-booting to in-game (~150s/boot).  Scripts under scratchpad.
 
+## 2026-07-09 — ribbon buttons dead: clicks must reach the composited child's wndproc
+- **Owner:** caste slider works now, but ribbon-panel buttons don't respond.
+- **Cause:** the ribbon is a WS_CHILD toolbar (0x116) composited into the main frame,
+  with its OWN wndproc that hit-tests its buttons.  play.py posted every main-canvas
+  click to the frame (0x114), so 0x116 never saw them.  The promoted panels worked
+  because their clicks go straight to their own view/window (like a real child click).
+- **Fix:** play.py `_route_click` walks the composited child tree (skipping
+  standalone/promoted children) to the deepest visible child under the cursor and
+  posts THERE with child-relative coords — real-Windows child-click delivery.  Verified
+  against snap_174855: ribbon-area clicks → 0x116 (local coords intact), body clicks →
+  0x118.  cursor_pos unchanged (origin+local = same screen point), so the WAP poll and
+  the raise/z-order hit-test stay consistent.  **Not yet verified end-to-end** that the
+  ribbon reacts (headless click injection is too fragile — wrapping the pump leaked the
+  callback-return sentinel); reasoned-correct, pending owner test.
+
 ## 2026-07-09 — in-game freeze after a caste click: live polled input for non-pumping loops
 - **Owner:** clicked Caste Control, it updated, then the game froze (snap_174855).
 - **Root cause:** `snap_174855` had `async_keys=[1]` — LBUTTON stuck DOWN.  The caste
