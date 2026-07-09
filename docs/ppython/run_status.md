@@ -1,5 +1,22 @@
 # Paulie Python — run status (newest on top)
 
+## 2026-07-09 — in-game panels are now REAL OS windows (owner's call over painted chrome)
+- Owner preferred native windows to the painted caption bars.  Captioned WS_CHILD
+  panels ("Caste Control", "Behavior Control", "Black Nest View") are now each their
+  own tkinter Toplevel with native chrome (OS title bar + close box), floating above /
+  transient to the main frame.
+- **Why the mouse path is safe:** the game lives in the VM's *virtual* screen space
+  (all coords come from `_window_origin`, which walks the parent chain) and play.py
+  always posts CLIENT-relative mouse coords — so a promoted panel's real host-window
+  position is irrelevant to hit-testing.  No per-window screen-position sync needed;
+  this is why breaking them out did NOT reopen the in-game aiming problem.
+- **Mechanism:** `compositor.own_windows()` = parent==0 frames + captioned children
+  (`presents_standalone()`); `composite(..., standalone=SET)` skips promoted children
+  at any depth (SimAnt nests panels under a plain body window).  Default `()` keeps
+  headless/screenshots compositing them in with the painted caption (still there as a
+  fallback).  `WindowView._place()` positions at the absolute VM origin.
+- Painted caption bars from the prior entry are retained for the headless path only.
+
 ## 2026-07-09 — SimAnt is in-game and the sim runs; panels get title bars; more USER gaps
 - **The simulation is ALIVE.** With the x87 completion (dos_re) + the GetTickCount
   wall-clock/instruction-floor fix landed, Quick Game reaches in-game and the ants
