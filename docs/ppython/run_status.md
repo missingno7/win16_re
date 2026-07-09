@@ -20,6 +20,27 @@
   the target window's surface) is a fast, repeatable way to find a rendering bug
   without re-booting to in-game (~150s/boot).  Scripts under scratchpad.
 
+## 2026-07-09 — panel buttons dead: overlapping panels + WindowFromPoint z-order (fixed) + USER.129
+- **Owner:** Caste/Behavior/ribbon buttons don't respond; right-click Quick Game →
+  `USER.129` gap.
+- **USER.129/130 GetClassWord/SetClassWord:** negative idx → a WNDCLASS field (GCW_*),
+  non-negative → a WORD in the class's cbClsExtra bytes (`WndClass.class_extra`, sized
+  at RegisterClass).  Hit by the WAP right-click hit-test.
+- **Dead buttons — root cause:** the in-game panels are WS_CHILD windows that OVERLAP
+  each other in the game's virtual screen space (stacked MDI children).  The WAP
+  wndproc re-resolves the polled cursor with `WindowFromPoint`, whose tie-break among
+  same-depth overlapping windows is LAST-in-z-order = Quick Game (0x14a).  Verified on
+  `snap_171018`: a click ANYWHERE on Caste/Behavior/Nest returned 0x14a, so their
+  buttons were dead.  (This overlap predates the promotion-to-OS-windows; promotion
+  just made it hittable/visible.)  **Fix:** play.py `_raise_z` — on any mouse event
+  over a promoted WS_CHILD panel, move it to the top of the VM window list, like
+  activating an MDI child.  After: each panel resolves to its own hwnd.  The ribbon
+  (0x116, composited, un-overlapped) already resolves correctly, so if its buttons
+  still misbehave the cause is elsewhere (message-target vs poll) — pending owner test.
+- Owner also confirmed the scroll ghosting STOPS after resizing the Quick Game window
+  — consistent with the overlapping-self-BitBlt theory (resize forces a clean full
+  redraw of the frame buffer, discarding the smeared shift).
+
 ## 2026-07-09 — ghosting when scrolling "Quick Game": overlapping self-BitBlt (candidate fix)
 - Owner supplied a mid-ghost snapshot (`snap_171018`): a faint dotted vertical trail
   below the tunnel + a sharp-edged horizontal band in the map view.
