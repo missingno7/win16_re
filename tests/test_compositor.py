@@ -126,3 +126,38 @@ def test_captioned_child_gets_title_bar():
     plain.style |= compositor.WS_BORDER
     out2 = compositor.composite(_Sys([frame, plain]), frame)
     assert _px(out2, 20 + compositor._CAP_H + 6, 20 + 6) != compositor._CAP_BG
+
+
+def test_captioned_child_promoted_to_own_window():
+    frame = _win(1, "Frame", 0, 0, 240, 160, rgb=(160, 170, 150))
+    panel = _win(2, "Panel", 20, 20, 100, 80, parent=1, child=True,
+                 rgb=(50, 50, 50))
+    panel.title = "Caste Control"
+    panel.style |= compositor.WS_CAPTION | compositor.WS_SYSMENU
+    sysobj = _Sys([frame, panel])
+
+    # own_windows() promotes the captioned child alongside the frame; the plain
+    # top-level selector still returns only the frame.
+    assert {w.handle for w in compositor.own_windows(sysobj)} == {1, 2}
+    assert [w.handle for w in compositor.top_level_windows(sysobj)] == [1]
+    assert compositor.presents_standalone(panel)
+
+    # Marked standalone: the panel is NOT drawn into the frame (its own view
+    # renders it) — the frame background shows through where it used to be.
+    out = compositor.composite(sysobj, frame, standalone={2})
+    assert _px(out, 25, 50) == (160, 170, 150)
+    # Default (headless): the panel IS composited in, painted caption and all.
+    out2 = compositor.composite(sysobj, frame)
+    assert _px(out2, 25, 50) != (160, 170, 150)
+
+
+def test_standalone_skip_reaches_nested_panel():
+    # A captioned panel nested under a plain child (SimAnt: frame > body > panel)
+    # is still skipped when promoted, at any depth.
+    frame = _win(1, "Frame", 0, 0, 240, 160, rgb=(10, 10, 10))
+    body = _win(2, "Body", 0, 0, 240, 160, parent=1, child=True, rgb=(20, 20, 20))
+    panel = _win(3, "Panel", 30, 30, 100, 80, parent=2, child=True, rgb=(90, 90, 90))
+    panel.style |= compositor.WS_CAPTION
+    sysobj = _Sys([frame, body, panel])
+    out = compositor.composite(sysobj, frame, standalone={3})
+    assert _px(out, 35, 55) == (20, 20, 20)      # body shows through, panel gone

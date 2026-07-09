@@ -214,8 +214,13 @@ class WindowView:
 
     # -- placement ----------------------------------------------------------
     def _place(self) -> None:
-        x = self.app.origin_x + self.win.x * self.scale
-        y = self.app.origin_y + self.win.y * self.scale
+        # Absolute VM-virtual origin (walks the parent chain), so a promoted
+        # child panel lands where the game placed it relative to the frame, not
+        # at its raw parent-relative (x, y).  For a top-level frame this is just
+        # its own (x, y).
+        ox, oy = self.app.sys._window_origin(self.win.handle)
+        x = self.app.origin_x + ox * self.scale
+        y = self.app.origin_y + oy * self.scale
         self.top.geometry(f"+{x}+{y}")
         self._last_geo = (self.win.x, self.win.y)
 
@@ -417,12 +422,16 @@ class WindowView:
 
     # -- per-tick sync ---------------------------------------------------------
     def _composited(self):
-        """The image to display: this (top-level) window with its WS_CHILD
-        windows composited in at their offsets (SimAnt's canvas/ribbon live in
-        child windows).  menu_bar=False: the menu is a real tkinter widget here,
-        so the painted strip (headless/screenshot chrome) is suppressed."""
+        """The image to display: this window with its plain WS_CHILD windows
+        composited in at their offsets (SimAnt's canvas/ribbon/body live in child
+        windows).  menu_bar=False: the menu is a real tkinter widget here, so the
+        painted strip (headless/screenshot chrome) is suppressed.  `standalone` =
+        every window that has its OWN view, so captioned panels promoted to real
+        Toplevels are NOT also drawn into this frame."""
         from win16 import compositor
-        return compositor.composite(self.app.sys, self.win, menu_bar=False)
+        standalone = set(self.app.views)
+        return compositor.composite(self.app.sys, self.win, menu_bar=False,
+                                    standalone=standalone)
 
     def sync(self) -> None:
         from win16 import compositor
@@ -957,10 +966,11 @@ class PlayApp:
     def _tick(self) -> None:
         self._service_dialogs()
         self._service_box()
-        # Only TOP-LEVEL windows get their own OS window; WS_CHILD windows
-        # (SimAnt's ribbon/canvas) composite into their parent's view.
+        # Top-level frames AND captioned children (SimAnt's in-game panels) each
+        # get their own OS window; plain WS_CHILD windows (ribbon/canvas/body)
+        # composite into their parent's view.
         from win16 import compositor
-        live = {w.handle: w for w in compositor.top_level_windows(self.sys)}
+        live = {w.handle: w for w in compositor.own_windows(self.sys)}
         for handle in [h for h in self.views if h not in live]:
             self.views.pop(handle).destroy()
         for handle, win in live.items():
@@ -971,6 +981,15 @@ class PlayApp:
 
         main = next((v for v in self.views.values() if v.is_main), None)
         if main is not None:
+            # Promoted panels float ABOVE the main frame and travel with it (the
+            # closest a real OS window gets to the game's in-frame MDI children).
+            for v in self.views.values():
+                if v is not main and not getattr(v, "_grouped", False):
+                    try:
+                        v.top.transient(main.top)
+                    except tk.TclError:
+                        pass
+                    v._grouped = True
             clk = self.sys.clock_ms
             rec = f"   REC {self.recorder.records}" if self.recorder else ""
             main.status_var.set(f"{self.status}   t={clk // 1000}.{clk % 1000:03d}s{rec}")

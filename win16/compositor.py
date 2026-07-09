@@ -108,15 +108,31 @@ def is_child(window) -> bool:
 
 
 def top_level_windows(sysobj) -> list:
-    """Visible windows the host should present as their OWN OS window: those
-    parented to the desktop (parent == 0).  This includes SimAnt's in-game
-    control panels ("Caste Control", the resizable "SimAnt - Quick Game" view,
-    ...), which are WS_CHILD|WS_CAPTION but created with a NULL parent — i.e.
-    top-level framed windows, not children of the main frame.  Windows parented
-    to another window composite INTO it instead.  The desktop pseudo-window is
-    never presented."""
+    """Visible windows parented to the desktop (parent == 0) — genuine
+    top-level frames.  Windows parented to another window composite INTO it.
+    The desktop pseudo-window is never presented."""
     return [w for w in sysobj.windows
             if w.visible and w.parent == 0 and w.wndclass.name != "#desktop"]
+
+
+def presents_standalone(window) -> bool:
+    """True for a composited child the host can PROMOTE to its own real OS
+    window: a WS_CHILD with a full caption bar (both WS_CAPTION bits).  SimAnt's
+    in-game panels ("Caste Control", "Behavior Control", "Black Nest View") are
+    such children of the main frame.  A host that presents them as their own
+    Toplevel (native title bar + close box) skips them in the parent composite
+    (see `standalone` in composite()); headless/screenshot rendering leaves them
+    composited-in with a painted caption instead."""
+    return (bool(window.style & WS_CHILD)
+            and (window.style & WS_CAPTION) == WS_CAPTION)
+
+
+def own_windows(sysobj) -> list:
+    """Every window the host presents as its OWN OS window: genuine top-level
+    frames (parent == 0) PLUS captioned children promoted to real windows."""
+    return [w for w in sysobj.windows
+            if w.visible and w.wndclass.name != "#desktop"
+            and (w.parent == 0 or presents_standalone(w))]
 
 
 def tree_version(sysobj, window) -> int:
@@ -223,14 +239,20 @@ def _draw_caption(dst, x, y, w, h, title, style) -> None:
                             dst[py, px] = _CAP_TEXT
 
 
-def composite(sysobj, window, *, menu_bar: bool = True):
+def composite(sysobj, window, *, menu_bar: bool = True, standalone=()):
     """A NEW Surface: `window`'s pixels with its visible child windows blitted
     in at their positions (recursively), clipped to the window's client area.
 
     `menu_bar` paints the top-level frame's menu titles as a strip above the
     client — right for headless screenshots, but a host with a REAL menu widget
     (play.py's native tkinter menubar) passes menu_bar=False so the strip does
-    not double the menu and offset the client."""
+    not double the menu and offset the client.
+
+    `standalone` is a set of handles the host is presenting as their OWN OS
+    window (see own_windows()); any child in it is SKIPPED here — its real
+    native chrome replaces the painted caption, and it is drawn by its own view.
+    Applied at every depth so a promoted panel nested under a plain child window
+    (e.g. SimAnt's body panel) is skipped too."""
     import numpy as np
 
     from .api.objects import Surface
@@ -240,7 +262,9 @@ def composite(sysobj, window, *, menu_bar: bool = True):
     dst = np.frombuffer(out.pixels, dtype=np.uint8).reshape(base.h, base.w, 3)
 
     for child in child_windows(sysobj, window.handle):
-        sub = composite(sysobj, child)          # grandchildren first
+        if child.handle in standalone:          # promoted to its own OS window
+            continue
+        sub = composite(sysobj, child, standalone=standalone)   # grandkids first
         x0, y0 = max(child.x, 0), max(child.y, 0)
         x1 = min(child.x + sub.w, base.w)
         y1 = min(child.y + sub.h, base.h)
