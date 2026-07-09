@@ -476,8 +476,21 @@ class WindowView:
         Toplevels are NOT also drawn into this frame."""
         from win16 import compositor
         standalone = set(self.app.views)
-        return compositor.composite(self.app.sys, self.win, menu_bar=False,
-                                    standalone=standalone)
+        sysobj = self.app.sys
+        # The CPU worker thread rewrites the game's surfaces (a SetDIBits blit of
+        # the whole Quick Game frame can run for ms) while WE read them here on
+        # the tkinter thread — a concurrent read can catch a half-updated buffer
+        # and show a torn/ghosted frame.  Take a version fence around the copy:
+        # if a surface write COMPLETED (touch bumped the version) while we were
+        # compositing, the copy may be torn, so redo it once — the write is done
+        # by then.  Cheap; only matters during active redraw (idle => no bump).
+        for _ in range(2):
+            before = compositor.tree_version(sysobj, self.win)
+            out = compositor.composite(sysobj, self.win, menu_bar=False,
+                                       standalone=standalone)
+            if compositor.tree_version(sysobj, self.win) == before:
+                break
+        return out
 
     def sync(self) -> None:
         from win16 import compositor
