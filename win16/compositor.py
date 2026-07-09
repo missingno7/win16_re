@@ -15,6 +15,15 @@ helper only (play.py, screenshots); it never mutates a game surface.
 from __future__ import annotations
 
 WS_CHILD = 0x40000000
+WS_BORDER = 0x00800000
+WS_DLGFRAME = 0x00400000
+WS_CAPTION = WS_BORDER | WS_DLGFRAME     # 0x00C00000
+_FRAME_STYLES = WS_BORDER | WS_DLGFRAME  # any of these => draw a window frame
+
+# Win 3.1 3D frame colours.
+_FRAME_HI = (255, 255, 255)     # light edge (top-left)
+_FRAME_LO = (128, 128, 128)     # shadow edge (bottom-right)
+_FRAME_DK = (0, 0, 0)           # outer line
 
 # --- menu bar (presentation) -----------------------------------------------
 # Our Window surface IS the client area (no non-client modelling), so a top
@@ -99,6 +108,35 @@ def tree_version(sysobj, window) -> int:
     return total
 
 
+def _draw_frame(dst, x: int, y: int, w: int, h: int) -> None:
+    """Paint a Win3.1 raised 3D window frame on `dst` (an H×W×3 numpy view) for
+    the window rect at (x, y, w, h): an outer dark line, then a raised bevel
+    (white top-left, grey bottom-right).  Clipped to dst; a no-op if degenerate."""
+    H, W = dst.shape[0], dst.shape[1]
+    x0, y0, x1, y1 = x, y, x + w, y + h            # right/bottom are exclusive
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return
+
+    def hline(yy, xa, xb, rgb):
+        if 0 <= yy < H:
+            a, b = max(xa, 0), min(xb, W)
+            if b > a:
+                dst[yy, a:b] = rgb
+
+    def vline(xx, ya, yb, rgb):
+        if 0 <= xx < W:
+            a, b = max(ya, 0), min(yb, H)
+            if b > a:
+                dst[a:b, xx] = rgb
+
+    # outer 1px black rectangle
+    hline(y0, x0, x1, _FRAME_DK); hline(y1 - 1, x0, x1, _FRAME_DK)
+    vline(x0, y0, y1, _FRAME_DK); vline(x1 - 1, y0, y1, _FRAME_DK)
+    # inner 1px raised bevel
+    hline(y0 + 1, x0 + 1, x1 - 1, _FRAME_HI); vline(x0 + 1, y0 + 1, y1 - 1, _FRAME_HI)
+    hline(y1 - 2, x0 + 1, x1 - 1, _FRAME_LO); vline(x1 - 2, y0 + 1, y1 - 1, _FRAME_LO)
+
+
 def composite(sysobj, window, *, menu_bar: bool = True):
     """A NEW Surface: `window`'s pixels with its visible child windows blitted
     in at their positions (recursively), clipped to the window's client area.
@@ -125,6 +163,12 @@ def composite(sysobj, window, *, menu_bar: bool = True):
         src = np.frombuffer(sub.pixels, dtype=np.uint8).reshape(sub.h, sub.w, 3)
         dst[y0:y1, x0:x1] = src[y0 - child.y:y1 - child.y,
                                 x0 - child.x:x1 - child.x]
+        # A framed child (WS_DLGFRAME/WS_BORDER/WS_CAPTION) gets a window frame so
+        # it reads as a real window, not a flat rectangle painted on the parent.
+        # Drawn as an inset 3D edge on the child's own rect (we don't model
+        # non-client insets, so it overlays the outermost 2px of the client).
+        if child.style & _FRAME_STYLES:
+            _draw_frame(dst, child.x, child.y, sub.w, sub.h)
 
     # A top-level frame's menu bar is a presentation strip above the client.
     if not menu_bar:
