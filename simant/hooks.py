@@ -305,6 +305,47 @@ def _make_maketable4x4_island(machine):
     return island
 
 
+# -- _Windows_MakeTable1x1 (seg4:46BB) — the 1:1 (no-zoom) tile packer --------
+#
+# The sibling of MakeTable4x4 for the un-zoomed view: it packs pairs of source
+# tile bytes into single 4bpp pixel bytes via an XLAT table at SS:0x1B56.  Per
+# iteration (count>>1 of them): lodsb t0; al = ss:[0x1B56+t0]; ah = al; lodsb
+# t1; al = ss:[0x1B66+t1]; al |= ah; stosb.  Same full-preservation + retf ABI.
+MAKETABLE1X1_SEG_INDEX = 4
+MAKETABLE1X1_OFF = 0x46BB
+MAKETABLE1X1_TABLE_OFF = 0x1B56                  # SS-relative XLAT table base
+MAKETABLE1X1_SIG = bytes.fromhex(
+    "558bec601e06c57606c47e0abb561b8b4e0ed1e9")
+
+
+def _make_maketable1x1_island(machine):
+    from .recovered.render import windows_make_table_1x1
+
+    def island(cpu) -> None:
+        m = cpu.mem
+        s = cpu.s
+        ss, sp = s.ss, s.sp
+        rw, rb = m.rw, m.rb
+        ret_ip, ret_cs = rw(ss, sp), rw(ss, (sp + 2) & 0xFFFF)
+        src_off, src_seg = rw(ss, (sp + 4) & 0xFFFF), rw(ss, (sp + 6) & 0xFFFF)
+        dst_off, dst_seg = rw(ss, (sp + 8) & 0xFFFF), rw(ss, (sp + 0x0A) & 0xFFFF)
+        count = rw(ss, (sp + 0x0C) & 0xFFFF)
+
+        pairs = count >> 1
+        tiles = [rb(src_seg, (src_off + i) & 0xFFFF) for i in range(2 * pairs)]
+        table = bytes(rb(ss, (MAKETABLE1X1_TABLE_OFF + i) & 0xFFFF)
+                      for i in range(0x110))       # covers XLAT of 0..255 at +0 and +0x10
+        out = windows_make_table_1x1(tiles, table)
+        for i, byteval in enumerate(out):
+            m.wb(dst_seg, (dst_off + i) & 0xFFFF, byteval)
+
+        s.sp = (sp + 4) & 0xFFFF
+        s.cs = ret_cs
+        s.ip = ret_ip
+
+    return island
+
+
 # Registry of (segment index, entry offset, signature, island factory, name).
 # Each factory takes (machine, off) and returns the hook fn.
 _ISLANDS = [
@@ -317,6 +358,9 @@ _ISLANDS = [
     (MAKETABLE4X4_SEG_INDEX, MAKETABLE4X4_OFF, MAKETABLE4X4_SIG,
      lambda machine, off: _make_maketable4x4_island(machine),
      "_Windows_MakeTable4x4"),
+    (MAKETABLE1X1_SEG_INDEX, MAKETABLE1X1_OFF, MAKETABLE1X1_SIG,
+     lambda machine, off: _make_maketable1x1_island(machine),
+     "_Windows_MakeTable1x1"),
 ]
 
 

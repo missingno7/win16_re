@@ -79,7 +79,7 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
     hk = runtime.create_machine()
     hk.cpu.trace_enabled = False
-    assert hooks.install(hk) == 4               # + _Unpack, bytecopy, MakeTable4x4
+    assert hooks.install(hk) == 5               # + _Unpack, bytecopy, MakeTable4x4
     isl = _run_island(hk, dividend, divisor)
 
     assert asm["ax"] | (asm["dx"] << 16) == (dividend // divisor) & 0xFFFFFFFF
@@ -89,8 +89,8 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
 def test_install_counts_and_verifies():
     m = runtime.create_machine()
-    assert hooks.install(m) == 4
-    assert runtime.install_hooks(runtime.create_machine()) == 4
+    assert hooks.install(m) == 5
+    assert runtime.install_hooks(runtime.create_machine()) == 5
 
 
 def _capture_unpack_output(with_island, max_calls, step_budget):
@@ -285,4 +285,56 @@ def test_maketable4x4_island_matches_asm(count):
     asm = _run_maketable(False, count, tiles, table)
     isl = _run_maketable(True, count, tiles, table)
     assert isl[0] == asm[0], f"count={count}: band bytes differ"
+    assert isl[1] == asm[1], f"count={count}: exit state differs {isl[1]} != {asm[1]}"
+
+
+# ---- _Windows_MakeTable1x1 (seg4:46BB) ---------------------------------------
+def _run_maketable1x1(with_island, count, tiles, table):
+    """Synthetic call — source tiles at DS:SI, the XLAT table at SS:0x1B56,
+    dest at ES:DI.  Returns the count>>1 output bytes + the (preserved) exit
+    state."""
+    m = runtime.create_machine()
+    m.cpu.trace_enabled = False
+    if with_island:
+        hooks.install(m)
+    s = m.cpu.s
+    s.sp = 0xFF00
+    src_seg, src_off = 0x7000, 0x0000
+    dst_seg, dst_off = 0x7100, 0x0000
+    for i, t in enumerate(tiles):
+        m.mem.wb(src_seg, (src_off + i) & 0xFFFF, t)
+    for i in range(0x110):
+        m.mem.wb(s.ss, (0x1B56 + i) & 0xFFFF, table[i])
+    s.ax, s.bx, s.cx, s.dx = 0xA1A1, 0x1111, 0xC1C1, 0xD1D1
+    s.si, s.di, s.bp = 0x2222, 0x3333, 0x4444
+    s.cs, s.ip = m.seg_bases[hooks.MAKETABLE1X1_SEG_INDEX], hooks.MAKETABLE1X1_OFF
+    sp = s.sp
+    for v in (count, dst_seg, dst_off, src_seg, src_off, SENT_CS, SENT_IP):
+        sp = (sp - 2) & 0xFFFF
+        m.mem.ww(s.ss, sp, v & 0xFFFF)
+    s.sp = sp
+    if with_island:
+        m.cpu.step()
+    else:
+        for _ in range(count * 20 + 300):
+            m.cpu.step()
+            if (s.cs & 0xFFFF, s.ip & 0xFFFF) == (SENT_CS, SENT_IP):
+                break
+        else:
+            raise AssertionError("ASM _Windows_MakeTable1x1 did not return")
+    assert (s.cs & 0xFFFF, s.ip & 0xFFFF) == (SENT_CS, SENT_IP)
+    dst_lin = m.mem._xlat(dst_seg, dst_off)
+    out = bytes(m.mem.data[dst_lin:dst_lin + count // 2])
+    regs = dict(ax=s.ax, bx=s.bx, cx=s.cx, dx=s.dx, si=s.si, di=s.di,
+                bp=s.bp, sp=s.sp, ds=s.ds, es=s.es)
+    return out, regs
+
+
+@pytest.mark.parametrize("count", [2, 5, 16, 127, 128])
+def test_maketable1x1_island_matches_asm(count):
+    tiles = [(i * 5 + 1) & 0x0F for i in range(count)]
+    table = [(i * 37 + 11) & 0xFF for i in range(0x110)]   # arbitrary XLAT table
+    asm = _run_maketable1x1(False, count, tiles, table)
+    isl = _run_maketable1x1(True, count, tiles, table)
+    assert isl[0] == asm[0], f"count={count}: packed bytes differ"
     assert isl[1] == asm[1], f"count={count}: exit state differs {isl[1]} != {asm[1]}"

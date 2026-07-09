@@ -22,3 +22,20 @@ def windows_make_table_4x4(tiles, table):
     (`ss:[0x1A56 + row*0x40 + tile*2]`).
     """
     return [[table[row][tile] for tile in tiles] for row in range(4)]
+
+
+def windows_make_table_1x1(tiles, table):
+    """Pack pairs of terrain tiles into 4bpp pixel bytes, 1:1 (no zoom).
+
+    For each consecutive pair `(t0, t1)` the output byte is
+    `table[t0] | table[0x10 + t1]` — the even tile contributes the high nibble
+    (its `table` entry), the odd tile the low nibble (from the +0x10 half of the
+    table).  Returns `len(tiles) // 2` bytes (a trailing odd tile is dropped, as
+    the ASM's `count >> 1` loop count does).
+
+    `table` is the 256+-byte XLAT table at `SS:0x1B56`.  Recovered from
+    `_Windows_MakeTable1x1` (SIMANTW.SYM, seg4:46BB): per iteration two `lodsb`
+    + two `ss:xlat` (the second with BX bumped by 0x10) OR'd into one `stosb`.
+    """
+    return bytes(table[tiles[2 * i]] | table[0x10 + tiles[2 * i + 1]]
+                 for i in range(len(tiles) // 2))
