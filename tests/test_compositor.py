@@ -99,3 +99,30 @@ def test_top_level_selection_excludes_children():
     sysobj = _Sys([frame, child])
     tops = compositor.top_level_windows(sysobj)
     assert [w.handle for w in tops] == [1]
+
+
+def test_captioned_child_gets_title_bar():
+    frame = _win(1, "Frame", 0, 0, 240, 160, rgb=(160, 170, 150))
+    panel = _win(2, "Panel", 20, 20, 180, 110, parent=1, child=True,
+                 rgb=(192, 192, 192))
+    panel.title = "Caste Control"
+    panel.style |= compositor.WS_CAPTION | compositor.WS_SYSMENU
+    out = compositor.composite(_Sys([frame, panel]), frame)
+
+    # Caption bar: a deep-blue strip inside the child's top, past the sys box.
+    bar = [_px(out, x, 20 + 6) for x in range(20 + compositor._CAP_H + 4,
+                                              20 + 170)]
+    assert bar.count(compositor._CAP_BG) > len(bar) // 2
+    # White title glyphs sit on the bar.
+    title_px = [_px(out, x, 20 + 4 + r)
+                for x in range(20 + compositor._CAP_H + 4, 20 + 160)
+                for r in range(8)]
+    assert compositor._CAP_TEXT in title_px
+    # A system box (grey) hugs the left edge inside the frame.
+    assert _px(out, 20 + 5, 20 + 8) == compositor._BOX_BG
+    # A plain WS_BORDER child (no full caption) gets no blue bar.
+    plain = _win(3, "Plain", 20, 20, 180, 110, parent=1, child=True,
+                 rgb=(200, 200, 200))
+    plain.style |= compositor.WS_BORDER
+    out2 = compositor.composite(_Sys([frame, plain]), frame)
+    assert _px(out2, 20 + compositor._CAP_H + 6, 20 + 6) != compositor._CAP_BG

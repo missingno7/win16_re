@@ -17,13 +17,28 @@ from __future__ import annotations
 WS_CHILD = 0x40000000
 WS_BORDER = 0x00800000
 WS_DLGFRAME = 0x00400000
-WS_CAPTION = WS_BORDER | WS_DLGFRAME     # 0x00C00000
+WS_CAPTION = WS_BORDER | WS_DLGFRAME     # 0x00C00000 (both bits => title bar)
+WS_SYSMENU = 0x00080000
+WS_MAXIMIZEBOX = 0x00010000
+WS_MINIMIZEBOX = 0x00020000
 _FRAME_STYLES = WS_BORDER | WS_DLGFRAME  # any of these => draw a window frame
 
 # Win 3.1 3D frame colours.
 _FRAME_HI = (255, 255, 255)     # light edge (top-left)
 _FRAME_LO = (128, 128, 128)     # shadow edge (bottom-right)
 _FRAME_DK = (0, 0, 0)           # outer line
+
+# Win 3.1 caption bar (a composited child's title bar — a top-level window gets
+# its caption from the host window manager, so only WS_CHILD framed windows draw
+# one here).  Classic look: deep-blue active bar, white title, a grey system box
+# at the left and (when the style asks) grey min/max boxes at the right.  Drawn
+# as an overlay on the top of the child's own rect — we don't inset the client,
+# so it covers the child's outermost caption-height strip.
+_CAP_H = 15
+_CAP_BG = (0, 0, 128)           # active title bar
+_CAP_TEXT = (255, 255, 255)
+_BOX_BG = (192, 192, 192)       # system / min / max box face
+_BOX_MARK = (0, 0, 0)           # the glyph inside a box
 
 # --- menu bar (presentation) -----------------------------------------------
 # Our Window surface IS the client area (no non-client modelling), so a top
@@ -142,6 +157,72 @@ def _draw_frame(dst, x: int, y: int, w: int, h: int) -> None:
     hline(y1 - 2, x0 + 1, x1 - 1, _FRAME_LO); vline(x1 - 2, y0 + 1, y1 - 1, _FRAME_LO)
 
 
+def _fill(dst, x0, y0, x1, y1, rgb) -> None:
+    H, W = dst.shape[0], dst.shape[1]
+    a, b = max(x0, 0), min(x1, W)
+    c, d = max(y0, 0), min(y1, H)
+    if b > a and d > c:
+        dst[c:d, a:b] = rgb
+
+
+def _draw_box(dst, x, y, size, glyph) -> None:
+    """A grey caption box (system / min / max) with a bevel and a black `glyph`
+    ('sys' horizontal bar, 'min' down-triangle, 'max' up-triangle)."""
+    _fill(dst, x, y, x + size, y + size, _BOX_BG)
+    # simple 1px bevel so the box reads as a raised button
+    _fill(dst, x, y, x + size, y + 1, _FRAME_HI)
+    _fill(dst, x, y, x + 1, y + size, _FRAME_HI)
+    _fill(dst, x, y + size - 1, x + size, y + size, _FRAME_LO)
+    _fill(dst, x + size - 1, y, x + size, y + size, _FRAME_LO)
+    cx, cy = x + size // 2, y + size // 2
+    if glyph == "sys":                       # Win3.1 system-menu box: a bar
+        _fill(dst, x + 3, cy - 1, x + size - 3, cy + 1, _BOX_MARK)
+    elif glyph in ("min", "max"):            # a small solid triangle
+        H, W = dst.shape[0], dst.shape[1]
+        for i in range(4):
+            row = cy + (i - 2 if glyph == "max" else 2 - i)
+            if 0 <= row < H:
+                a, b = max(cx - i, 0), min(cx + i + 1, W)
+                if b > a:
+                    dst[row, a:b] = _BOX_MARK
+
+
+def _draw_caption(dst, x, y, w, h, title, style) -> None:
+    """Paint a title bar on the top strip of the child rect (x, y, w, h)."""
+    from .font8x8 import glyph_rows
+    H, W = dst.shape[0], dst.shape[1]
+    if w < 3 * _CAP_H or h < _CAP_H + 4:
+        return                               # too small to carry a caption
+    bx0, by0 = x + 2, y + 2                   # inside the 2px frame
+    bx1 = x + w - 2
+    _fill(dst, bx0, by0, bx1, by0 + _CAP_H, _CAP_BG)
+    left = bx0
+    if style & WS_SYSMENU:                    # system box hugs the left edge
+        _draw_box(dst, bx0 + 1, by0 + 1, _CAP_H - 2, "sys")
+        left = bx0 + _CAP_H + 2
+    right = bx1
+    for bit, glyph in ((WS_MAXIMIZEBOX, "max"), (WS_MINIMIZEBOX, "min")):
+        if style & bit:
+            right -= _CAP_H
+            _draw_box(dst, right, by0 + 1, _CAP_H - 2, glyph)
+    if title:                                 # centred-ish white title text
+        ty = by0 + (_CAP_H - 8) // 2
+        tx = left + 2
+        for i, ch in enumerate(title):
+            cx = tx + i * 8
+            if cx + 8 > right:
+                break
+            for ry, rowbits in enumerate(glyph_rows(ord(ch))):
+                py = ty + ry
+                if not 0 <= py < H:
+                    continue
+                for rx in range(8):
+                    if rowbits & (1 << rx):
+                        px = cx + rx
+                        if 0 <= px < W:
+                            dst[py, px] = _CAP_TEXT
+
+
 def composite(sysobj, window, *, menu_bar: bool = True):
     """A NEW Surface: `window`'s pixels with its visible child windows blitted
     in at their positions (recursively), clipped to the window's client area.
@@ -174,6 +255,9 @@ def composite(sysobj, window, *, menu_bar: bool = True):
         # non-client insets, so it overlays the outermost 2px of the client).
         if child.style & _FRAME_STYLES:
             _draw_frame(dst, child.x, child.y, sub.w, sub.h)
+            if (child.style & WS_CAPTION) == WS_CAPTION:
+                _draw_caption(dst, child.x, child.y, sub.w, sub.h,
+                              child.title, child.style)
 
     # A top-level frame's menu bar is a presentation strip above the client.
     if not menu_bar:
