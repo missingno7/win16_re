@@ -15,6 +15,22 @@ def _driver():
     return InteractiveDriver(sysobj)
 
 
+def test_drain_notes_polled_state_at_arrival():
+    """A polling game (GetAsyncKeyState in a tight loop, no GetMessage) must see
+    host input: the driver feeds polled state as input DRAINS, not when a message
+    is consumed — otherwise SimAnt's caste-slider drag never sees the button
+    release and freezes."""
+    noted = []
+    sysobj = types.SimpleNamespace(clock_ms=0, message_source=None, msg_queue=[],
+                                   windows=[], quit_posted=None,
+                                   _note_input=lambda m: noted.append(m))
+    drv = InteractiveDriver(sysobj)
+    drv.post_input(0x10, 0x0202, 0, 0)          # WM_LBUTTONUP
+    drv._drain_input()
+    assert len(noted) == 1 and noted[0][:4] == (0x10, 0x0202, 0, 0)
+    assert sysobj.msg_queue and sysobj.msg_queue[0][:4] == (0x10, 0x0202, 0, 0)
+
+
 def test_pause_parks_at_instruction_boundary_without_getmessage():
     drv = _driver()
     spun = {"n": 0}

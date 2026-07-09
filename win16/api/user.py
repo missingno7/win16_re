@@ -1403,7 +1403,9 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 17, args="ptr")               # GetCursorPos(lpPoint)
     def GetCursorPos(ctx: CallContext) -> int:
-        x, y = _sys(ctx).machine.api.services.get("cursor_pos", (0, 0))
+        sys = _sys(ctx)
+        sys.refresh_polled_input()                      # live: see the latest cursor
+        x, y = sys.machine.api.services.get("cursor_pos", (0, 0))
         seg, off = (ctx.args[0] >> 16) & 0xFFFF, ctx.args[0] & 0xFFFF
         ctx.mem.ww(seg, off, x & 0xFFFF)
         ctx.mem.ww(seg, (off + 2) & 0xFFFF, y & 0xFFFF)
@@ -1425,16 +1427,21 @@ def install(api: ApiRegistry) -> None:
         # State of a key AT THE LAST message (vs GetAsyncKeyState's live poll).
         # We derive both from the same message-fed key set, so bit 15 = down.
         # (Toggle bit 0 for lock keys is not tracked until a game needs it.)
-        services = _sys(ctx).machine.api.services
+        sys = _sys(ctx)
+        sys.refresh_polled_input()
+        services = sys.machine.api.services
         return 0x8000 if ctx.args[0] in services.get("async_keys", set()) else 0
 
     @api.register("USER", 249, args="word")             # GetAsyncKeyState(vk)
     def GetAsyncKeyState(ctx: CallContext) -> int:
         # Bit 15: key is down NOW.  Bit 0: key went down since the last call
         # for this vk (the latch that catches a tap shorter than one poll
-        # interval).  Both sets are fed from the message stream in
-        # Win16System.get_message, so demo replay sees identical state.
-        services = _sys(ctx).machine.api.services
+        # interval).  Live poll: drain host input first so a non-pumping spin
+        # (SimAnt's caste drag) sees button releases; headless/replay derives it
+        # from the consumed message stream instead (identical, deterministic).
+        sys = _sys(ctx)
+        sys.refresh_polled_input()
+        services = sys.machine.api.services
         vk = ctx.args[0]
         result = 0x8000 if vk in services.get("async_keys", set()) else 0
         tapped = services.get("async_keys_tapped", set())

@@ -103,7 +103,14 @@ class InteractiveDriver:
             pending, self._input = self._input, []
         now = self.now_ms()
         for hwnd, msg, wparam, lparam in pending:
-            self.sys.msg_queue.append((hwnd, msg, wparam, lparam, now, 0))
+            m = (hwnd, msg, wparam, lparam, now, 0)
+            self.sys.msg_queue.append(m)
+            # Feed polled state (async keys / cursor) AS INPUT ARRIVES, not when
+            # a message is consumed — SimAnt's caste-slider drag polls
+            # GetAsyncKeyState without pumping, so consume-time noting would never
+            # see the button release.  get_message/peek_message skip their own
+            # _note_input while a drainer is attached (no double-note).
+            self.sys._note_input(m)
 
     def _next(self, sysobj):
         while True:

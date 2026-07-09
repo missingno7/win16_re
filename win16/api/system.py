@@ -177,7 +177,8 @@ class Win16System:
                 continue
             if remove:
                 del self.msg_queue[i]
-                self._note_input(m)         # feed polled state (mouse/keys)
+                if self.input_drainer is None:      # else noted at drain time
+                    self._note_input(m)             # feed polled state (mouse/keys)
             return m
         # A due WM_TIMER is discoverable by PeekMessage too, not only GetMessage.
         # SimAnt's sim tick (a SetTimer TimerProc) paces its frame by spinning on
@@ -258,6 +259,18 @@ class Win16System:
             elif mtype in up:
                 services.get("async_keys", set()).discard(up[mtype])
 
+    def refresh_polled_input(self) -> None:
+        """Make freshly-arrived host input visible to a game that POLLS
+        GetAsyncKeyState/GetKeyState/GetCursorPos without pumping the queue.
+        SimAnt's caste-slider drag spins on GetAsyncKeyState(VK_LBUTTON) waiting
+        for the button to release WITHOUT calling Peek/GetMessage — so without
+        this the WM_LBUTTONUP never drains, the button reads down forever, and
+        the game freezes.  The interactive drainer feeds polled state at arrival
+        time (see the driver), so one drain here refreshes it; headless/replay
+        has no drainer and derives state on message consumption instead."""
+        if self.input_drainer is not None:
+            self.input_drainer()
+
     def pump_modal(self, *, paint: bool = True, timers: bool = False) -> bool:
         """Dispatch one pending WM_PAINT (and optionally a due WM_TIMER) to a
         window's WndProc — what a real modal loop (MessageBox/DialogBox) does so
@@ -290,13 +303,15 @@ class Win16System:
         recorder = self.machine.api.services.get("demo_recorder")
         if recorder is not None:
             recorder.message(msg)
-        if msg is not None:
+        if msg is not None and self.input_drainer is None:
             # Polled input state (keys + mouse pos/buttons) is DERIVED from the
             # message stream, not from host polling, so GetAsyncKeyState /
             # GetKeyState / GetCursorPos see the same state on live play and demo
             # replay.  Games that poll instead of handling messages (microman
             # steers via GetAsyncKeyState; SimAnt's WAP via GetCursorPos +
-            # GetKeyState) read this — see _note_input.
+            # GetKeyState) read this — see _note_input.  When an interactive
+            # driver is attached it notes polled state at ARRIVAL time (so a
+            # non-pumping poll loop still sees it), so we must not double-note.
             self._note_input(msg)
         return msg
 
