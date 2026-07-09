@@ -1,5 +1,24 @@
 # Paulie Python — run status (newest on top)
 
+## 2026-07-09 — Quick Game "ghosting" is a presentation-thread race, not a render bug
+- Owner: redrawing/ghosting on the Quick Game view (snaps 204728 / 204832 / 204849).
+- **The game's rendering is correct.**  Diffing the "clean" (204832) and "ghosting"
+  (204849) frames — same 463×348 size — shows only 2.6% changed, confined to the
+  normally-animated chamber rectangle (no smear/band); forcing a full re-render
+  (resize) reproduces the same clean image.  The QG frame buffer is a ~80K (>64K,
+  multi-selector) DIB, blitted whole via one SetDIBits; no BitBlt scroll touches the
+  surface.  So the artifact is NOT baked into the game's graphics.
+- **Root cause (presentation):** the CPU runs on a daemon worker thread (`_run_cpu`)
+  and rewrites the surfaces (a full-frame SetDIBits takes ms) while `_tick` reads them
+  on the tkinter thread to draw — a concurrent read catches a half-updated buffer =
+  torn/ghosted frame, only while actively redrawing (idle → no blits → no tearing),
+  which is exactly why the static snapshot looks clean.
+- **Fix (best-effort, play.py):** version-fence the composite — if a surface write
+  completed during the copy, redo it once.  If residual tearing remains, the robust
+  fix is to pause the CPU worker at a boundary around the frame read.  UNVERIFIED
+  live (a GUI timing artifact; not reproducible from a snapshot) — pending owner test.
+
+
 ## 2026-07-09 — Surface View half-black: selector RPL aliases in the huge heap
 - **Symptom:** SimAnt's "Surface View" (a 512×256 4bpp = 64K DIB) rendered with the
   top half black; OTVDM fills it fully at the same window size.
