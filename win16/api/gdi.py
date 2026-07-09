@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from .core import ApiRegistry, CallContext
-from .objects import (DC, Bitmap, Brush, Font, Palette, Region, StockObject,
-                      Surface, _signed, blit)
+from .objects import (DC, Bitmap, Brush, Font, Palette, Pen, Region,
+                      StockObject, Surface, _signed, blit)
 from .system import Win16System
 
 STOCK_NAMES = {
@@ -138,6 +138,12 @@ def install(api: ApiRegistry) -> None:
         # it is resolved against the DC palette at fill time (colorref_rgb).
         return _sys(ctx).handles.add(Brush(ctx.args[0] & 0xFFFFFFFF))
 
+    @api.register("GDI", 61, args="s_word s_word long")  # CreatePen(style,width,color)
+    def CreatePen(ctx: CallContext) -> int:
+        style, width, color = ctx.args
+        return _sys(ctx).handles.add(
+            Pen(_signed(style), _signed(width), color & 0xFFFFFFFF))
+
     @api.register("GDI", 56,                            # CreateFont(...14 params)
                   args="s_word s_word s_word s_word s_word word word word "
                        "word word word word word str")
@@ -251,6 +257,8 @@ def install(api: ApiRegistry) -> None:
             return prev.handle if prev else 0
         if isinstance(obj, Brush):
             kind = "brush"
+        elif isinstance(obj, Pen):
+            kind = "pen"
         elif isinstance(obj, Font):
             kind = "font"
         elif isinstance(obj, StockObject):

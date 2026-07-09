@@ -199,6 +199,14 @@ class Brush:
 
 
 @dataclass
+class Pen:
+    style: int                      # PS_* (0=SOLID, 1=DASH, ..., 5=NULL)
+    width: int
+    color: int                      # COLORREF (may be PALETTEINDEX/PALETTERGB)
+    handle: int = 0
+
+
+@dataclass
 class Region:
     """A GDI region — currently a single bounding rectangle (SimAnt uses
     rectangular regions for clip/invalidation).  Non-rectangular combines

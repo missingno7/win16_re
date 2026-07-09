@@ -171,6 +171,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
     "GDI": {
         1: "SetBkColor",
         2: "SetBkMode",
+        61: "CreatePen",
         3: "SetMapMode",
         22: "IntersectClipRect",
         30: "SaveDC",
