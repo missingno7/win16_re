@@ -1,4 +1,26 @@
-# Paulie Python — run status (newest on top)
+# SimAnt — run status (newest on top)
+
+> Scope: **SimAnt is the sole target** (owner, 2026-07-09).  Other games are
+> leaving the repo; wherever a doc names Paulie Python "the RE target," it's
+> stale — SimAnt is the focus.  Primary goal: clean, readable, byte-exact source
+> reconstruction (recovered routines in `simant/recovered/`, hot-loop islands in
+> `simant/hooks.py`, each gated byte-exact by the A/B oracle).
+
+## 2026-07-09 — recovered _Windows_MakeTable4x4 (first source recovery this session)
+- The game's terrain tile-to-pixel expander (SIMANTW.SYM seg4:4674): per column,
+  one `lodsb` (tile colour index) + four `stosw`, each scanline's 16-bit fill word
+  (four packed 4bpp pixels) from a 4x32-word table at `SS:0x1A56` (0x40 row stride);
+  four rows `2*count` words apart (the DIB scanline).  Preserves all regs (pusha/popa
+  + push bp + push ds/es), `retf` caller-cleans.
+- Clean logic in `simant/recovered/render.py`; signature-verified island in
+  `simant/hooks.py`; A/B oracle in `test_hooks.py` proves byte-identical band + exit
+  state vs the ASM (counts 1/4/16/128).  Install count 3→4.
+- **Method reminder:** PC-sample (`simant/probes/profile.py`) → live-trace the loop →
+  recover VM-free logic → hook as a signature-verified island → A/B byte-exact gate.
+  Existing islands: `__aFuldiv`, `_Unpack` (LZSS load bottleneck), a seg2:3460 bytecopy.
+  Named routines come from `assets/ANTWIN/SIMANTW.SYM` via `simant/probes/symbols.py`.
+
+
 
 ## 2026-07-09 — Quick Game "sized for a smaller window" on first show: missing WM_SIZE
 - Owner: on first show the QG content expects a smaller window than actual; a manual
