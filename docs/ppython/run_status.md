@@ -106,6 +106,27 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-09 — In-game unfreeze: USER.236 + callback runs via cpu.run (faster, pausable)
+- **USER.236 GetCapture** (c1efb66) — the mouse-capture poll; an unimplemented gap
+  stopped the VM once in-game.
+- **call_far rewrite** (c1efb66).  SimAnt's entire in-game runs inside the ~59fps
+  TimerProc callback; call_far drove it one instruction at a time in Python, so
+  in-game was slow AND un-pausable (the worker's check_pause never ran → window
+  "frozen", F9 timed out).  Now a permanent replacement-hook at the sentinel
+  CS:IP raises to signal return, so the callback body runs via cpu.run()'s tight
+  loop; a yield_check between 64K-step chunks (driver → check_pause) keeps it
+  pausable.  Verified byte-exact (demo replay + snapshot roundtrip green).
+- **Note on headless timing:** an outer cpu.run(N) step that dispatches a
+  WM_TIMER runs a WHOLE nested sim frame that doesn't count toward N, so a
+  head­less "chunk" post-Quick-Game does enormous work — in-game is impractical
+  to measure/drive headlessly (reaching it is ~43M + huge frames).  Interactive
+  (paced) play is the loop; the owner drives it.
+- **Still open (owner's asks):** real resizable/closable/maximizable CHILD windows
+  and main-frame resize.  Needs the in-game window styles (couldn't capture
+  headlessly — too slow) + likely a separate tkinter Toplevel per captioned child
+  (native chrome) OR full non-client modelling.  Get the styles from the owner /
+  a winevdm run before building it.
+
 ## 2026-07-09 — GUI chrome: native dropdown menu + framed child windows (play.py)
 - **Menu bar is a real native dropdown now** (a55a559).  It was a painted, dead
   in-client strip because play.py only built a tkinter menubar from a MENU
