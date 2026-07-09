@@ -129,17 +129,16 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     # heap's selector->linear map (the pickle made a copy; the fresh boot's
     # dict knows nothing of the snapshot's allocations).
     if sysobj.huge_heap is not None:
-        machine.mem.sel_base = sysobj.huge_heap.sel_base
-        machine.mem.sel_min = sysobj.huge_heap.first_selector & 0xFFFC
-        # Back-fill selector RPL aliases for snapshots taken before they were
-        # mapped, so a huge-pointer walk that flips RPL bits still resolves into
-        # the right block (see win16.hugeheap._map_rpl_aliases).
-        from .hugeheap import SEG, _map_rpl_aliases
-        for base_sel, info in getattr(sysobj.huge_heap, "_blocks", {}).items():
-            lin_base, _lin_size, n, _req = info
-            for k in range(n):
-                _map_rpl_aliases(sysobj.huge_heap.sel_base,
-                                 base_sel + k * 8, lin_base + k * SEG)
+        # Re-key the restored map to descriptors (RPL masked off): Memory looks
+        # selectors up RPL-agnostically, and older snapshots were keyed by the
+        # exact selector, so collapse any RPL aliases to the descriptor form.
+        from .hugeheap import descriptor
+        hh = sysobj.huge_heap
+        rekeyed = {descriptor(k): v for k, v in hh.sel_base.items()}
+        hh.sel_base.clear()
+        hh.sel_base.update(rekeyed)
+        machine.mem.sel_base = hh.sel_base
+        machine.mem.sel_min = hh.first_selector & 0xFFFC
 
     # Polled key state (game-observable via GetAsyncKeyState).
     machine.api.services["async_keys"] = set(meta.get("async_keys", []))

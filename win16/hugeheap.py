@@ -18,18 +18,16 @@ SEG = 0x10000                       # 64K per selector step
 SEL_RPL = 0x07                      # TI=1 (LDT), RPL=3 — a typical Win16 selector
 
 
-def _map_rpl_aliases(sel_base: dict[int, int], sel: int, lin: int) -> None:
-    """Map all four RPL aliases of a selector to `lin`.  The low 2 bits of a
-    selector are the RPL, which protected-mode hardware IGNORES when resolving
-    the descriptor (only the index + TI select the segment).  Win16 apps exploit
-    this: SimAnt's terrain rasterizer walks a 64K DIB with a huge pointer whose
-    16-bit offset it SIGN-EXTENDS before adding to the base selector, so crossing
-    offset 0x8000 decrements the selector by 1 (RPL 3 -> 2) — a no-op on real
-    hardware (same descriptor), but a miss if sel_base is keyed by the exact
-    selector.  Registering every RPL keeps the alias resolving to one block."""
-    desc = sel & 0xFFFC                             # index + TI, RPL cleared
-    for rpl in range(4):
-        sel_base[desc | rpl] = lin
+def descriptor(sel: int) -> int:
+    """The descriptor a selector resolves to: index + TI, with the RPL bits
+    masked off.  The VM Memory keys sel_base by this and masks the RPL on every
+    lookup (see dos_re Memory._xlat), so all four RPL aliases of a selector
+    resolve to one block.  Win16 relies on that: SimAnt's terrain rasterizer
+    walks a 64K DIB with a huge pointer whose 16-bit offset it SIGN-EXTENDS
+    before adding to the base selector, so crossing offset 0x8000 decrements the
+    selector (RPL 3 -> 2) — a no-op on real hardware, but it would miss a
+    selector-exact map."""
+    return sel & 0xFFFC
 
 
 class HugeHeap:
@@ -100,7 +98,7 @@ class HugeHeap:
             self._free_lin(lin_base, lin_size)
             return 0
         for k in range(n):
-            _map_rpl_aliases(self.sel_base, base_sel + k * 8, lin_base + k * SEG)
+            self.sel_base[descriptor(base_sel + k * 8)] = lin_base + k * SEG
         self._blocks[base_sel] = (lin_base, lin_size, n, size)
         return base_sel
 
@@ -110,9 +108,7 @@ class HugeHeap:
             return False
         lin_base, lin_size, n, _size = info
         for k in range(n):
-            desc = (base_sel + k * 8) & 0xFFFC
-            for rpl in range(4):
-                self.sel_base.pop(desc | rpl, None)
+            self.sel_base.pop(descriptor(base_sel + k * 8), None)
         self._free_lin(lin_base, lin_size)
         self._free_selectors(base_sel, n)
         return True
