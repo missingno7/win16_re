@@ -20,6 +20,22 @@
   the target window's surface) is a fast, repeatable way to find a rendering bug
   without re-booting to in-game (~150s/boot).  Scripts under scratchpad.
 
+## 2026-07-09 — verified panel clicks end-to-end; exposed + fixed x87 DA/DE integer arithmetic
+- Replayed `snap_171018` and INJECTED a click on the Caste Control triangle (raise +
+  cursor_pos + WM_MOUSEMOVE/LBUTTONDOWN + async LBUTTON).  Result: the click was
+  dispatched to **0x13e's wndproc** (WM_LBUTTONDOWN) and the game's own
+  `WindowFromPoint` returned **0x13e** — i.e. the raise fix routes the click to the
+  right panel (before, it went to 0x14a Quick Game).  284k GetCursorPos polls confirm
+  the WAP engine is live and reacting.
+- The caste handler then hit an **unimplemented x87 op — `DA /0` (FIADD m32int)**.
+  dos_re's execute_fpu had D8/DC real memory arithmetic but not the DA (m32int) / DE
+  (m16int) integer-arithmetic escapes.  Added them (dos_re 692103c, bumped here);
+  test `test_x87_integer_memory_arithmetic`.
+- After that fix the injected run reached a further `IndexError` at 0060:0000 (IP=0) —
+  almost certainly an INJECTION artifact (bad control-flow from faking the click into a
+  loaded snapshot; the follow-on CallbackOverrun corroborates state drift), not a clean
+  opcode gap.  Real remaining gaps will surface in live play.
+
 ## 2026-07-09 — panel buttons dead: overlapping panels + WindowFromPoint z-order (fixed) + USER.129
 - **Owner:** Caste/Behavior/ribbon buttons don't respond; right-click Quick Game →
   `USER.129` gap.
