@@ -7,17 +7,21 @@ any interpreter change must pass. This page records only what is *different*
 about the win16 layer, plus measured numbers on a real NE game (SimAnt, via
 `simant_port`).
 
-## PyPy: works, ~8x on headless interpretation
+## PyPy: works, ~8x on headless interpretation — and interactively too
 
-The win16 layer is importable under PyPy as-is. Its third-party dependencies
-all resolve:
+The win16 layer is importable under PyPy as-is, **including the interactive
+viewer**. Every third-party dependency resolves under PyPy 3.11:
 
-- **numpy** (compositor, GDI/USER blit fast paths) — ships PyPy 3.11 wheels.
-- **pygame** (audio only, `win16/audio.py`) — no PyPy wheels, but the import
-  is guarded: audio degrades to disabled with a console note. Headless
-  workloads don't care.
-- **tkinter / PIL** — only the interactive viewer (`play.py` in a game-port
-  project). The viewer stays on CPython, same rule as dos_re's pygame viewer.
+- **numpy** (compositor, GDI/USER blit fast paths) — ships PyPy wheels.
+- **pygame-ce** (audio, `win16/audio.py`) — the community fork ships PyPy
+  wheels where upstream pygame doesn't; it's import-compatible (`import
+  pygame`). Without it the import is guarded and audio degrades to disabled.
+- **tkinter** — bundled with PyPy on Windows; **Pillow** (the viewer's
+  `ImageTk` blit) installs fine.
+
+So the full interactive `play.py` runs under PyPy — the game itself runs
+~8x faster in the same window. (dos_re's own viewer note predates
+pygame-ce; that discovery likely lifts its CPython-only viewer rule too.)
 
 Measured (PyPy 3.11 v7.3.20 vs CPython 3.11, Windows, SimAnt boot,
 20M instructions, identical end CS:IP on both):
@@ -32,8 +36,8 @@ Why 8x and not dos_re's 13–17x: a Win16 game constantly crosses the API hook
 boundary into Python service code (message loop, GDI, timers), which breaks
 JIT traces; a pure-ASM DOS loop doesn't. Trace-enabled runs are worse still —
 per-instruction string formatting dominates and doesn't JIT. So: **PyPy pays
-off on replay, island A/B oracles, and verify sweeps; don't bother for
-`boot.py`**, whose whole point is the trace.
+off on interactive play, replay, island A/B oracles, and verify sweeps; don't
+bother for `boot.py`**, whose whole point is the trace.
 
 No install/config is needed beyond the interpreter itself: every entry point
 reaches `dos_re` through the repo-relative `sys.path` shims (`simant/_env.py`
