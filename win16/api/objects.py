@@ -252,11 +252,17 @@ def blit(dst: Surface, dx: int, dy: int, src: Surface, sx: int, sy: int,
     if w <= 0 or h <= 0:
         return
     dst.touch()
+    # A window/bitmap scrolled by BitBlt-ing itself shifted (src is dst, regions
+    # overlap) must not read a row it has already overwritten — the classic
+    # memmove-vs-memcpy trap.  Read every row from a pristine snapshot of the
+    # source when src IS dst; a plain copy would smear a downward scroll into
+    # vertical trails.  (Distinct surfaces never overlap, so no snapshot needed.)
+    src_pixels = bytes(src.pixels) if src is dst else src.pixels
     for row in range(h):
         soff = ((sy + row) * src.w + sx) * 3
         doff = ((dy + row) * dst.w + dx) * 3
         n = w * 3
-        chunk = src.pixels[soff:soff + n]
+        chunk = src_pixels[soff:soff + n]
         if rop == 0x00CC0020:                   # SRCCOPY
             dst.pixels[doff:doff + n] = chunk
         elif rop == 0x008800C6:                 # SRCAND
