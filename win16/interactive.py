@@ -38,6 +38,9 @@ class InteractiveDriver:
         # / in-game spin on PeekMessage and never call GetMessage, so without
         # this a click would sit undelivered until the next GetMessage.
         sysobj.input_drainer = self._drain_input
+        # Keep a long VM callback (the sim-tick TimerProc, where in-game spends
+        # ALL its time) pausable, so F9/snapshot and the window stay responsive.
+        sysobj.yield_check = self.check_pause
 
     # -- host (GUI thread) side --------------------------------------------
     def now_ms(self) -> int:

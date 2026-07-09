@@ -67,6 +67,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         106: "GetKeyState",
         109: "PeekMessage",
         186: "SwapMouseButton",
+        236: "GetCapture",
         229: "GetTopWindow",
         230: "GetNextWindow",
         262: "GetWindow",

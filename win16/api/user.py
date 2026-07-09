@@ -891,7 +891,8 @@ def install(api: ApiRegistry) -> None:
             seg, off = (lparam >> 16) & 0xFFFF, lparam & 0xFFFF
             ax, dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
                               [hwnd, msg, wparam,
-                               (dwtime >> 16) & 0xFFFF, dwtime & 0xFFFF])
+                               (dwtime >> 16) & 0xFFFF, dwtime & 0xFFFF],
+                              yield_check=sys.yield_check)
             return (dx << 16) | ax
         win = sys.handles.get(hwnd)
         if not isinstance(win, Window):
@@ -1264,6 +1265,10 @@ def install(api: ApiRegistry) -> None:
     def ReleaseCapture(ctx: CallContext) -> int:
         _sys(ctx).machine.api.services["capture"] = 0
         return 1
+
+    @api.register("USER", 236)                          # GetCapture()
+    def GetCapture(ctx: CallContext) -> int:
+        return _sys(ctx).machine.api.services.get("capture", 0)
 
     @api.register("USER", 34, args="word word")         # EnableWindow(hwnd, enable)
     def EnableWindow(ctx: CallContext) -> int:

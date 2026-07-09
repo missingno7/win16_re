@@ -82,6 +82,9 @@ class Win16System:
     message_source: object = None       # optional: callable(sys) -> msg | None
     #   When set, GetMessage delegates to it (an interactive/real-time driver);
     #   otherwise the deterministic next_message() drives (headless replay).
+    yield_check: object = None          # optional: callable() run between chunks
+    #   of a long VM callback (SimAnt's sim-tick TimerProc) so the host can pause
+    #   / take a snapshot / feed input instead of the UI freezing.
     input_drainer: object = None        # optional: callable() moving host input
     #   into msg_queue.  An interactive driver sets this so PeekMessage (which
     #   scans msg_queue directly, not via message_source) sees freshly-posted
@@ -144,7 +147,8 @@ class Win16System:
         ax, dx = call_far(self.machine.cpu, THUNK_SEG, seg, off,
                           [window.handle, msg,
                            wparam & 0xFFFF,
-                           (lparam >> 16) & 0xFFFF, lparam & 0xFFFF])
+                           (lparam >> 16) & 0xFFFF, lparam & 0xFFFF],
+                          yield_check=self.yield_check)
         return (dx << 16) | ax
 
     def post_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> None:
