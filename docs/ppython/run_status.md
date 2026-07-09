@@ -106,6 +106,28 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-09 — GUI chrome: native dropdown menu + framed child windows (play.py)
+- **Menu bar is a real native dropdown now** (a55a559).  It was a painted, dead
+  in-client strip because play.py only built a tkinter menubar from a MENU
+  *resource* (gated on wndclass.menu_name); SimAnt builds its menu at runtime
+  (CreateMenu/AppendMenu→SetMenu into win.menu_obj).  WindowView now builds the
+  native bar from menu_obj (cascades + WM_COMMAND), (re)building in sync() when
+  SetMenu lands.  compositor.composite gained `menu_bar=False` so the host drops
+  the painted strip; the strip stays for headless screenshots.
+- **Framed child windows get a Win3.1 window frame** (4b88b18).  composite()
+  paints a raised 3D frame around any child with WS_BORDER/WS_DLGFRAME/WS_CAPTION
+  (verified: SELECT-A-GAME dialog now framed, borderless ribbon not).
+- **ROOT GAP for the rest — no non-client area modelling.**  The owner's other
+  asks (caption TITLE BARS on WS_CAPTION windows, SCROLLBARS on WS_HSCROLL/
+  VSCROLL, true frame RESIZE on WS_THICKFRAME) all need client-rect ≠ window-rect
+  with insets (caption/border/scrollbar/menu).  Today client==window everywhere
+  (CreateWindow/GetClientRect/GetWindowRect/ClientToScreen/compositor all assume
+  it), which is also why the frame above overlays the outer ~2px of client.
+  Modelling non-client is the right next step but foundational + touches the
+  click-coordinate path we just got working — do it WITH interactive testing,
+  not blind.  SimAnt child styles seen: ribbon/root = plain WS_CHILD (borderless,
+  correct); dialogs = WS_CHILD|WS_DLGFRAME (now framed).
+
 ## 2026-07-09 — SimAnt INTERACTIVE: clicks work, sim-tick timer runs, Quick Game plays in play.py
 - **Clicks now register in play.py.** The WAP steers by POLLING GetCursorPos +
   GetKeyState(VK_LBUTTON), which our pump never fed from mouse messages (only
