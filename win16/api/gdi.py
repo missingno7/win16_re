@@ -310,6 +310,13 @@ def install(api: ApiRegistry) -> None:
         dc.text_color = ctx.args[1] & 0xFFFFFFFF     # keep the COLORREF type byte
         return old
 
+    @api.register("GDI", 1, args="word long", ret="long")
+    def SetBkColor(ctx: CallContext) -> int:            # SetBkColor(hdc, color)
+        dc = _sys(ctx).handles.require(ctx.args[0], DC)
+        old = dc.bk_color
+        dc.bk_color = ctx.args[1] & 0xFFFFFFFF       # keep the COLORREF type byte
+        return old
+
     @api.register("GDI", 7, args="word word")           # SetStretchBltMode(hdc, mode)
     def SetStretchBltMode(ctx: CallContext) -> int:
         dc = _sys(ctx).handles.require(ctx.args[0], DC)

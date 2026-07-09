@@ -169,6 +169,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         420: "wsprintf",
     },
     "GDI": {
+        1: "SetBkColor",
         2: "SetBkMode",
         3: "SetMapMode",
         22: "IntersectClipRect",
