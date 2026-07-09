@@ -4,3 +4,4 @@ This package never learns a specific game (no game addresses, filenames, or
 formats) — it is the Win16 analogue of the dos_re framework itself and a
 candidate for promotion into dos_re once proven.
 """
+from . import _env  # noqa: E402,F401  (puts the dos_re submodule on sys.path)

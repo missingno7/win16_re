@@ -26,10 +26,12 @@ co-developing dos_re itself.
 Correctness beats speed. Traceability beats cleverness. Small verified progress
 beats large intuitive rewrites.
 
-- **`win16/` stays game-agnostic.** No game addresses, filenames, formats, or
-  per-title behaviour in the shared layer. Game knowledge lives in the game
-  package (`simant/` — the sole target). `simant/recovered/` logic never
-  imports the VM.
+- **`win16/` stays game-agnostic — this repo carries no game at all.** No game
+  addresses, filenames, formats, or per-title behaviour anywhere here. Game
+  knowledge lives in a separate game-port project that vendors this repo as a
+  git submodule (currently `simant_port`, a sibling project — not part of this
+  repo). If you find yourself wanting to write anything game-specific, it
+  belongs in that project, not here.
 - **Do not make the OS layer more general than a real game requires.** A new
   API / DOS service / opcode is added only when a concrete program calls it,
   identified from its *actual call site* (not guessed), with the observed
@@ -52,6 +54,7 @@ beats large intuitive rewrites.
 
 ```text
 win16/            the game-agnostic Win16 layer (see docs/win16_layer.md):
+  _env.py           puts the dos_re submodule on sys.path (imported by __init__.py)
   ne.py             NE (New Executable) parser
   loader.py         segment mapping + relocations into the dos_re VM; INT dispatch
   hugeheap.py       the selector-based global heap (static single-app protected mode)
@@ -62,33 +65,28 @@ win16/            the game-agnostic Win16 layer (see docs/win16_layer.md):
   interactive.py    real-time driver (wall-clock message pacing)
   demo.py, vmsnap.py  record/replay + full-machine snapshots (the verification baseline)
   audio.py          host audio backend (square-wave + WAV)
-simant/           SimAnt — the byte-exact RE target and SOLE focus: adapter +
-                  recovered/ + hooks.py (lifted islands) + probes/ (profiler,
-                  SIMANTW.SYM lookup) + tests/ (island A/B oracles)
-scripts/          play.py (interactive), boot.py (frontier probe), games.py (registry)
-docs/             the method; docs/README.md is the index; docs/simant/run_status.md the journal
-tests/            shared win16/-layer pytest
-assets/           original game files (gitignored, never committed) — ANTWIN/ = SimAnt
+dos_re/           the DOS CPU/memory VM this layer runs on top of (git submodule)
+docs/             the method; docs/README.md is the index — game-agnostic
+tests/            this framework's own pytest suite — no game package lives here
 ```
-(Other games this framework was hardened on — Paulie Python, MicroMan, and a few
-more — have been moved out to a separate project; SimAnt is the only game here.)
-
-The game package `simant/` exposes `runtime.py` (`create_machine`,
-`assets_present`, `GAME_NAME`, optional `install_hooks`). `win16/` never imports
-from it. `scripts/games.py` is the registry the launcher/probe use.
+This repo has **no game package, no `scripts/`, no `assets/`**. A game-port project
+(currently `simant_port`, a sibling project) vendors this repo as a git submodule and
+supplies its own game package (`runtime.py` exposing `create_machine`, `assets_present`,
+`GAME_NAME`, optional `install_hooks`), its own `play.py`/`boot.py`/`replay.py`, and its
+own `assets/`. `win16/` never imports from a consumer.
 
 ## Standard commands
 
 ```bash
-python -m pytest -q                       # the suite — green before every commit
-python scripts/boot.py <game> [max_steps] # bring-up frontier probe (honest report)
-python scripts/play.py --game <game>      # play interactively (real window, input, audio)
-python scripts/play.py --resume <snapdir> # resume from an F9 snapshot
+python -m pytest -q     # this framework's own suite — green before every commit
 ```
+A game-port project runs its own suite (which exercises this framework plus its game
+package) the same way — see that project's own `AGENTS.md` for its `play.py`/`boot.py`.
 
 ## Things not to do
 
-- Do not let `win16/` learn anything about a specific game.
+- Do not let `win16/` learn anything about a specific game — that includes not adding
+  a `scripts/` or `assets/` back into this repo; those belong to the consuming project.
 - Do not return guessed stub values to get past a fail-loud frontier — identify
   the call from its site first, then implement the observed contract.
 - Do not "clean up" original-behaviour quirks (flag shapes, wrap semantics,

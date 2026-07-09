@@ -9,17 +9,18 @@ something unimplemented, identify exactly what it is *from its call site*,
 implement the observed contract, repeat. Never stub a guess to move on — the
 honest frontier is the value.
 
-## 0. Register the game and make a package
+## 0. Make a game-port project and a game package
 
-Add it to `scripts/games.py` (`name → (exe path under assets/, winflags)`).
-Create a package mirroring `simant/`: `_env.py` (copy), `__init__.py`,
-`runtime.py` (`EXE_PATH`, `GAME_NAME`, `assets_present`, `create_machine`,
-optional `install_hooks`), and `tests/`.
+This repo carries no game — bring-up happens in a separate game-port project that
+vendors `win16_re` as a git submodule (mirror `simant_port`'s layout: `_env.py`
+locating the `win16_re` submodule, `__init__.py`, `runtime.py` exposing `EXE_PATH`,
+`GAME_NAME`, `assets_present`, `create_machine`, optional `install_hooks`, and
+`tests/`), plus its own `scripts/boot.py` and `assets/<game>/`.
 
 ## 1. Probe the frontier
 
 ```bash
-python scripts/boot.py <game> [max_steps]
+python scripts/boot.py [max_steps]
 ```
 
 `boot.py` loads the NE and runs it, then prints how far it got and **what

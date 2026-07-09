@@ -1,6 +1,9 @@
 # win16_re
 
-An **oracle-driven reverse-engineering framework for 16-bit Windows (NE) games.**
+An **oracle-driven reverse-engineering framework for 16-bit Windows (NE) games** — the
+game-agnostic layer only. This repo carries **no game**: no EXE, no assets, no game
+package. It is consumed as a git submodule by separate game-port projects, the same way
+it itself vendors [`dos_re`](dos_re) as a submodule.
 
 A Win16 game runs inside a software 8086/80186 VM where the operating system is
 a *Python hook layer*: every Windows API the program imports (KERNEL / USER /
@@ -12,29 +15,25 @@ is only accepted when it reproduces the original's behaviour **byte-for-byte**.
 This is the [`dos_re`](../DOS/dos_re) method (proven on DOS games) carried onto
 the Windows 3.x New-Executable format.
 
-## The layers
+## What's here
 
-| Layer | What it is |
-|-------|-----------|
-| `win16/` | The **game-agnostic** framework: NE loader, the selector-based memory model (static single-app protected mode, 4 MB), the full Win16 API surface, windowing, dialogs, menus, palette/DIB rendering, audio, demos, snapshots. Knows about *no specific game*. |
-| `simant/` | The game package: **Maxis SimAnt**, the byte-exact RE target and sole focus — adapter (`runtime`, `_env`), recovered logic (`recovered/`), lifted islands (`hooks.py`), profiler + symbol lookup (`probes/`), and `tests/`. |
-| `scripts/` | `play.py` (play interactively — real window, keyboard, mouse, audio, F9 snapshots, `--resume`), `boot.py` (bring-up frontier probe), `games.py` (the game registry). |
+`win16/` — NE loader, the selector-based memory model (static single-app protected mode,
+4 MB), the full Win16 API surface, windowing, dialogs, menus, palette/DIB rendering,
+audio, demos, snapshots. `win16/_env.py` (imported by `win16/__init__.py`) puts the
+`dos_re` submodule on `sys.path`, so importing `win16` transparently makes `dos_re`
+importable too — a consuming project never needs to set that up itself.
 
-All game-specific knowledge lives in `simant/` (`runtime.py` = EXE path, boot
-flags, `create_machine`, `install_hooks`); the `win16/` layer never imports from
-it.  (Other games this framework was hardened on have been moved to a separate
-project — SimAnt is the sole target here.)
+`tests/` — this framework's own pytest suite, exercised against synthetic state (no game
+EXE needed).
 
-## Running a game
+## Consuming this framework
 
-```
-python scripts/play.py --game simant --scale 2      # play it
-python scripts/play.py --resume artifacts/snapshots/<snap>   # resume a snapshot
-python scripts/boot.py <game> [max_steps]             # bring-up frontier report
-```
-
-`play.py` mirrors each Win16 window as a real OS window and reports every error
-to the console (the game itself only needs the user to provide input).
+A game-port project vendors this repo as a git submodule (e.g. `win16_re/`) and supplies
+its own game package: `runtime.py` (EXE path, boot flags, `create_machine`,
+`assets_present`, optional `install_hooks`), its own `scripts/` (`play.py`, `boot.py`),
+its own `assets/`, and its own recovered game logic + lifted-island hooks. `win16/` never
+imports from a consumer. The current consumer is **`simant_port`** (Maxis SimAnt) — a
+sibling project, not part of this repo.
 
 ## Working principles
 
@@ -43,10 +42,10 @@ to the console (the game itself only needs the user to provide input).
 - **Never weaken an oracle to make a slice pass.** The byte-exact proof is the
   value. A lifted hook is only accepted when an A/B run (original ASM vs. Python
   replacement) is pixel- and state-identical.
-- **`domain`/game logic stays VM-free**; the VM/hook machinery stays in `win16/`.
+- **Game logic stays VM-free**; the VM/hook machinery stays in `win16/`.
 
 ## Status
 
-Live bring-up notes and the standing-mechanisms registry are in
-[`docs/simant/run_status.md`](docs/simant/run_status.md). The test suite is the
-gate — run `python -m pytest -q` before any commit; never commit red.
+The test suite is the gate — run `python -m pytest -q` before any commit; never commit
+red. Bring-up notes and journals are per-game, so they live in the consuming project
+(e.g. `simant_port`'s `docs/run_status.md`), not here.

@@ -7,10 +7,11 @@ reimplementation of one hot ASM loop, hooked at its CS:IP via the dos_re CPU's
 `replacement_hooks`, doing all the loop's work in one shot and writing back the
 exact register/flag/memory state the ASM would have produced.
 
-The worked examples are in [`../simant/hooks.py`](../simant/hooks.py) — the
-`__aFuldiv` 32-bit divide helper, the `_Unpack` LZSS asset decompressor, a far
-byte-memcpy, and the `_Windows_MakeTable4x4` / `_1x1` terrain tile expanders —
-each gated byte-exact by [`../simant/tests/test_hooks.py`](../simant/tests/test_hooks.py).
+This repo has no game package of its own — the worked examples live in a consuming
+game-port project. Currently that's `simant_port`'s `hooks.py`: the `__aFuldiv`
+32-bit divide helper, the `_Unpack` LZSS asset decompressor, a far byte-memcpy, and
+the `_Windows_MakeTable4x4` / `_1x1` terrain tile expanders — each gated byte-exact
+by that project's `tests/test_hooks.py`.
 
 ## The pipeline
 
@@ -39,11 +40,11 @@ PC-sample  →  live-trace the hot loop  →  lift it as a Python island  →  A
 
 ## Where islands live
 
-Per game, never in `win16/`: `<game>/hooks.py` exposes `install(machine) → int`
-(count installed), and `<game>/runtime.py` exposes `install_hooks(machine)`.
-`scripts/games.install_game_hooks(name, machine)` loads them; `play.py` installs
-them by game name (`--no-hooks` runs pure ASM). The selector heap makes these
-lifts clean: consecutive selectors map to contiguous linear memory, so a
+Per game, never in `win16/`: the game-port project's `<game>/hooks.py` exposes
+`install(machine) → int` (count installed), and `<game>/runtime.py` exposes
+`install_hooks(machine)`. That project's own `play.py` installs them
+(`--no-hooks` runs pure ASM). The selector heap makes these lifts clean:
+consecutive selectors map to contiguous linear memory, so a
 huge-pointer loop over VM memory is one `numpy`/`bytearray` slice.
 
 ## The memory-model advantage
