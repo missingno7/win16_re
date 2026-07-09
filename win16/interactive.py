@@ -34,6 +34,10 @@ class InteractiveDriver:
         self.paused = threading.Event()     # set while the CPU thread is
         self._resume = threading.Event()    # parked at the message boundary
         sysobj.message_source = self._next
+        # Let PeekMessage flush posted input into the queue too — SimAnt's menus
+        # / in-game spin on PeekMessage and never call GetMessage, so without
+        # this a click would sit undelivered until the next GetMessage.
+        sysobj.input_drainer = self._drain_input
 
     # -- host (GUI thread) side --------------------------------------------
     def now_ms(self) -> int:
@@ -114,7 +118,8 @@ class InteractiveDriver:
                 if now >= when:
                     # Reschedule from now (drop missed ticks — no catch-up storm).
                     sysobj.timer_due[key] = now + sysobj.timers[key]
-                    return (key[0], WM_TIMER, key[1], 0, now, 0)
+                    proc = sysobj.timer_procs.get(key, 0)   # lParam = TimerProc
+                    return (key[0], WM_TIMER, key[1], proc, now, 0)
                 due = when
 
             with self._cond:

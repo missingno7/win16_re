@@ -60,6 +60,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         5: "InitApp",
         28: "ClientToScreen",
         29: "ScreenToClient",
+        30: "WindowFromPoint",
         45: "BringWindowToTop",
         49: "IsWindowVisible",
         82: "InvertRect",

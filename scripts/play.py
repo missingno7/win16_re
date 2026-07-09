@@ -246,7 +246,18 @@ class WindowView:
             self.app.driver.post_input(self.win.handle, WM_KEYUP, vk, 0xC0000001)
 
     def _on_mouse(self, event, msg: int, mk: int) -> None:
+        from win16 import compositor
         cx, cy = event.x // self.scale, event.y // self.scale
+        # The composited image prepends a presentation-only menu-bar strip for a
+        # framed window, so the game's client (0,0) sits MENU_BAR_H px lower in
+        # what's shown.  Subtract it so posted coords match the game's own space.
+        # A click inside the strip itself is non-client (dropdowns aren't wired
+        # yet) — drop it rather than post a bogus/negative client coord.
+        menu = getattr(self.win, "menu_obj", None)
+        if menu is not None and menu.items:
+            cy -= compositor.MENU_BAR_H
+            if cy < 0:
+                return
         lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
         self.app.driver.post_input(self.win.handle, msg, mk, lparam)
 

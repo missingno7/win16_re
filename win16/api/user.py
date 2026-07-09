@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .core import ApiRegistry, CallContext
 from .objects import Cursor, Icon, Menu, Region, Window, WndClass, _signed
-from .system import Win16System
+from .system import INSTR_PER_MS, Win16System
 
 WM_CREATE = 0x0001
 WM_DESTROY = 0x0002
@@ -172,9 +172,8 @@ def _vk_to_char(vk: int) -> int | None:
 # Windows 3.1 on standard VGA 640x480: the documented metric values.
 # Filled per observed index — extend from the same reference when a new
 # index is requested (fail loud otherwise).
-# Virtual interpreted-instructions per millisecond for the GetTickCount floor
-# (a mid-90s PC pace).  Tunes how fast busy-wait timers elapse in VM time.
-INSTR_PER_MS = 1000
+# INSTR_PER_MS (the GetTickCount instruction-clock rate) now lives in system.py
+# so the timer pump shares it — imported above.
 
 SYSTEM_METRICS = {
     0: 640,     # SM_CXSCREEN
@@ -473,6 +472,32 @@ def install(api: ApiRegistry) -> None:
     def ScreenToClient(ctx: CallContext) -> int:
         return _map_point(_sys(ctx), ctx, -1)
 
+    @api.register("USER", 30, args="long")              # WindowFromPoint(POINT)
+    def WindowFromPoint(ctx: CallContext) -> int:
+        # The (screen-space) POINT is passed BY VALUE: x = LOWORD, y = HIWORD.
+        # Return the deepest visible window whose absolute rect contains it
+        # (a child sits inside its parent, so the most-nested match is what a
+        # click hit-tests to); ties broken toward topmost Z (later in the list).
+        sys = _sys(ctx)
+        pt = ctx.args[0]
+        x, y = _signed(pt & 0xFFFF), _signed((pt >> 16) & 0xFFFF)
+        best, best_depth = 0, -1
+        for w in sys.windows:
+            if not isinstance(w, Window) or not w.visible:
+                continue
+            ox, oy = sys._window_origin(w.handle)
+            if not (ox <= x < ox + w.w and oy <= y < oy + w.h):
+                continue
+            depth, p = 0, w
+            while getattr(p, "parent", 0):
+                p = sys.handles.get(p.parent)
+                if not isinstance(p, Window):
+                    break
+                depth += 1
+            if depth >= best_depth:              # >= so topmost Z wins ties
+                best, best_depth = w.handle, depth
+        return best
+
     @api.register("USER", 33, args="word ptr")          # GetClientRect(hwnd, rect)
     def GetClientRect(ctx: CallContext) -> int:
         _x, _y, w, h = _geom(_sys(ctx), ctx.args[0])
@@ -765,17 +790,24 @@ def install(api: ApiRegistry) -> None:
     def SetTimer(ctx: CallContext) -> int:              # (hwnd, id, ms, proc)
         sys = _sys(ctx)
         hwnd, timer_id, ms, proc = ctx.args
+        key = (hwnd, timer_id)
+        sys.timers[key] = max(ms, 1)
+        sys.timer_due[key] = sys.clock_ms + max(ms, 1)
+        # A TimerProc (far callback) is delivered by DispatchMessage calling the
+        # proc, not the wndproc — its WM_TIMER carries the proc in lParam.
         if proc:
-            raise NotImplementedError("SetTimer with TimerProc callback")
-        sys.timers[(hwnd, timer_id)] = max(ms, 1)
-        sys.timer_due[(hwnd, timer_id)] = sys.clock_ms + max(ms, 1)
+            sys.timer_procs[key] = proc
+        else:
+            sys.timer_procs.pop(key, None)
         return timer_id
 
     @api.register("USER", 12, args="word word")         # KillTimer(hwnd, id)
     def KillTimer(ctx: CallContext) -> int:
         sys = _sys(ctx)
-        sys.timer_due.pop((ctx.args[0], ctx.args[1]), None)
-        return 1 if sys.timers.pop((ctx.args[0], ctx.args[1]), None) is not None else 0
+        key = (ctx.args[0], ctx.args[1])
+        sys.timer_due.pop(key, None)
+        sys.timer_procs.pop(key, None)
+        return 1 if sys.timers.pop(key, None) is not None else 0
 
     @api.register("USER", 108, args="ptr word word word")
     def GetMessage(ctx: CallContext) -> int:            # (lpmsg, hwnd, min, max)
@@ -847,6 +879,20 @@ def install(api: ApiRegistry) -> None:
     def DispatchMessage(ctx: CallContext) -> int:
         sys = _sys(ctx)
         hwnd, msg, wparam, lparam, _t, _pt = _read_msg(ctx, ctx.args[0])
+        # WM_TIMER carrying a TimerProc (lParam != 0): call the proc, not the
+        # wndproc — TimerProc(hwnd, WM_TIMER, idEvent, dwTime).  This is how a
+        # SetTimer callback is delivered on real Windows, and SimAnt's ~59fps
+        # sim tick depends on it (its wndproc hangs on WM_TIMER).
+        if msg == 0x0113 and lparam:
+            from win16.callback import call_far
+            from win16.loader import THUNK_SEG
+            dwtime = max(sys.clock_ms,
+                         ctx.cpu.instruction_count // INSTR_PER_MS) & 0xFFFFFFFF
+            seg, off = (lparam >> 16) & 0xFFFF, lparam & 0xFFFF
+            ax, dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
+                              [hwnd, msg, wparam,
+                               (dwtime >> 16) & 0xFFFF, dwtime & 0xFFFF])
+            return (dx << 16) | ax
         win = sys.handles.get(hwnd)
         if not isinstance(win, Window):
             return 0

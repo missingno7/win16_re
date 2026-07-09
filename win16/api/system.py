@@ -11,6 +11,12 @@ from pathlib import Path
 
 SW_SHOWNORMAL = 1
 
+# Virtual interpreted-instructions per millisecond for the GetTickCount floor
+# (a mid-90s PC pace).  The single source of truth: GetTickCount (user.py) and
+# the timer clock both read it, so a busy-wait's clock and its timer stay
+# consistent (else a WM_TIMER never becomes "due" while code spins on it).
+INSTR_PER_MS = 1000
+
 
 @dataclass
 class VFile:
@@ -59,6 +65,11 @@ class Win16System:
     msg_queue: object = None            # deque of 6-tuples (hwnd,msg,wp,lp,time,pt)
     timers: dict[tuple[int, int], int] = field(default_factory=dict)  # (hwnd,id)->ms
     timer_due: dict[tuple[int, int], int] = field(default_factory=dict)
+    timer_procs: dict[tuple[int, int], int] = field(default_factory=dict)
+    #   (hwnd,id) -> TimerProc far pointer (seg<<16|off) for SetTimer with a
+    #   callback.  Its WM_TIMER carries the proc in lParam; DispatchMessage
+    #   calls the proc instead of the wndproc (SimAnt's ~59fps sim tick — its
+    #   wndproc does NOT handle WM_TIMER and hangs if sent it).
     clock_ms: int = 0                   # virtual message-time clock
     quit_posted: int | None = None      # PostQuitMessage exit code
     file_root: Path | None = None       # where game data files live
@@ -71,6 +82,11 @@ class Win16System:
     message_source: object = None       # optional: callable(sys) -> msg | None
     #   When set, GetMessage delegates to it (an interactive/real-time driver);
     #   otherwise the deterministic next_message() drives (headless replay).
+    input_drainer: object = None        # optional: callable() moving host input
+    #   into msg_queue.  An interactive driver sets this so PeekMessage (which
+    #   scans msg_queue directly, not via message_source) sees freshly-posted
+    #   input during a busy-poll loop that never calls GetMessage — SimAnt's
+    #   menus/in-game spin on PeekMessage, so without this a click never lands.
     system_palette: list = field(default_factory=lambda: _default_system_palette())
     #   The display's hardware palette in the static single-app model:
     #   RealizePalette copies the realized logical palette here and
@@ -141,6 +157,8 @@ class Win16System:
         queue holds no matching message.  Unlike GetMessage it never blocks and
         never synthesizes paint/timer — a game's peek loop must fall through to
         its idle path (WaitMessage/GetMessage) when nothing is queued."""
+        if self.input_drainer is not None:
+            self.input_drainer()            # make host input visible to the scan
         for i, m in enumerate(self.msg_queue):
             if hwnd_filter and m[0] != hwnd_filter:
                 continue
@@ -148,8 +166,77 @@ class Win16System:
                 continue
             if remove:
                 del self.msg_queue[i]
+                self._note_input(m)         # feed polled state (mouse/keys)
             return m
+        # A due WM_TIMER is discoverable by PeekMessage too, not only GetMessage.
+        # SimAnt's sim tick (a SetTimer TimerProc) paces its frame by spinning on
+        # PeekMessage(.., WM_TIMER, WM_TIMER, PM_REMOVE) until the next tick is
+        # due — we synthesize timers lazily, so if they were only visible to
+        # GetMessage that spin would never end.  Only for an explicit WM_TIMER
+        # filter (not the (0,0) any-scan, which is the input drain).
+        if (lo or hi) and lo <= 0x0113 <= hi:
+            tm = self._due_timer(hwnd_filter, remove)
+            if tm is not None:
+                return tm
         return None
+
+    def _due_timer(self, hwnd_filter: int, remove: bool):
+        """The earliest armed timer that is now due (by the GetTickCount clock:
+        max of the message clock and the instruction floor), as a WM_TIMER
+        6-tuple, or None.  Reschedules it when `remove` (PM_REMOVE / GetMessage)."""
+        if not self.timers:
+            return None
+        now = max(self.clock_ms,
+                  self.machine.cpu.instruction_count // INSTR_PER_MS)
+        best = None
+        for key, due in self.timer_due.items():
+            if hwnd_filter and key[0] != hwnd_filter:
+                continue
+            if now >= due and (best is None or due < best[1]):
+                best = (key, due)
+        if best is None:
+            return None
+        key = best[0]
+        if remove:
+            self.timer_due[key] = now + self.timers[key]
+        hwnd, timer_id = key
+        return (hwnd, 0x0113, timer_id, self.timer_procs.get(key, 0), now, 0)
+
+    def _window_origin(self, hwnd: int) -> tuple[int, int]:
+        """Absolute (screen) top-left of a window: its own (x, y) plus every
+        ancestor's, walking the parent chain (no non-client insets modelled)."""
+        x = y = 0
+        w = self.handles.get(hwnd)
+        while w is not None and hasattr(w, "x"):
+            x += w.x
+            y += w.y
+            w = self.handles.get(w.parent) if getattr(w, "parent", 0) else None
+        return x, y
+
+    def _note_input(self, msg) -> None:
+        """Derive POLLED input state from a delivered message so GetKeyState /
+        GetAsyncKeyState / GetCursorPos reflect it — SimAnt's WAP engine steers
+        entirely by polling those, not by handling the messages.  Called for
+        every message consumed via GetMessage OR PeekMessage(PM_REMOVE) so both
+        pump styles feed identical state (and demo replay stays deterministic)."""
+        services = self.machine.api.services
+        mtype, wparam, lparam = msg[1], msg[2], msg[3]
+        if mtype == 0x0100:                              # WM_KEYDOWN
+            services.setdefault("async_keys", set()).add(wparam & 0xFFFF)
+            services.setdefault("async_keys_tapped", set()).add(wparam & 0xFFFF)
+        elif mtype == 0x0101:                            # WM_KEYUP
+            services.get("async_keys", set()).discard(wparam & 0xFFFF)
+        elif 0x0200 <= mtype <= 0x0209:                  # mouse move / buttons
+            ox, oy = self._window_origin(msg[0])         # client -> screen
+            services["cursor_pos"] = ((ox + (lparam & 0xFFFF)) & 0xFFFF,
+                                      (oy + ((lparam >> 16) & 0xFFFF)) & 0xFFFF)
+            down = {0x0201: 0x01, 0x0204: 0x02, 0x0207: 0x04}   # L/R/M -> VK
+            up = {0x0202: 0x01, 0x0205: 0x02, 0x0208: 0x04}
+            if mtype in down:
+                services.setdefault("async_keys", set()).add(down[mtype])
+                services.setdefault("async_keys_tapped", set()).add(down[mtype])
+            elif mtype in up:
+                services.get("async_keys", set()).discard(up[mtype])
 
     def pump_modal(self, *, paint: bool = True, timers: bool = False) -> bool:
         """Dispatch one pending WM_PAINT (and optionally a due WM_TIMER) to a
@@ -184,17 +271,13 @@ class Win16System:
         if recorder is not None:
             recorder.message(msg)
         if msg is not None:
-            # Key state is DERIVED from the message stream (not host polling),
-            # so GetAsyncKeyState sees the same state on live play and demo
-            # replay.  Games that poll instead of handling WM_KEYDOWN
-            # (microman steers with GetAsyncKeyState) read this set.
-            if msg[1] == 0x0100:                                  # WM_KEYDOWN
-                services = self.machine.api.services
-                services.setdefault("async_keys", set()).add(msg[2] & 0xFFFF)
-                services.setdefault("async_keys_tapped", set()).add(msg[2] & 0xFFFF)
-            elif msg[1] == 0x0101:                                # WM_KEYUP
-                self.machine.api.services.get(
-                    "async_keys", set()).discard(msg[2] & 0xFFFF)
+            # Polled input state (keys + mouse pos/buttons) is DERIVED from the
+            # message stream, not from host polling, so GetAsyncKeyState /
+            # GetKeyState / GetCursorPos see the same state on live play and demo
+            # replay.  Games that poll instead of handling messages (microman
+            # steers via GetAsyncKeyState; SimAnt's WAP via GetCursorPos +
+            # GetKeyState) read this — see _note_input.
+            self._note_input(msg)
         return msg
 
     def next_message(self):
@@ -215,7 +298,8 @@ class Win16System:
             self.clock_ms = max(self.clock_ms, due)
             self.timer_due[key] = self.clock_ms + self.timers[key]
             hwnd, timer_id = key
-            return (hwnd, 0x0113, timer_id, 0, self.clock_ms, 0)      # WM_TIMER
+            proc = self.timer_procs.get(key, 0)                      # 0 = to wndproc
+            return (hwnd, 0x0113, timer_id, proc, self.clock_ms, 0)  # WM_TIMER
         raise RuntimeError(
             "GetMessage with an empty queue, no dirty window and no armed timer "
             "— an input driver must post messages")
