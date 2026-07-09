@@ -106,6 +106,28 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-09 — FPU: SimAnt uses native inline x87; completed the emulator (was the ant-stall)
+- **Do we have FPU? Yes, but it was incomplete.** SimAnt's FP is NOT INT 34-3D —
+  disassembling the 111 OSFIXUP sites shows `fwait; es: <x87>` (native inline x87,
+  D8-DF), which dos_re's execute_fpu runs (segment overrides included).  0 FP hits
+  during boot/title; all FP is in the sim (routines __ftol/__fassign/__STRINGTOD
+  + _BuildAntListA).  Statically enumerated the ~20 distinct x87 instructions from
+  the fixup sites — execute_fpu implemented only ~1/3, so the ant physics hit
+  UnsupportedInstruction and stalled (almost certainly why the ants don't move).
+- **Fix (dos_re 47418f1; win16_re submodule bump 0e8708f):** added the missing
+  register forms (D8/DC arithmetic, FXCH, FCHS/FABS/FTST/FXAM, FLD1/FLDZ/FLDPI...,
+  FSQRT/FRNDINT/FSCALE/FSIN/FCOS, FNSTSW AX) and memory forms (single-precision
+  m32 FLD/FST/FSTP, integer FIST/FISTP m32 + FILD/FIST/FISTP m16, D8/DC m32/m64
+  arithmetic) + _fxam class/sign bits.  Verified sqrt(2)/FCHS/FXCH/FTST/FXAM/m32
+  round-trip; dos_re suite + new test_core x87 case green; win16 gate 47 green.
+- **Progression: NOT yet visually confirmed by me** — reaching in-game headlessly
+  keeps timing out (~150s to reach + heavy nested sim frames).  The FPU gap was
+  the strong suspect for "ants not moving"; with x87 complete the sim should
+  advance.  Owner to confirm in play.py (new game → do the ants move?).  If a
+  further x87 opcode is hit it fails loud ("x87 opcode XX /Y at CS:IP") — easy add.
+- **Note:** dos_re edits must target the SUBMODULE path (win16_re/dos_re), commit
+  there + push to the dos_re remote, then bump the pointer in win16_re.
+
 ## 2026-07-09 — In-game windows are real: title/close/resize/maximize/scrollbars (play.py)
 - **Captured the in-game window styles** (log via a CreateWindow hook): the panels
   are WS_CHILD|WS_CAPTION created with a NULL parent (top-level framed windows):
