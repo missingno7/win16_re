@@ -134,6 +134,16 @@ class WindowView:
         self._build_menubar()
         self._place()
         self._bind_input()
+        # Real Windows sends WM_SIZE when a window is first sized.  SimAnt's
+        # resizable game view renders a default (smaller) frame until it gets
+        # one, so on first show its content sits in the top-left and leaves a
+        # stale strip down the right/bottom; a manual resize then "fixes" it.
+        # Nudge it once with the actual client size so it fills from frame one.
+        if self._can_resize:
+            WM_SIZE = 0x0005
+            self.app.driver.post_input(
+                self.win.handle, WM_SIZE, 0,
+                ((self.win.h & 0xFFFF) << 16) | (self.win.w & 0xFFFF))
         # Closing the main frame quits; closing an in-game panel just sends it
         # WM_CLOSE (the game hides/destroys it) — like a real window's close box.
         self.top.protocol("WM_DELETE_WINDOW", self._on_close_box)
