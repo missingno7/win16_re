@@ -170,6 +170,24 @@ def install(api: ApiRegistry) -> None:
                 ctx.read_string(value).decode("latin-1")
         return 1
 
+    @api.register("KERNEL", 59, args="str str str")     # WriteProfileString(app,key,value)
+    def WriteProfileString(ctx: CallContext) -> int:
+        # Same as WritePrivateProfileString but to WIN.INI (SimAnt saves options).
+        sys: Win16System = ctx.registry.services["system"]
+        app, key, value = ctx.args
+        prof = sys.profile("win.ini")
+        section = ctx.read_string(app).decode("latin-1").lower()
+        if not key:
+            prof.pop(section, None)
+            return 1
+        keyname = ctx.read_string(key).decode("latin-1").lower()
+        if not value:
+            prof.get(section, {}).pop(keyname, None)
+        else:
+            prof.setdefault(section, {})[keyname] = \
+                ctx.read_string(value).decode("latin-1")
+        return 1
+
     @api.register("KERNEL", 131, ret="long")            # GetDOSEnvironment()
     def GetDOSEnvironment(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]

@@ -13,6 +13,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         3: "GetVersion",
         57: "GetProfileInt",
         58: "GetProfileString",
+        59: "WriteProfileString",
         135: "GetSystemDirectory",
         5: "LocalAlloc",
         6: "LocalReAlloc",
