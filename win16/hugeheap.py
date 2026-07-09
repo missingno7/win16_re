@@ -18,6 +18,20 @@ SEG = 0x10000                       # 64K per selector step
 SEL_RPL = 0x07                      # TI=1 (LDT), RPL=3 — a typical Win16 selector
 
 
+def _map_rpl_aliases(sel_base: dict[int, int], sel: int, lin: int) -> None:
+    """Map all four RPL aliases of a selector to `lin`.  The low 2 bits of a
+    selector are the RPL, which protected-mode hardware IGNORES when resolving
+    the descriptor (only the index + TI select the segment).  Win16 apps exploit
+    this: SimAnt's terrain rasterizer walks a 64K DIB with a huge pointer whose
+    16-bit offset it SIGN-EXTENDS before adding to the base selector, so crossing
+    offset 0x8000 decrements the selector by 1 (RPL 3 -> 2) — a no-op on real
+    hardware (same descriptor), but a miss if sel_base is keyed by the exact
+    selector.  Registering every RPL keeps the alias resolving to one block."""
+    desc = sel & 0xFFFC                             # index + TI, RPL cleared
+    for rpl in range(4):
+        sel_base[desc | rpl] = lin
+
+
 class HugeHeap:
     def __init__(self, sel_base: dict[int, int], lin_start: int, lin_end: int,
                  first_index: int = 0x0300) -> None:
@@ -25,6 +39,10 @@ class HugeHeap:
         self._lin_free: list[tuple[int, int]] = [(lin_start, lin_end - lin_start)]
         self._next_index = first_index              # selector = index<<3 | RPL
         self.first_selector = (first_index << 3) | SEL_RPL
+        # Lowest selector the VM should treat as a global-heap selector: the
+        # RPL-0 alias of the first (see _map_rpl_aliases), so RPL variants of it
+        # still clear the sel_min fast-path gate in Memory.
+        self.selector_floor = self.first_selector & 0xFFFC
         self._sel_free: list[tuple[int, int]] = []  # (start_selector, count)
         self._blocks: dict[int, tuple[int, int, int, int]] = {}
         #              base_selector -> (lin_base, lin_size, n_selectors, req_size)
@@ -82,7 +100,7 @@ class HugeHeap:
             self._free_lin(lin_base, lin_size)
             return 0
         for k in range(n):
-            self.sel_base[base_sel + k * 8] = lin_base + k * SEG
+            _map_rpl_aliases(self.sel_base, base_sel + k * 8, lin_base + k * SEG)
         self._blocks[base_sel] = (lin_base, lin_size, n, size)
         return base_sel
 
@@ -92,7 +110,9 @@ class HugeHeap:
             return False
         lin_base, lin_size, n, _size = info
         for k in range(n):
-            self.sel_base.pop(base_sel + k * 8, None)
+            desc = (base_sel + k * 8) & 0xFFFC
+            for rpl in range(4):
+                self.sel_base.pop(desc | rpl, None)
         self._free_lin(lin_base, lin_size)
         self._free_selectors(base_sel, n)
         return True

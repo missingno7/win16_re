@@ -144,7 +144,7 @@ class Win16System:
                                   first_index=first_index)
         # Segments below the first selector skip the sel_base dict lookup (the
         # hot path stays real-mode-fast for code/stack/dgroup accesses).
-        self.machine.mem.sel_min = self.huge_heap.first_selector
+        self.machine.mem.sel_min = self.huge_heap.selector_floor
 
     def call_wndproc(self, window, msg: int, wparam: int, lparam: int) -> int:
         """Send a message straight to the window's proc (SendMessage path)."""

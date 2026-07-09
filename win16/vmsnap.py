@@ -130,7 +130,16 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     # dict knows nothing of the snapshot's allocations).
     if sysobj.huge_heap is not None:
         machine.mem.sel_base = sysobj.huge_heap.sel_base
-        machine.mem.sel_min = sysobj.huge_heap.first_selector
+        machine.mem.sel_min = sysobj.huge_heap.first_selector & 0xFFFC
+        # Back-fill selector RPL aliases for snapshots taken before they were
+        # mapped, so a huge-pointer walk that flips RPL bits still resolves into
+        # the right block (see win16.hugeheap._map_rpl_aliases).
+        from .hugeheap import SEG, _map_rpl_aliases
+        for base_sel, info in getattr(sysobj.huge_heap, "_blocks", {}).items():
+            lin_base, _lin_size, n, _req = info
+            for k in range(n):
+                _map_rpl_aliases(sysobj.huge_heap.sel_base,
+                                 base_sel + k * 8, lin_base + k * SEG)
 
     # Polled key state (game-observable via GetAsyncKeyState).
     machine.api.services["async_keys"] = set(meta.get("async_keys", []))
