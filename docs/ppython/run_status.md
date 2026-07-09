@@ -1,5 +1,25 @@
 # Paulie Python — run status (newest on top)
 
+## 2026-07-09 — Surface View half-black: selector RPL aliases in the huge heap
+- **Symptom:** SimAnt's "Surface View" (a 512×256 4bpp = 64K DIB) rendered with the
+  top half black; OTVDM fills it fully at the same window size.
+- **Deep trace (snap_191636):** decode is faithful — the DIB's upper 32K is genuinely
+  unwritten.  The terrain rasterizer at `275f:4674` (fills 4 rows/call) is fed dest
+  pointers by `18c0:dafc`, which SIGN-EXTENDS the 16-bit byte offset before adding it
+  to base `864f:0000`.  At offset ≥ 0x8000 the sign bit borrows into the segment word:
+  `864f:0000 + 0xFFFF8000 = 864e:8000`.  `864e`/`864f` share LDT index `0x10C9`
+  (differ only in RPL, which hardware ignores) → same block on real HW.  Our `sel_base`
+  keyed by exact selector → `864e` missed → real-mode fallback → top-half writes lost.
+- **Fix (win16 only, no dos_re change):** `hugeheap._map_rpl_aliases` maps all 4 RPL
+  aliases of every selector to the same base; `sel_min` = RPL-0 alias of the first
+  selector; `load_snapshot` back-fills aliases for old snapshots.  Verified:
+  `_xlat(864e,0x8000)` now lands in the buffer; the top half receives writes.
+- **Method note:** the winning technique here was catching the write loop with a
+  `write_watcher` + a replacement-hook on the filler's entry to read the caller's
+  return address and the dest far-pointer per call — that exposed the `864e` selector
+  and the sign-extension.  Reusable for any "half/partial buffer" rendering bug.
+
+
 ## 2026-07-09 — PALETTEINDEX COLORREF bug: SimAnt's meter bars rendered black
 - **Symptom (owner):** the caste/behavior/colony meter bars + the ribbon's central
   status strip drew as solid black blocks.
