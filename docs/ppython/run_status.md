@@ -106,6 +106,27 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-09 — In-game windows are real: title/close/resize/maximize/scrollbars (play.py)
+- **Captured the in-game window styles** (log via a CreateWindow hook): the panels
+  are WS_CHILD|WS_CAPTION created with a NULL parent (top-level framed windows):
+  "Caste Control"/"Behavior Control"/"Black Nest View" = CAPTION|SYSMENU
+  (titled/closable/fixed); "SimAnt - Quick Game" = CAPTION|SYSMENU|THICKFRAME|
+  MAXBOX|VSCROLL|HSCROLL (titled/closable/resizable/maximizable/scrollable) —
+  exactly the owner's "some closable-only, some resizable" description.
+- **compositor.top_level_windows now selects parent==0** (desktop-parented), so
+  these WS_CHILD panels are presented as their OWN tkinter Toplevels instead of
+  being hidden by the old `not is_child` filter.  (ad4da75 chain: 4c7fdec+ad4da75.)
+- **WindowView maps Win16 styles → native tkinter chrome:** WS_THICKFRAME →
+  resizable (+ WM_SIZE on drag, debounced, so the game re-lays-out; the main
+  AntRoot frame = WS_OVERLAPPEDWINDOW ⇒ now resizable); WS_SYSMENU → close box
+  (posts WM_CLOSE to that window; main still quits); WS_H/VSCROLL → scroll bars
+  (post WM_H/VSCROLL, thumb driven from the tracked scroll range).
+- **NOT visually verified by me** — headless in-game render times out (reaching
+  it is ~150s and each frame does heavy nested work), so this is built from the
+  captured styles + standard tkinter and boots clean (gate 47), but the owner
+  must confirm the in-game look/behaviour.  Risks: WM_SIZE relayout fidelity,
+  panel positioning, scroll page-size (approximated).
+
 ## 2026-07-09 — In-game unfreeze: USER.236 + callback runs via cpu.run (faster, pausable)
 - **USER.236 GetCapture** (c1efb66) — the mouse-capture poll; an unimplemented gap
   stopped the VM once in-game.
