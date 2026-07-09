@@ -20,6 +20,24 @@
   the target window's surface) is a fast, repeatable way to find a rendering bug
   without re-booting to in-game (~150s/boot).  Scripts under scratchpad.
 
+## 2026-07-09 — in-game freeze after a caste click: live polled input for non-pumping loops
+- **Owner:** clicked Caste Control, it updated, then the game froze (snap_174855).
+- **Root cause:** `snap_174855` had `async_keys=[1]` — LBUTTON stuck DOWN.  The caste
+  slider enters a DRAG loop that spins on `GetAsyncKeyState(VK_LBUTTON)` waiting for
+  release, WITHOUT calling Peek/GetMessage (freeze footprint: USER.17/29/249/186 only,
+  no 108/109, at 0100:bf08).  Polled state was fed only on message CONSUMPTION, so the
+  WM_LBUTTONUP the release generated sat unconsumed → button read down forever.
+- **Fix:** polled state (async_keys/cursor_pos) is now fed at input ARRIVAL, not
+  consumption.  The interactive driver's `_drain_input` calls `_note_input` per drained
+  message; `get_message`/`peek_message` skip their own note while a drainer is attached
+  (no double-note); `GetAsyncKeyState`/`GetKeyState`/`GetCursorPos` call
+  `refresh_polled_input()` (drains host input) before reading.  Headless/replay (no
+  drainer) unchanged — deterministic consumption-time derivation.
+- **Design note:** this is the general rule for WAP/polling games — a live poll
+  (GetAsyncKeyState) must reflect real-time host input independent of whether the game
+  pumps its queue.  Verified on snap_174855: delivering WM_LBUTTONUP clears async_keys
+  and the drag loop at 0100:bf08 exits to 0e99:47a4.
+
 ## 2026-07-09 — verified panel clicks end-to-end; exposed + fixed x87 DA/DE integer arithmetic
 - Replayed `snap_171018` and INJECTED a click on the Caste Control triangle (raise +
   cursor_pos + WM_MOUSEMOVE/LBUTTONDOWN + async LBUTTON).  Result: the click was
