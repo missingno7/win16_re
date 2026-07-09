@@ -99,9 +99,14 @@ def tree_version(sysobj, window) -> int:
     return total
 
 
-def composite(sysobj, window):
+def composite(sysobj, window, *, menu_bar: bool = True):
     """A NEW Surface: `window`'s pixels with its visible child windows blitted
-    in at their positions (recursively), clipped to the window's client area."""
+    in at their positions (recursively), clipped to the window's client area.
+
+    `menu_bar` paints the top-level frame's menu titles as a strip above the
+    client — right for headless screenshots, but a host with a REAL menu widget
+    (play.py's native tkinter menubar) passes menu_bar=False so the strip does
+    not double the menu and offset the client."""
     import numpy as np
 
     from .api.objects import Surface
@@ -122,6 +127,8 @@ def composite(sysobj, window):
                                 x0 - child.x:x1 - child.x]
 
     # A top-level frame's menu bar is a presentation strip above the client.
+    if not menu_bar:
+        return out
     menu = getattr(window, "menu_obj", None)
     if menu is not None and menu.items and not is_child(window):
         out = _with_menu_bar(out, menu)

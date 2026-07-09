@@ -42,7 +42,8 @@ from win16.api.system import Win16System
 from win16.app import create_machine
 from win16.dialog import du_to_px
 from win16.interactive import InteractiveDriver
-from win16.menu import MF_CHECKED, MF_DISABLED, MF_GRAYED, parse_menu
+from win16.menu import (MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_POPUP,
+                        MF_SEPARATOR, parse_menu)
 
 # Button styles (low nibble).
 BS_CHECKBOX, BS_AUTOCHECKBOX = 0x2, 0x3
@@ -99,23 +100,37 @@ class WindowView:
         self._menu_images: list = []            # keep PhotoImage refs alive
         self._last_geo = None
 
+        self._menu_sig = None                   # rebuild the menubar when it changes
+
         self.top = tk.Toplevel(app.root)
         self.top.title(win.title or win.wndclass.name)
-        self.top.resizable(False, False)
+        self.top.resizable(False, False)        # true resize: a follow-up
         w, h = win.client_size
         self.canvas = tk.Canvas(self.top, width=w * self.scale,
                                 height=h * self.scale, highlightthickness=0,
                                 bg="black")
         self.canvas.pack()
-        self.is_main = win.wndclass.menu_name is not None
+        # "main" = carries a menu bar (from a MENU resource OR built at runtime
+        # via CreateMenu/AppendMenu, like SimAnt).  Detected live in sync() too,
+        # since SetMenu may land after this view is created.
+        self.is_main = self._has_menu()
+        self.status_var = tk.StringVar(value="ready")
         if self.is_main:
-            self._build_menubar()
-            self.status_var = tk.StringVar(value="ready")
-            tk.Label(self.top, textvariable=self.status_var, anchor="w",
-                     font=("Consolas", 9)).pack(fill="x")
+            self._install_status_bar()
+        self._build_menubar()
         self._place()
         self._bind_input()
         self.top.protocol("WM_DELETE_WINDOW", app.on_close)
+
+    def _has_menu(self) -> bool:
+        if self.win.wndclass.menu_name is not None:
+            return True
+        mo = getattr(self.win, "menu_obj", None)
+        return mo is not None and bool(mo.items)
+
+    def _install_status_bar(self) -> None:
+        tk.Label(self.top, textvariable=self.status_var, anchor="w",
+                 font=("Consolas", 9)).pack(fill="x")
 
     # -- placement ----------------------------------------------------------
     def _place(self) -> None:
@@ -125,14 +140,63 @@ class WindowView:
         self._last_geo = (self.win.x, self.win.y)
 
     # -- the game's menu bar --------------------------------------------------
+    def _menu_signature(self):
+        """A cheap key that changes when the menu structure changes, so sync()
+        can (re)build the native menubar once the game's SetMenu/AppendMenu land."""
+        mo = getattr(self.win, "menu_obj", None)
+        if mo is None:
+            return ("res", self.win.wndclass.menu_name)
+        return ("obj", tuple((it.flags, it.id, it.text) for it in mo.items))
+
     def _build_menubar(self) -> None:
+        self._menu_entries = []
+        self._menu_applied = {}
+        self._menu_sig = self._menu_signature()
         resources = self.app.machine.exe.find_resources("MENU")
-        if not resources:
+        if resources and self.win.wndclass.menu_name is not None:
+            bar = tk.Menu(self.top)
+            for item in parse_menu(resources[0].data):
+                self._add_menu_item(bar, item)
+            self.top.config(menu=bar)
+            return
+        # No MENU resource: build from the runtime-built menu (CreateMenu/
+        # AppendMenu -> SetMenu), which is how SimAnt makes File/Window/View/...
+        mo = getattr(self.win, "menu_obj", None)
+        if mo is None or not mo.items:
             return
         bar = tk.Menu(self.top)
-        for item in parse_menu(resources[0].data):
-            self._add_menu_item(bar, item)
+        for it in mo.items:
+            self._add_menu_obj_item(bar, it)
         self.top.config(menu=bar)
+
+    def _add_menu_obj_item(self, parent: tk.Menu, it) -> None:
+        """Add one runtime Menu item (win16.api.objects.MenuItem) to a tk menu."""
+        label = (it.text or "").replace("&", "")
+        if it.flags & MF_SEPARATOR:
+            parent.add_separator()
+            return
+        if (it.flags & MF_POPUP) and it.submenu is not None:
+            sub = tk.Menu(parent, tearoff=0)
+            for child in it.submenu.items:
+                self._add_menu_obj_item(sub, child)
+            parent.add_cascade(label=label, menu=sub)
+            return
+        hwnd, cmd_id = self.win.handle, it.id
+        image = self._menu_image(cmd_id)
+        if image is not None:
+            var = tk.IntVar(value=1 if (it.flags & MF_CHECKED) else 0)
+            parent.add_checkbutton(
+                image=image, variable=var, onvalue=1, offvalue=0,
+                command=lambda: self.app.driver.post_input(hwnd, WM_COMMAND, cmd_id, 0))
+            self._menu_entries.append((parent, parent.index("end"), cmd_id,
+                                       it.flags, var))
+        else:
+            parent.add_command(
+                label=label,
+                command=lambda: self.app.driver.post_input(hwnd, WM_COMMAND, cmd_id, 0))
+            self._menu_entries.append((parent, parent.index("end"), cmd_id,
+                                       it.flags, None))
+
 
     def _add_menu_item(self, parent: tk.Menu, item) -> None:
         if item.is_separator:
@@ -246,18 +310,9 @@ class WindowView:
             self.app.driver.post_input(self.win.handle, WM_KEYUP, vk, 0xC0000001)
 
     def _on_mouse(self, event, msg: int, mk: int) -> None:
-        from win16 import compositor
+        # The native tkinter menubar occupies its own non-client strip (not the
+        # canvas), so canvas coords map straight to the game's client space.
         cx, cy = event.x // self.scale, event.y // self.scale
-        # The composited image prepends a presentation-only menu-bar strip for a
-        # framed window, so the game's client (0,0) sits MENU_BAR_H px lower in
-        # what's shown.  Subtract it so posted coords match the game's own space.
-        # A click inside the strip itself is non-client (dropdowns aren't wired
-        # yet) — drop it rather than post a bogus/negative client coord.
-        menu = getattr(self.win, "menu_obj", None)
-        if menu is not None and menu.items:
-            cy -= compositor.MENU_BAR_H
-            if cy < 0:
-                return
         lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
         self.app.driver.post_input(self.win.handle, msg, mk, lparam)
 
@@ -265,15 +320,24 @@ class WindowView:
     def _composited(self):
         """The image to display: this (top-level) window with its WS_CHILD
         windows composited in at their offsets (SimAnt's canvas/ribbon live in
-        child windows).  Falls back to the bare surface if it has no children."""
+        child windows).  menu_bar=False: the menu is a real tkinter widget here,
+        so the painted strip (headless/screenshot chrome) is suppressed."""
         from win16 import compositor
-        return compositor.composite(self.app.sys, self.win)
+        return compositor.composite(self.app.sys, self.win, menu_bar=False)
 
     def sync(self) -> None:
         from win16 import compositor
         win = self.win
         if (win.x, win.y) != self._last_geo:
             self._place()
+        # The game may SetMenu / AppendMenu after this view was created (SimAnt
+        # builds its bar at runtime); (re)build the native menubar when it lands
+        # or changes.
+        if self._menu_signature() != self._menu_sig:
+            if not self.is_main and self._has_menu():
+                self.is_main = True
+                self._install_status_bar()
+            self._build_menubar()
         version = compositor.tree_version(self.app.sys, win)
         if version != self._last_version:
             self._last_version = version
