@@ -397,9 +397,29 @@ class WindowView:
     def _on_mouse(self, event, msg: int, mk: int) -> None:
         # The native tkinter menubar occupies its own non-client strip (not the
         # canvas), so canvas coords map straight to the game's client space.
+        self._raise_z()
         cx, cy = event.x // self.scale, event.y // self.scale
         lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
         self.app.driver.post_input(self.win.handle, msg, mk, lparam)
+
+    def _raise_z(self) -> None:
+        # A promoted panel (Caste/Behavior/Nest/Quick Game) is a WS_CHILD that
+        # OVERLAPS its siblings in the game's virtual screen space — they were
+        # laid out as stacked MDI children.  The game hit-tests the polled cursor
+        # with WindowFromPoint, which tie-breaks to the LAST window in z-order,
+        # so unless the panel under the real cursor is moved to the top of the VM
+        # window list every click routes to whichever panel sorts last (Quick
+        # Game) and the others' buttons go dead.  Raise on any mouse event, so
+        # the panel being pointed at is the one the game resolves the click to.
+        if not (self.win.style & 0x40000000):        # WS_CHILD only (not the frame)
+            return
+        wins = self.app.sys.windows
+        if wins and wins[-1] is not self.win:        # identity: distinct Windows
+            for i, w in enumerate(wins):             # can compare-equal by value
+                if w is self.win:
+                    del wins[i]
+                    wins.append(self.win)
+                    break
 
     # -- resize (WS_THICKFRAME windows) ---------------------------------------
     def _on_configure(self, event) -> None:
