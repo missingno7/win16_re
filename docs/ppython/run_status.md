@@ -1,5 +1,36 @@
 # Paulie Python — run status (newest on top)
 
+## 2026-07-09 — PALETTEINDEX COLORREF bug: SimAnt's meter bars rendered black
+- **Symptom (owner):** the caste/behavior/colony meter bars + the ribbon's central
+  status strip drew as solid black blocks.
+- **Root cause:** SimAnt fills them with `CreateSolidBrush(PALETTEINDEX(8))` =
+  `0x01000008`.  `CreateSolidBrush` did `color & 0xFFFFFF`, stripping the COLORREF
+  *type* byte, so the brush became literal RGB `(8,0,0)` ≈ black instead of *palette
+  entry 8* (light grey).  Confirmed by replaying `snap_164229` and logging the brush
+  arg (471×/200k instr, all `0x01000008`); palette entry 8 = `(192,192,192)`.
+- **Fix:** `gdi.colorref_rgb(colorref, palette)` — `PALETTEINDEX(i)` → DC's realized
+  logical palette entry i (else the app system palette); `RGB`/`PALETTERGB` → low 24
+  bits.  `CreateSolidBrush`/`SetTextColor` keep the full 32-bit COLORREF;
+  `FillRect`/`PatBlt`/`TextOut`/class backgrounds resolve at draw time against the DC
+  palette (`dc_palette_entries`).  Verified: the ribbon status strip repaints grey.
+  The colony H/P + caste meter bars use the same path but only repaint on value
+  change, so they self-correct on next redraw.  Tests: `tests/test_colorref.py`.
+- **Method note:** replaying a saved snapshot + wrapping `machine.api.entries[(mod,ord)]
+  .handler` to log/inspect a specific window's draw ops (compare `_dc_surface(hdc)` to
+  the target window's surface) is a fast, repeatable way to find a rendering bug
+  without re-booting to in-game (~150s/boot).  Scripts under scratchpad.
+
+## 2026-07-09 — OPEN: ghosting when scrolling the in-game "Quick Game" view
+- Owner reports trails/ghosting when moving the map view.  The view (hwnd 0x14a, 423×
+  346) is painted via `SetDIBitsToDevice` (GDI.443) — one full-map DIB blit; idle it
+  repaints ~once and never calls `ScrollWindow`, so the smear is tied to the scroll
+  interaction itself and is NOT reproducible from a static snapshot.  Blit ROPs
+  (SRCCOPY/AND/PAINT/INVERT/NOTSRCCOPY) are all implemented, so it is not an
+  unhandled-ROP raise.  Next step: capture a snapshot WHILE the ghosting is on screen
+  to inspect the smeared surface + the exact SetDIBitsToDevice args that produced it.
+  Suspects: partial-update DIB args (xSrc/ySrc/scan lines) leaving stale pixels, or a
+  scroll path that shifts only part of the client.
+
 ## 2026-07-09 — in-game panels are now REAL OS windows (owner's call over painted chrome)
 - Owner preferred native windows to the painted caption bars.  Captioned WS_CHILD
   panels ("Caste Control", "Behavior Control", "Black Nest View") are now each their
