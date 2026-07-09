@@ -106,6 +106,33 @@
   1150 Pause(F4), 1175 HighScores(F5), 1200 Exit(F10); attitudes 2151-2155
   (default 2153 Diamondback); control 2201 kbd / 2202 mouse; screen-set 2051-2053.
 
+## 2026-07-09 — SimAnt INTERACTIVE: clicks work, sim-tick timer runs, Quick Game plays in play.py
+- **Clicks now register in play.py.** The WAP steers by POLLING GetCursorPos +
+  GetKeyState(VK_LBUTTON), which our pump never fed from mouse messages (only
+  keyboard).  `Win16System._note_input` now derives cursor_pos (client→screen via
+  the parent chain) + button VKs from WM_LBUTTON*/mouse messages, on BOTH
+  GetMessage and PeekMessage(PM_REMOVE).  The interactive driver exposes an
+  `input_drainer` so a PeekMessage busy-poll (the menus never call GetMessage)
+  sees freshly-posted input.  play.py `_on_mouse` subtracts the presentation
+  menu-bar strip so coords match the game's client space.
+- **SetTimer TimerProc = the ~59fps sim tick (SetTimer(0x118, 0, 17, 0100:2440
+  MYTIMERFUNC)).** Was NotImplementedError ("crash on cold start" once in-game).
+  Now the proc is stored; its WM_TIMER carries the proc in lParam; DispatchMessage
+  calls TimerProc(hwnd,WM_TIMER,id,dwTime), NOT the wndproc (whose WM_TIMER hangs).
+- **WM_TIMER discoverable by PeekMessage** — the tick paces frames by spinning on
+  `PeekMessage(..,WM_TIMER,WM_TIMER,PM_REMOVE)`; we only synthesized timers in
+  GetMessage, so that spin was infinite (→ callback watchdog).  peek_message now
+  returns a due WM_TIMER (clock = max(message clock, instruction floor)).
+  INSTR_PER_MS moved to system.py (shared by GetTickCount + the timer clock).
+- **USER.30 WindowFromPoint** — deepest visible window containing a screen point;
+  the click hit-test the main wndproc calls after ClientToScreen.
+- **PERF FOLLOW-UP:** in-game frames run inside TimerProc → call_far's per-step
+  loop (checks the return sentinel each step, ~1.5-2× slower than cpu.run), so
+  gameplay is slower than boot.  Worth speeding call_far (compare a packed int
+  instead of building a (cs,ip) tuple each step; or a sentinel-hook + cpu.run).
+- Commit 43695f9.  Default gate 47 green; demo-replay determinism + snapshot
+  roundtrip green (message-derived input state stays deterministic).
+
 ## 2026-07-08 — MILESTONE: SimAnt reaches IN-GAME (Quick Game) + snapshot-anywhere
 - **In-game reached.** Start -> "Select a Game" -> Quick Game now renders live
   gameplay: the nest view with a dug ant tunnel, the surface panel, the caste
