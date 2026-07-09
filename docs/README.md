@@ -17,6 +17,7 @@ Reading order for a newcomer: repo [README](../README.md) → this index →
 | [`bringing_up_a_game.md`](bringing_up_a_game.md) | **The bring-up frontier loop** — the concrete procedure for getting a new NE game to boot: probe → hit a fail-loud frontier → identify the API from its call site → implement the observed contract → repeat. Includes how to read a call site. |
 | [`pitfalls.md`](pitfalls.md) | The real mistakes this project made and the rule that fixed each — wrong probe channels, weak paint gates, ordinal-name mismatches, the frozen busy-wait clock, brittle instruction-count gates. |
 | [`lifted_islands.md`](lifted_islands.md) | The per-game hot-path hook method (the dos_re island technique on Win16): PC-sample → live-trace the hot loop → lift as a Python island → A/B pixel-oracle gate. The worked examples live in a consuming game-port project's `hooks.py` (currently `simant_port`). |
+| [`performance.md`](performance.md) | How to run win16 workloads fast — PyPy for headless runs (~8x measured on SimAnt; the API-hook boundary keeps it below dos_re's 13–17x), what stays on CPython (the viewer), and why xdist doesn't pay yet. Defers to `dos_re/docs/performance.md` for the method. |
 
 Related, outside `docs/`:
 
