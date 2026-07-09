@@ -51,15 +51,40 @@ _STOCK_BRUSH_RGB = {
 }
 
 
-def brush_object_rgb(brush) -> tuple[int, int, int] | None:
-    """RGB of a Brush/StockObject (None for a hollow/null brush)."""
+def colorref_rgb(colorref: int, palette=None) -> tuple[int, int, int]:
+    """Resolve a Win16 COLORREF to (r, g, b).  The high byte selects the type:
+    0x01 = PALETTEINDEX(i) -> the i-th entry of `palette` (the DC's realized
+    logical palette); 0x00 (literal RGB) / 0x02 (PALETTERGB, nearest-match) ->
+    the low 24 bits, laid out 0x00BBGGRR.  SimAnt fills its caste/colony meter
+    bars with CreateSolidBrush(PALETTEINDEX(8)); without this they render as
+    RGB (8,0,0) ≈ black instead of palette entry 8 (light grey)."""
+    if (colorref >> 24) & 0xFF == 0x01:                  # PALETTEINDEX(i)
+        i = colorref & 0xFFFF
+        if palette and i < len(palette):
+            return tuple(palette[i])
+        return (0, 0, 0)
+    return (colorref & 0xFF, (colorref >> 8) & 0xFF, (colorref >> 16) & 0xFF)
+
+
+def brush_object_rgb(brush, palette=None) -> tuple[int, int, int] | None:
+    """RGB of a Brush/StockObject (None for a hollow/null brush).  `palette`
+    resolves a PALETTEINDEX brush colour (see colorref_rgb)."""
     if isinstance(brush, Brush):
-        c = brush.color
-        return (c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
+        return colorref_rgb(brush.color, palette)
     kind = getattr(brush, "kind", None)
     if kind in _STOCK_BRUSH_RGB:
         return _STOCK_BRUSH_RGB[kind]
     raise NotImplementedError(f"brush {kind!r} has no fill colour")
+
+
+def dc_palette_entries(sys, dc):
+    """The palette a DC resolves PALETTEINDEX against: its selected+realized
+    logical palette, else the app's realized system palette (static single-app
+    model — see RealizePalette)."""
+    pal = getattr(dc, "palette", None)
+    if pal is not None and getattr(pal, "entries", None):
+        return pal.entries
+    return sys.system_palette
 
 
 # Windows 3.1 default system colours, indexed by COLOR_* (GetSysColor index).
@@ -95,7 +120,7 @@ def class_background_rgb(sysobj, h_background: int):
     (COLOR_xxx + 1) system-colour encoding."""
     obj = sysobj.handles.get(h_background)
     if obj is not None:
-        return brush_object_rgb(obj)
+        return brush_object_rgb(obj, sysobj.system_palette)
     if 1 <= h_background <= len(SYS_COLORS):
         return SYS_COLORS[h_background - 1]      # (COLOR_xxx + 1) convention
     return None
@@ -103,13 +128,15 @@ def class_background_rgb(sysobj, h_background: int):
 
 def _brush_rgb(sys: Win16System, hdc: int) -> tuple[int, int, int]:
     dc = sys.handles.require(hdc, DC)
-    return brush_object_rgb(dc.selected.get("brush"))
+    return brush_object_rgb(dc.selected.get("brush"), dc_palette_entries(sys, dc))
 
 
 def install(api: ApiRegistry) -> None:
     @api.register("GDI", 66, args="long")               # CreateSolidBrush(color)
     def CreateSolidBrush(ctx: CallContext) -> int:
-        return _sys(ctx).handles.add(Brush(ctx.args[0] & 0xFFFFFF))
+        # Keep the full COLORREF incl. the type byte (PALETTEINDEX/PALETTERGB);
+        # it is resolved against the DC palette at fill time (colorref_rgb).
+        return _sys(ctx).handles.add(Brush(ctx.args[0] & 0xFFFFFFFF))
 
     @api.register("GDI", 56,                            # CreateFont(...14 params)
                   args="s_word s_word s_word s_word s_word word word word "
@@ -280,7 +307,7 @@ def install(api: ApiRegistry) -> None:
     def SetTextColor(ctx: CallContext) -> int:          # SetTextColor(hdc, color)
         dc = _sys(ctx).handles.require(ctx.args[0], DC)
         old = dc.text_color
-        dc.text_color = ctx.args[1] & 0xFFFFFF
+        dc.text_color = ctx.args[1] & 0xFFFFFFFF     # keep the COLORREF type byte
         return old
 
     @api.register("GDI", 7, args="word word")           # SetStretchBltMode(hdc, mode)
@@ -320,10 +347,9 @@ def install(api: ApiRegistry) -> None:
         x, y = _signed(x), _signed(y)
         seg, off = (str_ptr >> 16) & 0xFFFF, str_ptr & 0xFFFF
         text = bytes(ctx.mem.rb(seg, (off + i) & 0xFFFF) for i in range(count))
-        c = dc.text_color
-        fg = (c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
-        b = dc.bk_color
-        bg = (b & 0xFF, (b >> 8) & 0xFF, (b >> 16) & 0xFF)
+        pal = dc_palette_entries(sys, dc)
+        fg = colorref_rgb(dc.text_color, pal)
+        bg = colorref_rgb(dc.bk_color, pal)
         # Fixed 8x13 cell (the metrics contract); the 8x8 glyph sits 2 rows
         # below the cell top.  Presentation-layer approximation of the real
         # Windows raster fonts.

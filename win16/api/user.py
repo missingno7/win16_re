@@ -1106,7 +1106,8 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 81, args="word ptr word")     # FillRect(hdc, lpRect, hBrush)
     def FillRect(ctx: CallContext) -> int:
-        from .gdi import _dc_surface, _fill_rect, brush_object_rgb
+        from .gdi import (_dc_surface, _fill_rect, brush_object_rgb,
+                          dc_palette_entries)
         sys = _sys(ctx)
         hdc, rc_ptr, hbrush = ctx.args
         dst = _dc_surface(sys, hdc)
@@ -1114,7 +1115,8 @@ def install(api: ApiRegistry) -> None:
             return 0
         seg, off = (rc_ptr >> 16) & 0xFFFF, rc_ptr & 0xFFFF
         r = [_signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF)) for i in range(4)]
-        rgb = brush_object_rgb(sys.handles.get(hbrush))
+        pal = dc_palette_entries(sys, sys.handles.get(hdc))
+        rgb = brush_object_rgb(sys.handles.get(hbrush), pal)
         if rgb is not None:                             # hollow brush = no-op
             _fill_rect(dst, r[0], r[1], r[2] - r[0], r[3] - r[1], rgb)
         return 1
