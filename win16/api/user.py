@@ -1285,6 +1285,15 @@ def install(api: ApiRegistry) -> None:
         _sys(ctx).handles.require(ctx.args[0], Window)
         return 0                    # minimization is host-side UI; never iconic
 
+    @api.register("USER", 272, args="word")             # IsZoomed(hwnd)
+    def IsZoomed(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        return 1 if isinstance(win, Window) and win.maximized else 0
+
+    @api.register("USER", 104, args="word")             # MessageBeep(uType)
+    def MessageBeep(ctx: CallContext) -> int:
+        return 1                    # a UI cue; the host beep is not modelled
+
     @api.register("USER", 286)                          # GetDesktopWindow()
     def GetDesktopWindow(ctx: CallContext) -> int:
         return _desktop_window(_sys(ctx)).handle

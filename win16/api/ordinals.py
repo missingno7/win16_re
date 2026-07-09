@@ -62,6 +62,8 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         28: "ClientToScreen",
         29: "ScreenToClient",
         30: "WindowFromPoint",
+        104: "MessageBeep",
+        272: "IsZoomed",
         45: "BringWindowToTop",
         49: "IsWindowVisible",
         82: "InvertRect",
