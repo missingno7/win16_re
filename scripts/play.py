@@ -103,15 +103,16 @@ class WindowView:
         self._menu_sig = None                   # rebuild the menubar when it changes
 
         WS_THICKFRAME, WS_SYSMENU = 0x00040000, 0x00080000
-        WS_MAXIMIZEBOX = 0x00010000
-        self._is_frame = win.wndclass.menu_name is not None or win.parent == 0
+        WS_VSCROLL, WS_HSCROLL = 0x00200000, 0x00100000
         # A window's own frame chrome mirrors its Win16 styles: WS_THICKFRAME =>
         # user-resizable (the OS gives resize handles + the maximize button when
-        # WS_MAXIMIZEBOX is set too); WS_SYSMENU => a close button.  SimAnt's
-        # in-game panels ("Caste Control" etc.) are fixed+closable; its "SimAnt -
-        # Quick Game" view is resizable+maximizable.
+        # WS_MAXIMIZEBOX is set too); WS_SYSMENU => a close button; WS_H/VSCROLL
+        # => scroll bars.  SimAnt's in-game panels ("Caste Control" etc.) are
+        # fixed+closable; its "SimAnt - Quick Game" view is resizable + scrollable.
         self._can_resize = bool(win.style & WS_THICKFRAME)
         self._can_close = bool(win.style & WS_SYSMENU)
+        self._has_vscroll = bool(win.style & WS_VSCROLL)
+        self._has_hscroll = bool(win.style & WS_HSCROLL)
 
         self.top = tk.Toplevel(app.root)
         self.top.title(win.title or win.wndclass.name)
@@ -121,15 +122,8 @@ class WindowView:
                                 height=h * self.scale, highlightthickness=0,
                                 bg="black")
         self._resize_after = None
-        if self._can_resize:
-            # The canvas fills the frame; dragging the frame resizes the Win16
-            # window (client = canvas/scale) and fires WM_SIZE so the game
-            # re-lays-out — SimAnt is resolution-adaptive.  Debounced so a drag
-            # doesn't post a WM_SIZE per pixel.
-            self.canvas.pack(fill="both", expand=True)
-            self.canvas.bind("<Configure>", self._on_configure)
-        else:
-            self.canvas.pack()
+        self._vscroll = self._hscroll = None
+        self._layout_canvas()
         # "main" = carries a menu bar (from a MENU resource OR built at runtime
         # via CreateMenu/AppendMenu, like SimAnt).  Detected live in sync() too,
         # since SetMenu may land after this view is created.
@@ -150,6 +144,63 @@ class WindowView:
             self.app.on_close()
         else:
             self.app.driver.post_input(self.win.handle, WM_CLOSE, 0, 0)
+
+    def _layout_canvas(self) -> None:
+        """Place the canvas, plus WS_H/VSCROLL scroll bars.  Scroll bars force a
+        grid layout (canvas + bars); resize binds <Configure>."""
+        if self._has_vscroll or self._has_hscroll:
+            self.top.rowconfigure(0, weight=1)
+            self.top.columnconfigure(0, weight=1)
+            self.canvas.grid(row=0, column=0, sticky="nsew")
+            if self._has_vscroll:
+                self._vscroll = tk.Scrollbar(self.top, orient="vertical",
+                                             command=self._on_vscroll)
+                self._vscroll.grid(row=0, column=1, sticky="ns")
+            if self._has_hscroll:
+                self._hscroll = tk.Scrollbar(self.top, orient="horizontal",
+                                             command=self._on_hscroll)
+                self._hscroll.grid(row=1, column=0, sticky="ew")
+        elif self._can_resize:
+            self.canvas.pack(fill="both", expand=True)
+        else:
+            self.canvas.pack()
+        if self._can_resize:
+            # Dragging the frame resizes the Win16 window (client = canvas/scale)
+            # and fires WM_SIZE so the game re-lays-out (SimAnt is resolution-
+            # adaptive).  Debounced so a drag doesn't post WM_SIZE per pixel.
+            self.canvas.bind("<Configure>", self._on_configure)
+
+    # -- scroll bars (WS_H/VSCROLL windows) -----------------------------------
+    def _on_vscroll(self, *args):
+        self._post_scroll(0x0115, 1, args)      # WM_VSCROLL, SB_VERT
+    def _on_hscroll(self, *args):
+        self._post_scroll(0x0114, 0, args)      # WM_HSCROLL, SB_HORZ
+
+    def _post_scroll(self, msg: int, bar: int, args) -> None:
+        # Map the tkinter scroll command to a Win16 scroll code + thumb pos and
+        # post WM_H/VSCROLL(wParam = code | pos<<16) to the window.
+        lo, hi, pos = self.win.scroll.get(bar, (0, 0, 0))
+        if args[0] == "moveto":                 # SB_THUMBPOSITION
+            newpos = int(round(lo + float(args[1]) * (hi - lo)))
+            wparam = 4 | ((newpos & 0xFFFF) << 16)
+        else:                                   # ("scroll", n, "units"|"pages")
+            n, unit = int(args[1]), args[2]
+            if unit == "units":
+                wparam = 1 if n > 0 else 0       # SB_LINEDOWN / SB_LINEUP
+            else:
+                wparam = 3 if n > 0 else 2       # SB_PAGEDOWN / SB_PAGEUP
+        self.app.driver.post_input(self.win.handle, msg, wparam, 0)
+
+    def _sync_scrollbars(self) -> None:
+        for bar, sb in ((1, self._vscroll), (0, self._hscroll)):
+            if sb is None:
+                continue
+            lo, hi, pos = self.win.scroll.get(bar, (0, 0, 0))
+            if hi > lo:
+                first = (pos - lo) / (hi - lo)
+                sb.set(first, min(first + 0.15, 1.0))
+            else:
+                sb.set(0.0, 1.0)
 
     def _has_menu(self) -> bool:
         if self.win.wndclass.menu_name is not None:
@@ -394,6 +445,8 @@ class WindowView:
             self.top.title(win.title or win.wndclass.name)
         if self.is_main:
             self._sync_menu_state()
+        if self._vscroll is not None or self._hscroll is not None:
+            self._sync_scrollbars()
 
     def force_render(self) -> None:
         """Redraw the current frame regardless of the version gate — used to
