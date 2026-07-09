@@ -120,6 +120,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         62: "SetScrollPos",
         63: "GetScrollPos",
         64: "SetScrollRange",
+        65: "GetScrollRange",
         66: "GetDC",
         68: "ReleaseDC",
         69: "SetCursor",

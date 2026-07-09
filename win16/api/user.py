@@ -452,6 +452,17 @@ def install(api: ApiRegistry) -> None:
         win.scroll[bar] = (_signed(lo), _signed(hi), pos)
         return 1
 
+    @api.register("USER", 65, args="word word ptr ptr")  # GetScrollRange
+    def GetScrollRange(ctx: CallContext) -> int:         # (hwnd, bar, lpMin, lpMax)
+        sys = _sys(ctx)
+        hwnd, bar, lp_min, lp_max = ctx.args
+        win = sys.handles.get(hwnd)
+        lo, hi, _pos = (win.scroll.get(bar, (0, 0, 0))
+                        if isinstance(win, Window) else (0, 0, 0))
+        for lp, val in ((lp_min, lo), (lp_max, hi)):
+            ctx.mem.ww((lp >> 16) & 0xFFFF, lp & 0xFFFF, val & 0xFFFF)
+        return 1
+
     @api.register("USER", 63, args="word word")         # GetScrollPos(hwnd, bar)
     def GetScrollPos(ctx: CallContext) -> int:
         win = _sys(ctx).handles.get(ctx.args[0])
