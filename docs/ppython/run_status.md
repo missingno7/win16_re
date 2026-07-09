@@ -6,6 +6,22 @@
 > reconstruction (recovered routines in `simant/recovered/`, hot-loop islands in
 > `simant/hooks.py`, each gated byte-exact by the A/B oracle).
 
+## 2026-07-09 — recovered _Windows_MakeTable1x1 (the 1:1 tile packer); MakeTable family done
+- The no-zoom sibling of MakeTable4x4 (seg4:46BB): packs pairs of source tiles into one
+  4bpp byte via an XLAT table at SS:0x1B56 (`al=ss:[0x1B56+t0]; al|=ss:[0x1B66+t1]`),
+  `count>>1` iterations.  `recovered/render.py: windows_make_table_1x1`; A/B-gated
+  byte-exact (counts 2/5/16/127/128, odd exercises the dropped tile).  Islands: 5.
+- **Frontier note for the next recovery:** an in-game named profile (scratchpad,
+  snap_204728) shows the remaining hot routines are call-COUPLED, not pure loops:
+  `_GBoxFill` (0e99:19E6, a GDI box-fill wrapper calling 0060:020C/013C/011C),
+  `_win_GetObjRect` (430e:C2D2, object-table lookup + nested near-calls +
+  movsw RECT copy), `_win_IsWinOpen` (430e:C256, handle-table lookup + an API
+  validity call).  A pure "skip-the-routine" island doesn't fit these — they delegate.
+  Recovering them means either an island that re-issues the sub-calls, or recovering
+  them as readable source verified by a different oracle.  Caveat: seg-2 symbol names
+  are OFFSET-ONLY approximations (e.g. _AdjustWndMinMax/_DoToAlarm resolve INSIDE
+  _GBoxFill) — always cross-check the disassembly, not just the name.
+
 ## 2026-07-09 — recovered _Windows_MakeTable4x4 (first source recovery this session)
 - The game's terrain tile-to-pixel expander (SIMANTW.SYM seg4:4674): per column,
   one `lodsb` (tile colour index) + four `stosw`, each scanline's 16-bit fill word
