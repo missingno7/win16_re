@@ -399,8 +399,34 @@ class WindowView:
         # canvas), so canvas coords map straight to the game's client space.
         self._raise_z()
         cx, cy = event.x // self.scale, event.y // self.scale
-        lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
-        self.app.driver.post_input(self.win.handle, msg, mk, lparam)
+        target, tx, ty = self._route_click(cx, cy)
+        lparam = ((ty & 0xFFFF) << 16) | (tx & 0xFFFF)
+        self.app.driver.post_input(target, msg, mk, lparam)
+
+    def _route_click(self, cx: int, cy: int):
+        """Deliver the click to the deepest COMPOSITED child window under it,
+        with coords relative to that child — real Windows sends a click to the
+        child window it lands on, not the frame.  SimAnt's ribbon (a WS_CHILD
+        toolbar composited into the main frame) has its OWN wndproc that
+        hit-tests its buttons, so a click posted to the frame (0x114) never
+        reaches it; the promoted panels already get theirs directly (own view),
+        which is why they worked and the ribbon did not.  Standalone/promoted
+        children (own view) are skipped here.  Returns (hwnd, x, y)."""
+        from win16 import compositor
+        sysobj = self.app.sys
+        cur, x, y = self.win, cx, cy
+        while True:
+            nxt = None
+            for ch in sysobj.windows:            # later in list = topmost Z
+                if getattr(ch, "parent", 0) != cur.handle or not ch.visible:
+                    continue
+                if compositor.presents_standalone(ch):
+                    continue
+                if ch.x <= x < ch.x + ch.w and ch.y <= y < ch.y + ch.h:
+                    nxt = ch
+            if nxt is None:
+                return cur.handle, x, y
+            cur, x, y = nxt, x - nxt.x, y - nxt.y
 
     def _raise_z(self) -> None:
         # A promoted panel (Caste/Behavior/Nest/Quick Game) is a WS_CHILD that
