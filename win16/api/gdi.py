@@ -200,7 +200,7 @@ def install(api: ApiRegistry) -> None:
         dc = _sys(ctx).handles.require(ctx.args[0], DC)
         dc.save_stack.append((dc.text_color, dc.bk_color, dc.bk_mode,
                               dc.stretch_mode, dict(dc.selected), dc.palette,
-                              dc.clip_rect))
+                              dc.clip_rect, dc.text_align))
         return len(dc.save_stack)
 
     @api.register("GDI", 39, args="word s_word")        # RestoreDC(hdc, level)
@@ -212,7 +212,7 @@ def install(api: ApiRegistry) -> None:
         if not 0 <= idx < len(st):
             return 0
         (dc.text_color, dc.bk_color, dc.bk_mode, dc.stretch_mode,
-         selected, dc.palette, dc.clip_rect) = st[idx]
+         selected, dc.palette, dc.clip_rect, dc.text_align) = st[idx]
         dc.selected = dict(selected)
         del st[idx:]                                    # discard idx and later
         return 1
@@ -317,6 +317,17 @@ def install(api: ApiRegistry) -> None:
         dc.bk_color = ctx.args[1] & 0xFFFFFFFF       # keep the COLORREF type byte
         return old
 
+    @api.register("GDI", 346, args="word word")         # SetTextAlign(hdc, flags)
+    def SetTextAlign(ctx: CallContext) -> int:
+        dc = _sys(ctx).handles.require(ctx.args[0], DC)
+        old = dc.text_align
+        dc.text_align = ctx.args[1] & 0xFFFF
+        return old
+
+    @api.register("GDI", 345, args="word")              # GetTextAlign(hdc)
+    def GetTextAlign(ctx: CallContext) -> int:
+        return _sys(ctx).handles.require(ctx.args[0], DC).text_align
+
     @api.register("GDI", 7, args="word word")           # SetStretchBltMode(hdc, mode)
     def SetStretchBltMode(ctx: CallContext) -> int:
         dc = _sys(ctx).handles.require(ctx.args[0], DC)
@@ -354,6 +365,20 @@ def install(api: ApiRegistry) -> None:
         x, y = _signed(x), _signed(y)
         seg, off = (str_ptr >> 16) & 0xFFFF, str_ptr & 0xFFFF
         text = bytes(ctx.mem.rb(seg, (off + i) & 0xFFFF) for i in range(count))
+        # Honour SetTextAlign: (x, y) is the LEFT/TOP corner by default, but the
+        # game centres its ribbon/button labels (TA_CENTER) and may bottom/
+        # baseline-align.  Shift the origin by the run's fixed-cell extent.
+        w_px = len(text) * 8
+        horiz = dc.text_align & 0x0006          # 0=LEFT, 2=RIGHT, 6=CENTER
+        if horiz == 0x0006:
+            x -= w_px // 2
+        elif horiz == 0x0002:
+            x -= w_px
+        vert = dc.text_align & 0x0018           # 8=BOTTOM, 24=BASELINE
+        if vert == 0x0008:
+            y -= 13
+        elif vert == 0x0018:
+            y -= 11
         pal = dc_palette_entries(sys, dc)
         fg = colorref_rgb(dc.text_color, pal)
         bg = colorref_rgb(dc.bk_color, pal)

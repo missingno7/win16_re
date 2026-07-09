@@ -198,6 +198,8 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         93: "GetTextMetrics",
         119: "AddFontResource",
         150: "UnrealizeObject",
+        345: "GetTextAlign",
+        346: "SetTextAlign",
         349: "SetMapperFlags",
         360: "CreatePalette",
         363: "GetPaletteEntries",

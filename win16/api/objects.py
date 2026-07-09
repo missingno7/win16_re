@@ -294,6 +294,7 @@ class DC:
     text_color: int = 0
     bk_color: int = 0xFFFFFF
     bk_mode: int = 2                # OPAQUE
+    text_align: int = 0            # TA_* (0 = TA_LEFT | TA_TOP)
     stretch_mode: int = 1
     selected: dict[str, object] = field(default_factory=dict)
     palette: object = None          # selected logical Palette (None = default)
