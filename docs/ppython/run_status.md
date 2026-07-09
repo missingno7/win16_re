@@ -10,10 +10,16 @@
   `864f:0000 + 0xFFFF8000 = 864e:8000`.  `864e`/`864f` share LDT index `0x10C9`
   (differ only in RPL, which hardware ignores) → same block on real HW.  Our `sel_base`
   keyed by exact selector → `864e` missed → real-mode fallback → top-half writes lost.
-- **Fix (win16 only, no dos_re change):** `hugeheap._map_rpl_aliases` maps all 4 RPL
-  aliases of every selector to the same base; `sel_min` = RPL-0 alias of the first
-  selector; `load_snapshot` back-fills aliases for old snapshots.  Verified:
-  `_xlat(864e,0x8000)` now lands in the buffer; the top half receives writes.
+- **Fix (moved into dos_re — the faithful home):** the RPL-agnostic resolution now
+  lives in dos_re Memory: `sel_base` is keyed by descriptor and every lookup masks the
+  RPL (`sel & 0xFFFC`) in `_xlat`/`rb`/`rw`/`wb`/`ww` — real hardware ignores RPL for
+  descriptor lookup, so this is faithful, not a workaround, and benefits any
+  protected-mode port.  win16's `hugeheap` just registers descriptor keys (one per
+  selector); `load_snapshot` re-keys restored maps to descriptors for old snapshots.
+  Verified: `_xlat(864e,0x8000)` lands in the buffer; 864f/864e/864c all resolve
+  identically.  (Owner asked to review win16↔dos_re placement — this was the one thing
+  that belonged in the backend; the x87 work was already correctly in dos_re, and the
+  message-pump / GDI / allocator changes are correctly win16.)
 - **Method note:** the winning technique here was catching the write loop with a
   `write_watcher` + a replacement-hook on the filler's entry to read the caller's
   return address and the dest far-pointer per call — that exposed the `864e` selector
