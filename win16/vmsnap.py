@@ -86,14 +86,19 @@ def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
     }
     (out / "state.json").write_text(json.dumps(meta, indent=1))
 
-    saved_machine, saved_source = sysobj.machine, sysobj.message_source
-    sysobj.machine = None
-    sysobj.message_source = None
+    # Detach the live host wiring before pickling: message_source, input_drainer
+    # and yield_check are bound methods of the interactive driver, which holds a
+    # threading.Condition (an RLock) that cannot be pickled.  They are re-attached
+    # by whoever resumes the snapshot.
+    _HOST_ATTRS = ("machine", "message_source", "input_drainer", "yield_check")
+    saved = {a: getattr(sysobj, a, None) for a in _HOST_ATTRS}
+    for a in _HOST_ATTRS:
+        setattr(sysobj, a, None)
     try:
         (out / "system.pickle").write_bytes(pickle.dumps(sysobj))
     finally:
-        sysobj.machine = saved_machine
-        sysobj.message_source = saved_source
+        for a, v in saved.items():
+            setattr(sysobj, a, v)
     return out
 
 

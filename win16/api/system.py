@@ -82,6 +82,13 @@ class Win16System:
     message_source: object = None       # optional: callable(sys) -> msg | None
     #   When set, GetMessage delegates to it (an interactive/real-time driver);
     #   otherwise the deterministic next_message() drives (headless replay).
+    interactive: bool = False           # a real-time host driver is installed:
+    #   GetTickCount then tracks the driver's WALL clock (clock_ms, kept current
+    #   during a callback by yield_check) instead of the instruction floor.  The
+    #   floor over-runs wall time (the interpreter runs faster than INSTR_PER_MS),
+    #   which made SimAnt's sim-tick think thousands of frames were due and
+    #   process them all in one callback (20M-step overrun).  Headless keeps the
+    #   floor so busy-waits without message pumping still elapse deterministically.
     yield_check: object = None          # optional: callable() run between chunks
     #   of a long VM callback (SimAnt's sim-tick TimerProc) so the host can pause
     #   / take a snapshot / feed input instead of the UI freezing.
@@ -190,8 +197,7 @@ class Win16System:
         6-tuple, or None.  Reschedules it when `remove` (PM_REMOVE / GetMessage)."""
         if not self.timers:
             return None
-        now = max(self.clock_ms,
-                  self.machine.cpu.instruction_count // INSTR_PER_MS)
+        now = self.tick_count()
         best = None
         for key, due in self.timer_due.items():
             if hwnd_filter and key[0] != hwnd_filter:
@@ -205,6 +211,16 @@ class Win16System:
             self.timer_due[key] = now + self.timers[key]
         hwnd, timer_id = key
         return (hwnd, 0x0113, timer_id, self.timer_procs.get(key, 0), now, 0)
+
+    def tick_count(self) -> int:
+        """The GetTickCount value, shared by USER.13 and the WM_TIMER clock so a
+        busy-wait's clock and the timer it spins on stay consistent.  Interactive:
+        the wall clock (clock_ms).  Headless: max(message clock, instruction
+        floor) — the floor keeps a message-less busy-wait progressing."""
+        ms = self.clock_ms
+        if not self.interactive:
+            ms = max(ms, self.machine.cpu.instruction_count // INSTR_PER_MS)
+        return ms & 0xFFFFFFFF
 
     def _window_origin(self, hwnd: int) -> tuple[int, int]:
         """Absolute (screen) top-left of a window: its own (x, y) plus every

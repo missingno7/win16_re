@@ -886,8 +886,7 @@ def install(api: ApiRegistry) -> None:
         if msg == 0x0113 and lparam:
             from win16.callback import call_far
             from win16.loader import THUNK_SEG
-            dwtime = max(sys.clock_ms,
-                         ctx.cpu.instruction_count // INSTR_PER_MS) & 0xFFFFFFFF
+            dwtime = sys.tick_count()
             seg, off = (lparam >> 16) & 0xFFFF, lparam & 0xFFFF
             ax, dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
                               [hwnd, msg, wparam,
@@ -1340,9 +1339,7 @@ def install(api: ApiRegistry) -> None:
         # instruction-derived floor: monotonic, deterministic (oracle-safe),
         # and driven purely by progress.  Message-timed games keep their
         # larger clock_ms unchanged.
-        sys = _sys(ctx)
-        instr_ms = ctx.cpu.instruction_count // INSTR_PER_MS
-        return max(sys.clock_ms, instr_ms) & 0xFFFFFFFF
+        return _sys(ctx).tick_count()
 
     @api.register("USER", 17, args="ptr")               # GetCursorPos(lpPoint)
     def GetCursorPos(ctx: CallContext) -> int:

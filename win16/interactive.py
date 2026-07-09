@@ -34,6 +34,7 @@ class InteractiveDriver:
         self.paused = threading.Event()     # set while the CPU thread is
         self._resume = threading.Event()    # parked at the message boundary
         sysobj.message_source = self._next
+        sysobj.interactive = True           # GetTickCount tracks the wall clock
         # Let PeekMessage flush posted input into the queue too — SimAnt's menus
         # / in-game spin on PeekMessage and never call GetMessage, so without
         # this a click would sit undelivered until the next GetMessage.
@@ -86,10 +87,14 @@ class InteractiveDriver:
         self._resume.clear()
 
     def check_pause(self) -> None:
-        """Called by the CPU worker between instruction chunks: park here if a
-        pause was requested.  This is the busy-poll snapshot point — the game
-        may spin in PeekMessage without ever hitting GetMessage, so `_next`
-        alone would never see the request."""
+        """Called by the CPU worker (and by call_far between chunks) at
+        instruction-chunk boundaries.  Advances the wall clock so GetTickCount
+        keeps ticking at REAL time INSIDE a long callback (SimAnt's sim-tick
+        paces its frame on GetTickCount; without this it would spin/overrun),
+        then parks if a snapshot pause was requested."""
+        now = self.now_ms()
+        if now > self.sys.clock_ms:
+            self.sys.clock_ms = now
         if self._pause_requested:
             self._park()
 

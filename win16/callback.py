@@ -15,7 +15,9 @@ stays responsive (snapshot pause / host input) instead of freezing the UI.
 from __future__ import annotations
 
 CALLBACK_RET_IP = 0xFFFE        # sentinel offset inside the thunk segment
-_CHUNK = 65536                  # steps between yield_check / max-step checks
+_CHUNK = 8192                   # steps between yield_check / max-step checks
+#   Small so the interactive driver's yield_check refreshes the wall clock often
+#   enough to pace a frame-timed callback (SimAnt's sim tick) to real time.
 
 
 class CallbackOverrun(RuntimeError):
