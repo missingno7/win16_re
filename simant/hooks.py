@@ -252,6 +252,59 @@ def _make_bytecopy_island(machine):
     return island
 
 
+# -- _Windows_MakeTable4x4 (seg4:4674) — the terrain tile-to-pixel expander ---
+#
+# The game's own routine that paints a 4-scanline terrain band into a huge DIB
+# frame buffer.  Per column it does one `lodsb` (a tile colour index) then four
+# `stosw`, reading each scanline's fill word from a 4x32-word table at
+# SS:0x1A56 (row stride 0x40).  The four rows sit at DI, DI+2*count, DI+4*count,
+# DI+6*count (stride = 2*count words = the DIB scanline); DI advances one word
+# per column.  ES stays a single selector for the call (the huge-pointer walk
+# across selectors is the caller's), so the whole band is a plain write within
+# one linear span.  Preserves every register/segment (pusha/popa + push bp +
+# push ds/es); `retf` (caller cleans the 10 arg bytes).  The pixel logic is
+# recovered VM-free in simant/recovered/render.py.
+MAKETABLE4X4_SEG_INDEX = 4
+MAKETABLE4X4_OFF = 0x4674
+MAKETABLE4X4_TABLE_OFF = 0x1A56                  # SS-relative colour table base
+MAKETABLE4X4_SIG = bytes.fromhex(                # prologue + the table-base load
+    "558bec601e06c57606c47e0a8b4e0e8bd1d1e24a4abb561a")
+
+
+def _make_maketable4x4_island(machine):
+    from .recovered.render import windows_make_table_4x4
+
+    def island(cpu) -> None:
+        m = cpu.mem
+        s = cpu.s
+        ss, sp = s.ss, s.sp
+        rw = m.rw
+        ret_ip, ret_cs = rw(ss, sp), rw(ss, (sp + 2) & 0xFFFF)
+        src_off, src_seg = rw(ss, (sp + 4) & 0xFFFF), rw(ss, (sp + 6) & 0xFFFF)
+        dst_off, dst_seg = rw(ss, (sp + 8) & 0xFFFF), rw(ss, (sp + 0x0A) & 0xFFFF)
+        count = rw(ss, (sp + 0x0C) & 0xFFFF)
+
+        tiles = [m.rb(src_seg, (src_off + i) & 0xFFFF) for i in range(count)]
+        table = [[rw(ss, (MAKETABLE4X4_TABLE_OFF + row * 0x40 + t * 2) & 0xFFFF)
+                  for t in range(32)] for row in range(4)]
+        rows = windows_make_table_4x4(tiles, table)
+
+        stride = (2 * count) & 0xFFFF             # DI += dx+2 between scanlines
+        for r in range(4):
+            base = (dst_off + r * stride) & 0xFFFF
+            row = rows[r]
+            for c in range(count):
+                m.ww(dst_seg, (base + c * 2) & 0xFFFF, row[c])
+
+        # Every register/segment/flag is preserved by the routine; only SP and
+        # CS:IP change (retf pops the return address, the caller cleans args).
+        s.sp = (sp + 4) & 0xFFFF
+        s.cs = ret_cs
+        s.ip = ret_ip
+
+    return island
+
+
 # Registry of (segment index, entry offset, signature, island factory, name).
 # Each factory takes (machine, off) and returns the hook fn.
 _ISLANDS = [
@@ -261,6 +314,9 @@ _ISLANDS = [
      lambda machine, off: _make_unpack_island(machine), "_Unpack"),
     (BYTECOPY_SEG_INDEX, BYTECOPY_OFF, BYTECOPY_SIG,
      lambda machine, off: _make_bytecopy_island(machine), "bytecopy"),
+    (MAKETABLE4X4_SEG_INDEX, MAKETABLE4X4_OFF, MAKETABLE4X4_SIG,
+     lambda machine, off: _make_maketable4x4_island(machine),
+     "_Windows_MakeTable4x4"),
 ]
 
 

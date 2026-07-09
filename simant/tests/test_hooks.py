@@ -79,7 +79,7 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
     hk = runtime.create_machine()
     hk.cpu.trace_enabled = False
-    assert hooks.install(hk) == 3               # __aFuldiv + _Unpack + bytecopy
+    assert hooks.install(hk) == 4               # + _Unpack, bytecopy, MakeTable4x4
     isl = _run_island(hk, dividend, divisor)
 
     assert asm["ax"] | (asm["dx"] << 16) == (dividend // divisor) & 0xFFFFFFFF
@@ -89,8 +89,8 @@ def test_uldiv_island_matches_asm(dividend, divisor):
 
 def test_install_counts_and_verifies():
     m = runtime.create_machine()
-    assert hooks.install(m) == 3
-    assert runtime.install_hooks(runtime.create_machine()) == 3
+    assert hooks.install(m) == 4
+    assert runtime.install_hooks(runtime.create_machine()) == 4
 
 
 def _capture_unpack_output(with_island, max_calls, step_budget):
@@ -228,3 +228,61 @@ def test_bytecopy_island_matches_asm(src_seg, src_off, dst_seg, dst_off, n):
     isl = _run_bytecopy(True, src_seg, src_off, dst_seg, dst_off, n, pattern)
     assert isl[0] == asm[0], "copied bytes differ"
     assert isl[1] == asm[1], f"exit state differs: island {isl[1]} != asm {asm[1]}"
+
+
+# ---- _Windows_MakeTable4x4 (seg4:4674) ---------------------------------------
+def _run_maketable(with_island, count, tiles, table):
+    """Set up a synthetic call — source tiles at DS:SI, the 4x32-word colour
+    table at SS:0x1A56, dest band at ES:DI — run it (the ASM to the sentinel, or
+    the island in one step), and return the dest band bytes + the exit state
+    (which must show every register preserved)."""
+    m = runtime.create_machine()
+    m.cpu.trace_enabled = False
+    if with_island:
+        hooks.install(m)
+    s = m.cpu.s
+    s.sp = 0xFF00                                # high, clear of the 0x1A56 table
+    src_seg, src_off = 0x7000, 0x0000
+    dst_seg, dst_off = 0x7100, 0x0000
+    for i, t in enumerate(tiles):
+        m.mem.wb(src_seg, (src_off + i) & 0xFFFF, t)
+    for row in range(4):
+        for t in range(32):
+            m.mem.ww(s.ss, (0x1A56 + row * 0x40 + t * 2) & 0xFFFF, table[row][t])
+    # marker registers so the oracle also proves full preservation
+    s.ax, s.bx, s.cx, s.dx = 0xA1A1, 0x1111, 0xC1C1, 0xD1D1
+    s.si, s.di, s.bp = 0x2222, 0x3333, 0x4444
+    s.cs, s.ip = m.seg_bases[hooks.MAKETABLE4X4_SEG_INDEX], hooks.MAKETABLE4X4_OFF
+    sp = s.sp
+    for v in (count, dst_seg, dst_off, src_seg, src_off, SENT_CS, SENT_IP):
+        sp = (sp - 2) & 0xFFFF
+        m.mem.ww(s.ss, sp, v & 0xFFFF)
+    s.sp = sp
+    if with_island:
+        m.cpu.step()
+    else:
+        for _ in range(count * 20 + 300):
+            m.cpu.step()
+            if (s.cs & 0xFFFF, s.ip & 0xFFFF) == (SENT_CS, SENT_IP):
+                break
+        else:
+            raise AssertionError("ASM _Windows_MakeTable4x4 did not return")
+    assert (s.cs & 0xFFFF, s.ip & 0xFFFF) == (SENT_CS, SENT_IP)
+    stride = 2 * count
+    dst_lin = m.mem._xlat(dst_seg, dst_off)
+    band = bytes(m.mem.data[dst_lin:dst_lin + 4 * stride])
+    regs = dict(ax=s.ax, bx=s.bx, cx=s.cx, dx=s.dx, si=s.si, di=s.di,
+                bp=s.bp, sp=s.sp, ds=s.ds, es=s.es)
+    return band, regs
+
+
+@pytest.mark.parametrize("count", [1, 4, 16, 128])
+def test_maketable4x4_island_matches_asm(count):
+    tiles = [(i * 7 + 3) & 0x0F for i in range(count)]
+    # distinct per-row words so a per-row-lookup bug cannot hide
+    table = [[((row << 12) | (t << 4) | (t ^ row)) & 0xFFFF for t in range(32)]
+             for row in range(4)]
+    asm = _run_maketable(False, count, tiles, table)
+    isl = _run_maketable(True, count, tiles, table)
+    assert isl[0] == asm[0], f"count={count}: band bytes differ"
+    assert isl[1] == asm[1], f"count={count}: exit state differs {isl[1]} != {asm[1]}"
