@@ -80,6 +80,8 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         61: "ScrollWindow",
         126: "InvalidateRgn",
         128: "ValidateRgn",
+        129: "GetClassWord",
+        130: "SetClassWord",
         244: "EqualRect",
         6: "PostQuitMessage",
         10: "SetTimer",

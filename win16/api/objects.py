@@ -59,6 +59,10 @@ class WndClass:
     h_cursor: int
     h_background: int
     menu_name: str | int | None
+    # cbClsExtra bytes of per-class storage (GetClassWord/SetClassWord positive
+    # index); the count is `cls_extra`.  Allocated lazily so old constructors
+    # (with cls_extra=0) need no change.
+    class_extra: bytearray = field(default_factory=bytearray)
     handle: int = 0
 
 

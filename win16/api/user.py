@@ -352,6 +352,7 @@ def install(api: ApiRegistry) -> None:
             cls_extra=rw(6), wnd_extra=rw(8), h_instance=rw(10),
             h_icon=rw(12), h_cursor=rw(14), h_background=rw(16),
             menu_name=_resource_name(ctx, menu_ptr) if menu_ptr else None,
+            class_extra=bytearray(rw(6)),
         )
         sys.classes[name] = cls
         sys.handles.add(cls)
@@ -929,6 +930,43 @@ def install(api: ApiRegistry) -> None:
         mem.ww(seg, off + 22, 0)
         mem.ww(seg, off + 24, 0)
         return 1
+
+    # GetClassWord/SetClassWord: negative index = a WNDCLASS field (GCW_*);
+    # non-negative index = a WORD in the class's cbClsExtra bytes.  SimAnt reads
+    # these while hit-testing a right-click.
+    _GCW = {-10: "h_background", -12: "h_cursor", -14: "h_icon",
+            -16: "h_instance", -18: "wnd_extra", -20: "cls_extra", -26: "style"}
+
+    @api.register("USER", 129, args="word s_word")      # GetClassWord(hwnd, index)
+    def GetClassWord(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        cls = win.wndclass
+        idx = _signed(ctx.args[1])
+        if idx in _GCW:
+            return getattr(cls, _GCW[idx]) & 0xFFFF
+        if idx >= 0 and idx + 2 <= len(cls.class_extra):
+            return cls.class_extra[idx] | (cls.class_extra[idx + 1] << 8)
+        return 0
+
+    @api.register("USER", 130, args="word s_word word")  # SetClassWord(hwnd,index,val)
+    def SetClassWord(ctx: CallContext) -> int:
+        win = _sys(ctx).handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            return 0
+        cls = win.wndclass
+        idx, val = _signed(ctx.args[1]), ctx.args[2] & 0xFFFF
+        if idx in _GCW:
+            old = getattr(cls, _GCW[idx]) & 0xFFFF
+            setattr(cls, _GCW[idx], val)
+            return old
+        if idx >= 0 and idx + 2 <= len(cls.class_extra):
+            old = cls.class_extra[idx] | (cls.class_extra[idx + 1] << 8)
+            cls.class_extra[idx] = val & 0xFF
+            cls.class_extra[idx + 1] = (val >> 8) & 0xFF
+            return old
+        return 0
 
     @api.register("USER", 403, args="str word")         # UnregisterClass(name, hInst)
     def UnregisterClass(ctx: CallContext) -> int:
