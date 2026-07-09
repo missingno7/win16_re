@@ -102,14 +102,34 @@ class WindowView:
 
         self._menu_sig = None                   # rebuild the menubar when it changes
 
+        WS_THICKFRAME, WS_SYSMENU = 0x00040000, 0x00080000
+        WS_MAXIMIZEBOX = 0x00010000
+        self._is_frame = win.wndclass.menu_name is not None or win.parent == 0
+        # A window's own frame chrome mirrors its Win16 styles: WS_THICKFRAME =>
+        # user-resizable (the OS gives resize handles + the maximize button when
+        # WS_MAXIMIZEBOX is set too); WS_SYSMENU => a close button.  SimAnt's
+        # in-game panels ("Caste Control" etc.) are fixed+closable; its "SimAnt -
+        # Quick Game" view is resizable+maximizable.
+        self._can_resize = bool(win.style & WS_THICKFRAME)
+        self._can_close = bool(win.style & WS_SYSMENU)
+
         self.top = tk.Toplevel(app.root)
         self.top.title(win.title or win.wndclass.name)
-        self.top.resizable(False, False)        # true resize: a follow-up
+        self.top.resizable(self._can_resize, self._can_resize)
         w, h = win.client_size
         self.canvas = tk.Canvas(self.top, width=w * self.scale,
                                 height=h * self.scale, highlightthickness=0,
                                 bg="black")
-        self.canvas.pack()
+        self._resize_after = None
+        if self._can_resize:
+            # The canvas fills the frame; dragging the frame resizes the Win16
+            # window (client = canvas/scale) and fires WM_SIZE so the game
+            # re-lays-out — SimAnt is resolution-adaptive.  Debounced so a drag
+            # doesn't post a WM_SIZE per pixel.
+            self.canvas.pack(fill="both", expand=True)
+            self.canvas.bind("<Configure>", self._on_configure)
+        else:
+            self.canvas.pack()
         # "main" = carries a menu bar (from a MENU resource OR built at runtime
         # via CreateMenu/AppendMenu, like SimAnt).  Detected live in sync() too,
         # since SetMenu may land after this view is created.
@@ -120,7 +140,16 @@ class WindowView:
         self._build_menubar()
         self._place()
         self._bind_input()
-        self.top.protocol("WM_DELETE_WINDOW", app.on_close)
+        # Closing the main frame quits; closing an in-game panel just sends it
+        # WM_CLOSE (the game hides/destroys it) — like a real window's close box.
+        self.top.protocol("WM_DELETE_WINDOW", self._on_close_box)
+
+    def _on_close_box(self) -> None:
+        WM_CLOSE = 0x0010
+        if self.is_main or not self._can_close:
+            self.app.on_close()
+        else:
+            self.app.driver.post_input(self.win.handle, WM_CLOSE, 0, 0)
 
     def _has_menu(self) -> bool:
         if self.win.wndclass.menu_name is not None:
@@ -316,6 +345,25 @@ class WindowView:
         lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
         self.app.driver.post_input(self.win.handle, msg, mk, lparam)
 
+    # -- resize (WS_THICKFRAME windows) ---------------------------------------
+    def _on_configure(self, event) -> None:
+        if self._resize_after is not None:
+            self.top.after_cancel(self._resize_after)
+        self._resize_after = self.top.after(120, self._apply_resize)
+
+    def _apply_resize(self) -> None:
+        self._resize_after = None
+        cw = max(self.canvas.winfo_width() // self.scale, 1)
+        ch = max(self.canvas.winfo_height() // self.scale, 1)
+        win = self.win
+        if (cw, ch) == (win.w, win.h):
+            return
+        WM_SIZE = 0x0005
+        win.w, win.h = cw, ch
+        win._surface = None                     # reallocate at the new client size
+        self.app.driver.post_input(win.handle, WM_SIZE, 0,
+                                   ((ch & 0xFFFF) << 16) | (cw & 0xFFFF))
+
     # -- per-tick sync ---------------------------------------------------------
     def _composited(self):
         """The image to display: this (top-level) window with its WS_CHILD
@@ -357,7 +405,8 @@ class WindowView:
 
     def _redraw(self, surf) -> None:
         w, h = self.win.client_size
-        if surf.w == w and surf.h == h and int(self.canvas["width"]) != w * self.scale:
+        if not self._can_resize and surf.w == w and surf.h == h \
+                and int(self.canvas["width"]) != w * self.scale:
             self.canvas.config(width=w * self.scale, height=h * self.scale)
         try:
             img = Image.frombytes("RGB", (surf.w, surf.h), bytes(surf.pixels))

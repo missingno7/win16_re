@@ -93,10 +93,15 @@ def is_child(window) -> bool:
 
 
 def top_level_windows(sysobj) -> list:
-    """Visible windows that are NOT children of another window (the frames a
-    host should present; their children composite into them)."""
+    """Visible windows the host should present as their OWN OS window: those
+    parented to the desktop (parent == 0).  This includes SimAnt's in-game
+    control panels ("Caste Control", the resizable "SimAnt - Quick Game" view,
+    ...), which are WS_CHILD|WS_CAPTION but created with a NULL parent — i.e.
+    top-level framed windows, not children of the main frame.  Windows parented
+    to another window composite INTO it instead.  The desktop pseudo-window is
+    never presented."""
     return [w for w in sysobj.windows
-            if w.visible and not is_child(w)]
+            if w.visible and w.parent == 0 and w.wndclass.name != "#desktop"]
 
 
 def tree_version(sysobj, window) -> int:
