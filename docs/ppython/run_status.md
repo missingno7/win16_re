@@ -1,5 +1,33 @@
 # Paulie Python — run status (newest on top)
 
+## 2026-07-09 — SimAnt is in-game and the sim runs; panels get title bars; more USER gaps
+- **The simulation is ALIVE.** With the x87 completion (dos_re) + the GetTickCount
+  wall-clock/instruction-floor fix landed, Quick Game reaches in-game and the ants
+  *move* (owner-confirmed, snapshot `snap_160504`) — just very slowly (each sim tick
+  runs inside a TimerProc callback through call_far; perf is the next island, not a
+  correctness bug).
+- **Closed three more in-game USER gaps:**
+  - `USER.104 MessageBeep` — a UI cue on a click; returns TRUE (host beep not modelled).
+  - `USER.272 IsZoomed` — hit on the in-game window-resize WM_SIZE path; returns the
+    window's tracked `maximized` flag.
+  - (both added to `ordinals.py`.)
+- **Panels are real windows now (chrome).** The in-game control panels ("Caste
+  Control", "Behavior Control", "Black Nest View") are `WS_CHILD | WS_CAPTION |
+  WS_SYSMENU` composited INTO the main frame — so the host WM gives them no chrome and
+  they read as flat rectangles ("no handles").  `compositor.py` now paints a Win3.1
+  title bar (blue bar, white title, grey system box, min/max boxes per style bits) on
+  any composited child with the full WS_CAPTION bits.  **Caveat:** overlay only — we
+  still don't inset the client (`Window.client_size == window rect`), so the caption
+  covers the child's top strip.  A real non-client model (GetClientRect inset +
+  compositor reclaims the non-client + coordinate-mapping offset for captioned
+  children) is the clean fix if that coverage matters; deferred because it touches the
+  in-game mouse hit-testing that currently works.
+- **Diagnostic lesson:** an earlier `log_createwin` probe mislabelled the CreateWindow
+  MENU arg (`args[8]`) as the parent (`args[7]`), which is why the panels looked like
+  NULL-parent top-level windows.  They are real children; `compositor.top_level_windows`
+  docstring's "created with a NULL parent" claim is stale — the parent==0 selection is
+  still correct for genuine top-level windows, but the SimAnt panels do NOT hit it.
+
 ## 2026-07-09 — dos_re is now a real git submodule (was an undeclared sibling checkout)
 - **Owner caught it:** win16_re silently required `D:\Games\DOS\dos_re` to exist on
   disk (hardcoded default in each package's `_env.py`) — an unversioned, invisible-
