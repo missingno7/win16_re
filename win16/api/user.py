@@ -1251,6 +1251,36 @@ def install(api: ApiRegistry) -> None:
         sys.handles.remove(win.handle)
         return 1
 
+    @api.register("USER", 421, args="ptr str ptr")      # wvsprintf
+    def wvsprintf(ctx: CallContext) -> int:             # (lpOutput, lpFmt, lpArglist)
+        """Format `lpFmt` into `lpOutput`, pulling arguments sequentially from
+        the caller's varargs block at `lpArglist`.  Returns the character count
+        written, excluding the terminating NUL (the Win16 contract)."""
+        from win16.wsprintf import format_win16
+        out_ptr, fmt_ptr, arg_ptr = ctx.args
+        mem = ctx.mem
+        arg_seg, arg_off = (arg_ptr >> 16) & 0xFFFF, arg_ptr & 0xFFFF
+        cursor = [arg_off]
+
+        def next_word() -> int:
+            v = mem.rw(arg_seg, cursor[0] & 0xFFFF)
+            cursor[0] = (cursor[0] + 2) & 0xFFFF
+            return v
+
+        def next_dword() -> int:
+            lo, hi = next_word(), next_word()
+            return lo | (hi << 16)
+
+        def read_far_string(seg: int, off: int) -> bytes:
+            return ctx.read_string(((seg & 0xFFFF) << 16) | (off & 0xFFFF))
+
+        text = format_win16(ctx.read_string(fmt_ptr), next_word, next_dword,
+                            read_far_string, ctx.cpu.s.ds & 0xFFFF)
+        out_seg, out_off = (out_ptr >> 16) & 0xFFFF, out_ptr & 0xFFFF
+        for i, b in enumerate(text + b"\0"):
+            mem.wb(out_seg, (out_off + i) & 0xFFFF, b)
+        return len(text)
+
     @api.register("USER", 1, args="word str str word")  # MessageBox
     def MessageBox(ctx: CallContext) -> int:            # (hwnd, text, caption, type)
         sys = _sys(ctx)

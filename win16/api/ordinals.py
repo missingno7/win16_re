@@ -167,6 +167,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         404: "GetClassInfo",
         414: "ModifyMenu",
         420: "wsprintf",
+        421: "wvsprintf",
     },
     "GDI": {
         1: "SetBkColor",
