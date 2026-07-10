@@ -191,7 +191,16 @@ class ApiRegistry:
             args = read_pascal_args(cpu, entry.arg_sizes or [])
             ctx = CallContext(cpu, self, module, ordinal, entry.name, args)
             self.call_log.append(f"{label}{args!r}")
-            result = entry.handler(ctx)
+            # Publish this API frame for call_far's resumable-callback record
+            # (win16/callback.py): a callback dispatched by this handler needs
+            # the API's name + argbytes to complete the call if a snapshot
+            # parks inside it.  Saved/restored so nested dispatches stack.
+            prev_api = getattr(cpu, "win16_current_api", ("?", 0))
+            cpu.win16_current_api = (entry.name, sum(entry.arg_sizes or []))
+            try:
+                result = entry.handler(ctx)
+            finally:
+                cpu.win16_current_api = prev_api
             ax = dx = None
             if entry.ret == "void":
                 if result is not None:

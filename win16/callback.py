@@ -11,6 +11,22 @@ of a per-instruction Python loop (SimAnt's ~59fps sim tick runs entirely inside
 a TimerProc callback, so the per-step loop made in-game unplayably slow AND
 un-pausable).  Between chunks an optional `yield_check` runs, so a long callback
 stays responsive (snapshot pause / host input) instead of freezing the UI.
+
+## Resuming a snapshot taken INSIDE a callback
+
+An interactive snapshot (F9) parks at an instruction-chunk boundary, which for
+an in-game machine is usually INSIDE a long TimerProc callback — the Python
+call_far frame that dispatched it is not part of the snapshot.  What remains
+to be done when that callback eventually far-returns is, for the APIs a game
+parks under (DispatchMessage's TimerProc/WndProc branches, SendMessage), purely
+mechanical VM work: the callback's own RETF already restored SP to the API
+call frame, and the API's result IS the callback's AX/DX verbatim — so all the
+lost Python frame owed the VM is `retf <api argbytes>` with registers passed
+through.  call_far therefore keeps a serializable record of every active frame
+(`cpu.win16_callback_frames`); a snapshot saves them, and a resumed machine
+replays each pending return at the sentinel (`cpu.win16_orphan_frames`) — see
+_return_hook.  APIs with Python-side post-work after the callback are NOT
+resumable this way and fail loudly by name.
 """
 from __future__ import annotations
 
@@ -19,9 +35,19 @@ _CHUNK = 8192                   # steps between yield_check / max-step checks
 #   Small so the interactive driver's yield_check refreshes the wall clock often
 #   enough to pace a frame-timed callback (SimAnt's sim tick) to real time.
 
+# APIs whose handler returns the callback's result verbatim with no Python
+# post-work — the only ones an orphaned (resumed-from-snapshot) callback can
+# return through.  Grown on evidence, never speculatively.
+_ORPHAN_RESUMABLE = {"DispatchMessage", "SendMessage"}
+
 
 class CallbackOverrun(RuntimeError):
     pass
+
+
+class OrphanReturnError(RuntimeError):
+    """A resumed snapshot's parked callback returned through an API whose
+    continuation cannot be reconstructed VM-side."""
 
 
 class _CallbackReturn(Exception):
@@ -30,7 +56,29 @@ class _CallbackReturn(Exception):
 
 
 def _return_hook(cpu):
-    raise _CallbackReturn()
+    if getattr(cpu, "win16_callback_frames", None):
+        raise _CallbackReturn()          # a live call_far is waiting for this
+    orphans = getattr(cpu, "win16_orphan_frames", None)
+    if orphans:
+        # A callback that was parked in a snapshot has just far-returned; the
+        # Python frame that dispatched it is gone.  Its RETF already restored
+        # SP to the API call frame — finish the API: retf <argbytes>, with the
+        # callback's AX/DX passing through as the API result.
+        fr = orphans.pop()
+        if fr["api"] not in _ORPHAN_RESUMABLE:
+            raise OrphanReturnError(
+                f"resumed callback returned through {fr['api']!r}, which has "
+                f"Python-side post-work — not resumable from a snapshot")
+        if fr.get("sp") is not None and (cpu.s.sp & 0xFFFF) != fr["sp"]:
+            raise OrphanReturnError(
+                f"orphaned {fr['api']} return: SP {cpu.s.sp:04X} != recorded "
+                f"{fr['sp']:04X} (wrong argument pop?)")
+        from win16.api.core import ret_far
+        ret_far(cpu, fr["argbytes"])     # AX/DX stay = the callback's result
+        return
+    raise OrphanReturnError(
+        "callback far-returned to the sentinel with no pending frame — "
+        "snapshot taken before callback-frame recording?  Re-take it.")
 
 
 def _install_return_hook(cpu, thunk_seg: int) -> None:
@@ -64,6 +112,15 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
     push(CALLBACK_RET_IP)
     s.cs, s.ip = seg & 0xFFFF, off & 0xFFFF
 
+    # The serializable record of this frame: everything a resumed snapshot
+    # needs to complete the API this callback was dispatched from (the api
+    # name + argbytes come from the dispatching API entry, via core.dispatch).
+    api_name, api_argbytes = getattr(cpu, "win16_current_api", ("?", 0))
+    frames = getattr(cpu, "win16_callback_frames", None)
+    if frames is None:
+        frames = cpu.win16_callback_frames = []
+    frames.append({"api": api_name, "argbytes": api_argbytes, "sp": saved_sp})
+
     steps = 0
     try:
         while steps < max_steps:
@@ -77,6 +134,8 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
             f"steps (at {s.cs:04X}:{s.ip:04X})")
     except _CallbackReturn:
         pass                    # far-returned to the sentinel — done
+    finally:
+        frames.pop()
 
     if (s.sp & 0xFFFF) != saved_sp:
         raise CallbackOverrun(

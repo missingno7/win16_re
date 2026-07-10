@@ -5,7 +5,8 @@ Unlike a DOS machine, part of the Win16 world state lives in Python objects
 therefore three artifacts in a directory:
 
     memory.bin      the VM memory image
-    state.json      CPUState (incl. x87), allocator frontier, metadata
+    state.json      CPUState (incl. x87), allocator frontier, pending
+                    callback-return frames, metadata
     system.pickle   the Win16System object graph (machine ref stripped)
 
 A snapshot can be taken at ANY CPU instruction boundary — memory + CPUState (SP/
@@ -69,6 +70,13 @@ def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
 
     (out / "memory.bin").write_bytes(bytes(machine.mem.data))
 
+    # Callback frames pending completion: orphans a resumed machine still owes
+    # (outermost first) plus the live call_far chain parked right now — a
+    # resumed snapshot must replay each of these returns at the sentinel
+    # (win16/callback.py: _return_hook).
+    pending_frames = (list(getattr(machine.cpu, "win16_orphan_frames", []))
+                      + list(getattr(machine.cpu, "win16_callback_frames", [])))
+
     meta = {
         "kind": "win16-snapshot",
         "version": 3,
@@ -77,6 +85,7 @@ def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
         "exe": machine.exe.path.name,
         "cpu": asdict(machine.cpu.s),
         "instruction_count": machine.cpu.instruction_count,
+        "callback_frames": pending_frames,
         "free_para": machine.free_para,
         # Game-observable polled input (GetAsyncKeyState reads these).
         "async_keys": sorted(machine.api.services.get("async_keys", set())),
@@ -121,9 +130,24 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     machine.cpu.instruction_count = meta["instruction_count"]
     machine.free_para = meta["free_para"]
 
+    # Re-arm the pending callback returns (a snapshot parked inside a
+    # TimerProc/WndProc callback): when each parked callback far-returns to
+    # the sentinel, the hook completes the API it was dispatched from.
+    # Pre-frame snapshots (no key) get an empty list — their parked callback
+    # returning raises loudly instead of executing thunk memory as code.
+    from win16.callback import _install_return_hook
+    from win16.loader import THUNK_SEG
+    machine.cpu.win16_orphan_frames = list(meta.get("callback_frames", []))
+    _install_return_hook(machine.cpu, THUNK_SEG)
+
     sysobj = pickle.loads((snap / "system.pickle").read_bytes())
     sysobj.machine = machine
     machine.api.services["system"] = sysobj
+    # Re-anchor the headless GetTickCount instruction floor to the SAVED clock
+    # (see Win16System.tick_count): the saved wall clock usually ran far ahead
+    # of instruction_count/INSTR_PER_MS, and an un-anchored floor would freeze
+    # the clock for tens of millions of instructions after resume.
+    sysobj.clock_floor_anchor = (meta["instruction_count"], sysobj.clock_ms)
 
     # Re-wire the selector heap: the VM Memory must consult the RESTORED
     # heap's selector->linear map (the pickle made a copy; the fresh boot's
