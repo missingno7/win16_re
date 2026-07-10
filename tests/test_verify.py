@@ -66,3 +66,21 @@ def test_strict_config_carries_the_cloner_through():
     sentinel = object()
     cfg = HookVerifierConfig.strict(hooks=set(), clone_runtime=sentinel)
     assert cfg.clone_runtime is sentinel
+
+
+def test_api_thunks_are_registered_passthrough_not_verified():
+    """The Windows API is hooks over INT3 tripwires: they are the environment,
+    not a replacement for game ASM. They must be passthrough (never verified,
+    never cleared from the ASM oracle) and the ASM side must keep them."""
+    from win16.loader import THUNK_SEG
+    m = _fake_machine()
+    thunk = (THUNK_SEG, 0x00F0)
+    game = (0x430E, 0xC256)
+    m.cpu.replacement_hooks[thunk] = lambda cpu: None
+    m.cpu.replacement_hooks[game] = lambda cpu: None
+
+    verifier = install_lift_verifier(m, _fake_machine, hooks={game})
+
+    assert thunk in m.cpu.hook_verifier_passthrough
+    assert game not in m.cpu.hook_verifier_passthrough, "the routine under test IS verified"
+    assert verifier.config.asm_keeps_passthrough_hooks,         "the ASM oracle must keep the OS hooks or it executes the tripwire"

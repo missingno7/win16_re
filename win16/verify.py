@@ -131,9 +131,18 @@ def clone_machine(machine, machine_factory: Callable[[], Any]):
         if key in machine.api.services:
             clone.api.services[key] = set(machine.api.services[key])
 
-    # Hook tables: the verifier pops the hook under test from the ASM side.
-    clone.cpu.replacement_hooks = dict(machine.cpu.replacement_hooks)
-    clone.cpu.hook_names = dict(machine.cpu.hook_names)
+    # Hook tables.  GAME-CODE hooks (islands, lifts) are pure functions of a CPU
+    # and port over.  API/callback hooks in the thunk segment must NOT: each
+    # closes over the machine that owns it, so copying the live ones would make
+    # the clone's Windows calls read and mutate the LIVE window graph.  The
+    # clone's own — installed by `machine_factory()` and bound to the clone —
+    # stay exactly where they are.
+    for key, hook in machine.cpu.replacement_hooks.items():
+        if key[0] != THUNK_SEG:
+            clone.cpu.replacement_hooks[key] = hook
+    for key, name in machine.cpu.hook_names.items():
+        if key[0] != THUNK_SEG:
+            clone.cpu.hook_names[key] = name
     clone.cpu.hook_verifier_passthrough = set(
         getattr(machine.cpu, "hook_verifier_passthrough", ()))
     clone.cpu.hook_verifier_live_passthrough_overrides = dict(
@@ -153,16 +162,27 @@ def install_lift_verifier(machine, machine_factory: Callable[[], Any], *,
     `hooks` are the (cs, ip) entries to verify; everything else installed on the
     machine keeps running unverified.  Returns the `HookVerifier` (its `.counts`
     is the per-hook proof tally).
+
+    The API thunks are registered as **passthrough**: they are the operating
+    system, not a Python stand-in for game ASM.  Nothing behind them but an INT3
+    tripwire, so they must neither be verified (there is no oracle) nor cleared
+    from the ASM side (the oracle would execute the tripwire).
     """
+    from win16.loader import THUNK_SEG
+
     rt = Win16Runtime.of(machine)
 
     def clone_runtime(src: Win16Runtime) -> Win16Runtime:
         return Win16Runtime.of(clone_machine(src.machine, machine_factory))
+
+    machine.cpu.hook_verifier_passthrough = {
+        key for key in machine.cpu.replacement_hooks if key[0] == THUNK_SEG}
 
     config = HookVerifierConfig.strict(
         hooks=set(hooks),
         asm_max_steps=asm_max_steps,
         asm_wall_timeout_s=asm_wall_timeout_s,
         clone_runtime=clone_runtime,
+        asm_keeps_passthrough_hooks=True,
     )
     return install_hook_verifier(rt, config, stops={})
