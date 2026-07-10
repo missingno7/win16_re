@@ -167,7 +167,18 @@ class Win16System:
         any).  Optionally removes it.  Returns the 6-tuple, or None if the
         queue holds no matching message.  Unlike GetMessage it never blocks and
         never synthesizes paint/timer — a game's peek loop must fall through to
-        its idle path (WaitMessage/GetMessage) when nothing is queued."""
+        its idle path (WaitMessage/GetMessage) when nothing is queued.
+
+        Every REMOVED message passes through the demo tap ("p" records), and a
+        replaying demo player serves this path entirely — a game that consumes
+        its whole timeline through PeekMessage (SimAnt in-game) records and
+        replays exactly like a GetMessage-pumping one."""
+        player = self.machine.api.services.get("demo_player")
+        if player is not None and hasattr(player, "next_peek"):
+            m = player.next_peek(self, hwnd_filter, lo, hi, remove)
+            if m is not None and remove and self.input_drainer is None:
+                self._note_input(m)             # feed polled state (mouse/keys)
+            return m
         if self.input_drainer is not None:
             self.input_drainer()            # make host input visible to the scan
         for i, m in enumerate(self.msg_queue):
@@ -179,6 +190,7 @@ class Win16System:
                 del self.msg_queue[i]
                 if self.input_drainer is None:      # else noted at drain time
                     self._note_input(m)             # feed polled state (mouse/keys)
+                self._record_peek(m, hwnd_filter, lo, hi)
             return m
         # A due WM_TIMER is discoverable by PeekMessage too, not only GetMessage.
         # SimAnt's sim tick (a SetTimer TimerProc) paces its frame by spinning on
@@ -189,8 +201,16 @@ class Win16System:
         if (lo or hi) and lo <= 0x0113 <= hi:
             tm = self._due_timer(hwnd_filter, remove)
             if tm is not None:
+                if remove:
+                    self._record_peek(tm, hwnd_filter, lo, hi)
                 return tm
         return None
+
+    def _record_peek(self, msg, hwnd_filter: int, lo: int, hi: int) -> None:
+        """Demo tap for a PeekMessage removal (see win16/demo.py)."""
+        recorder = self.machine.api.services.get("demo_recorder")
+        if recorder is not None:
+            recorder.peek(msg, (hwnd_filter, lo, hi))
 
     def _due_timer(self, hwnd_filter: int, remove: bool):
         """The earliest armed timer that is now due (by the GetTickCount clock:

@@ -1,21 +1,34 @@
 """Deterministic demos: record and replay the game's full input timeline.
 
-The Win16 analogue of dos_re's input demos.  The frame boundary is
-GetMessage: a demo records, in order, (a) every message GetMessage returned
-("m" records — WM_TIMER/WM_PAINT/input, with their virtual-clock stamps) and
-(b) every event a modal dialog loop consumed ("d" records).  Replaying feeds
-exactly that stream back, so a replay is bit-identical to the recorded run —
-including through dialogs.
+The Win16 analogue of dos_re's input demos.  The boundary is message
+CONSUMPTION: a demo records, in order, (a) every message GetMessage returned
+("m" records — WM_TIMER/WM_PAINT/input, with their virtual-clock stamps),
+(b) every message PeekMessage removed ("p" records, with the peek filter —
+an in-game loop that never calls GetMessage still consumes everything through
+these), and (c) every event a modal dialog loop consumed ("d" records).
+Replaying feeds exactly that stream back, so a replay is bit-identical to the
+recorded run — including through dialogs and peek-driven play.
 
 Divergence detection is structural and loud: if the machine asks for a
 message when the demo says a dialog event comes next (or vice versa, or the
-dialog name differs), the replay raises DemoDivergence immediately.
+dialog name differs), the replay raises DemoDivergence immediately.  A
+PeekMessage whose filter does not match the next "p" record simply misses
+(returns None) — the recorded run's miss-peeks were not recorded either, so
+the hit is served only to the exact filter that consumed it originally.
+
+A demo can be anchored to a machine snapshot: recording that started from a
+restored snapshot notes the snapshot's name and instruction count in the
+header, and a replay must resume the same snapshot before feeding the stream.
 
 Format: JSON lines.  Header, then one record per line:
-    {"kind": "win16-demo", "version": 1, "exe": "PYTHON.EXE"}
+    {"kind": "win16-demo", "version": 2, "exe": "SIMANTW.EXE",
+     "snapshot": "snap_114308" | null, "instruction": 17050442}
     {"t": "m", "v": [hwnd, msg, wparam, lparam, time, pt]}
+    {"t": "p", "v": [hwnd, msg, wparam, lparam, time, pt], "f": [hwnd, lo, hi]}
     {"t": "d", "dlg": "myd_high_scores", "v": ["command", 1, 0]}
     {"t": "quit"}          (the recorded session ended in WM_QUIT/None)
+
+Version 1 demos (no "p" records, no anchor fields) still replay.
 """
 from __future__ import annotations
 
@@ -32,11 +45,13 @@ class DemoEnded(RuntimeError):
 
 
 class DemoRecorder:
-    def __init__(self, path: str | Path, exe_name: str) -> None:
+    def __init__(self, path: str | Path, exe_name: str, *,
+                 snapshot: str | None = None, instruction: int = 0) -> None:
         self.path = Path(path)
         self._fh = open(self.path, "w", encoding="ascii")
         self._fh.write(json.dumps(
-            {"kind": "win16-demo", "version": 1, "exe": exe_name}) + "\n")
+            {"kind": "win16-demo", "version": 2, "exe": exe_name,
+             "snapshot": snapshot, "instruction": instruction}) + "\n")
         self.records = 0
 
     def message(self, msg) -> None:
@@ -45,6 +60,14 @@ class DemoRecorder:
             self._fh.write('{"t": "quit"}\n')
         else:
             self._fh.write(json.dumps({"t": "m", "v": list(msg)}) + "\n")
+        self._fh.flush()
+        self.records += 1
+
+    def peek(self, msg, filt: tuple[int, int, int]) -> None:
+        """Tap for every message PeekMessage REMOVED (PM_REMOVE hits only —
+        NOREMOVE glances don't consume and are not part of the timeline)."""
+        self._fh.write(json.dumps(
+            {"t": "p", "v": list(msg), "f": list(filt)}) + "\n")
         self._fh.flush()
         self.records += 1
 
@@ -61,7 +84,8 @@ class DemoRecorder:
 class DemoPlayer:
     """Serves the recorded stream back.  Install as
     `system.message_source = player.next_message` and
-    `services["demo_player"] = player` (the dialog engine consults it)."""
+    `services["demo_player"] = player` (the dialog engine and the PeekMessage
+    path consult it)."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -70,6 +94,8 @@ class DemoPlayer:
         if header.get("kind") != "win16-demo":
             raise ValueError(f"{path}: not a win16 demo")
         self.exe = header.get("exe")
+        self.snapshot = header.get("snapshot")          # anchor, or None
+        self.instruction = header.get("instruction", 0)
         self.records = [json.loads(line) for line in lines[1:] if line.strip()]
         self.pos = 0
 
@@ -95,6 +121,24 @@ class DemoPlayer:
         self.pos += 1
         msg = tuple(rec["v"])
         sysobj.clock_ms = max(sysobj.clock_ms, msg[4])
+        return msg
+
+    def next_peek(self, sysobj, hwnd_filter: int, lo: int, hi: int,
+                  remove: bool):
+        """What PeekMessage sees on replay: the next "p" record IF this call's
+        filter is the one that consumed it in the recording, else a miss
+        (None).  A NOREMOVE glance serves the record without consuming it.
+        Never raises on exhaustion — an empty queue is a valid peek answer
+        (the recorded run's misses were never recorded either)."""
+        if self.exhausted:
+            return None
+        rec = self.records[self.pos]
+        if rec["t"] != "p" or rec.get("f") != [hwnd_filter, lo, hi]:
+            return None
+        msg = tuple(rec["v"])
+        if remove:
+            self.pos += 1
+            sysobj.clock_ms = max(sysobj.clock_ms, msg[4])
         return msg
 
     def next_dialog_event(self, dlg_name: str):
