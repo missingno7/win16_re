@@ -128,10 +128,14 @@ class DemoPlayer:
         """What PeekMessage sees on replay: the next "p" record IF this call's
         filter is the one that consumed it in the recording, else a miss
         (None).  A NOREMOVE glance serves the record without consuming it.
-        Never raises on exhaustion — an empty queue is a valid peek answer
-        (the recorded run's misses were never recorded either)."""
+        A peek after the stream is exhausted raises DemoEnded — the peek-driven
+        game's way of asking for input the demo doesn't have (a peek-spinning
+        game never calls GetMessage, so this is its only end-of-demo signal;
+        the stop point is deterministic: the first peek after the last record)."""
         if self.exhausted:
-            return None
+            raise DemoEnded(
+                f"demo exhausted after {self.pos} records — machine peeked "
+                f"for more input")
         rec = self.records[self.pos]
         if rec["t"] != "p" or rec.get("f") != [hwnd_filter, lo, hi]:
             return None

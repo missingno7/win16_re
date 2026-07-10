@@ -54,7 +54,10 @@ def test_roundtrip_m_and_p_records(tmp_path):
     assert player.exhausted
 
 
-def test_peek_never_raises_on_exhaustion(tmp_path):
+def test_exhausted_stream_ends_the_replay_on_either_path(tmp_path):
+    # A peek-driven game never calls GetMessage, so a peek past the last
+    # record must end the replay just like GetMessage does — deterministically
+    # at the first ask-for-more.
     player = DemoPlayer(_record(tmp_path))
     sysobj = SimpleNamespace(clock_ms=0)
     while not player.exhausted:
@@ -62,9 +65,10 @@ def test_peek_never_raises_on_exhaustion(tmp_path):
             player.next_peek(sysobj, *tuple(player.records[player.pos]["f"]), True)
         else:
             player.next_message(sysobj)
-    assert player.next_peek(sysobj, 0, 0, 0, True) is None   # empty queue, not an error
     with pytest.raises(DemoEnded):
-        player.next_message(sysobj)                          # GetMessage IS an error
+        player.next_peek(sysobj, 0, 0, 0, True)
+    with pytest.raises(DemoEnded):
+        player.next_message(sysobj)
 
 
 def test_getmessage_diverges_on_pending_peek_record(tmp_path):
