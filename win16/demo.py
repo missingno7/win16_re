@@ -48,6 +48,7 @@ class DemoRecorder:
     def __init__(self, path: str | Path, exe_name: str, *,
                  snapshot: str | None = None, instruction: int = 0) -> None:
         self.path = Path(path)
+        self.snapshot = snapshot            # the anchor's name (or None)
         self._fh = open(self.path, "w", encoding="ascii")
         self._fh.write(json.dumps(
             {"kind": "win16-demo", "version": 2, "exe": exe_name,
