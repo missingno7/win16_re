@@ -435,6 +435,52 @@ def install(api: ApiRegistry) -> None:
         ctx.mem.load(seg, off, path + b"\x00")
         return len(path)
 
+    # -- dynamic library loading (KERNEL 95/96/97/47) ----------------------
+    # A program can LoadLibrary a DLL and GetProcAddress its exports at runtime
+    # instead of static-linking it.  SimAnt does this for its MIDI music engine
+    # (mmsystem.dll -> midiOutGetNumDevs / mciSendCommand).  We "provide" only
+    # the DLLs whose exports we implement as named procs; others honestly report
+    # not-found (HINSTANCE < 32) so the program falls back.
+    _SUPPORTED_DLLS = {"MMSYSTEM"}          # basename, upper, no extension
+
+    def _dll_key(name: str) -> str:
+        return name.replace("/", "\\").split("\\")[-1].upper().removesuffix(".DLL")
+
+    @api.register("KERNEL", 95, name="LoadLibrary", args="str")   # LoadLibrary(lpszLib)
+    def LoadLibrary(ctx: CallContext) -> int:
+        sys: Win16System = ctx.registry.services["system"]
+        name = ctx.read_string(ctx.args[0]).decode("latin-1")
+        key = _dll_key(name)
+        libs = ctx.registry.services.setdefault("libraries", {})     # key -> hinst
+        if key not in _SUPPORTED_DLLS:
+            return 2                    # ERROR_FILE_NOT_FOUND (< 32) — not provided
+        if key not in libs:
+            libs[key] = 0x0100 + len(libs)        # any HINSTANCE >= 32
+        return libs[key]
+
+    @api.register("KERNEL", 96, name="FreeLibrary", args="word")  # FreeLibrary(hinst)
+    def FreeLibrary(ctx: CallContext) -> int:
+        return 1
+
+    @api.register("KERNEL", 47, name="GetModuleHandle", args="str")  # GetModuleHandle(lpsz)
+    def GetModuleHandle(ctx: CallContext) -> int:
+        key = _dll_key(ctx.read_string(ctx.args[0]).decode("latin-1"))
+        return ctx.registry.services.get("libraries", {}).get(key, 0)
+
+    @api.register("KERNEL", 50, name="GetProcAddress", args="word str", ret="long")
+    def GetProcAddress(ctx: CallContext) -> int:      # (hinst, lpszProc) -> FARPROC
+        hinst, proc_ptr = ctx.args
+        libs = ctx.registry.services.get("libraries", {})
+        key = next((k for k, h in libs.items() if h == hinst), None)
+        if key is None:
+            return 0
+        # lpszProc is a string (HIWORD != 0); ordinal lookup (HIWORD == 0) is
+        # unused by any program yet.
+        if (proc_ptr >> 16) == 0:
+            return 0
+        name = ctx.read_string(proc_ptr).decode("latin-1")
+        return ctx.registry.mint_proc_thunk(key, name)
+
     @api.register("KERNEL", 5, args="word word")        # LocalAlloc(flags, size)
     def LocalAlloc(ctx: CallContext) -> int:
         from .localheap import LMEM_ZEROINIT

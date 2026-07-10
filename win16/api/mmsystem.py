@@ -15,6 +15,15 @@ SND_NOSTOP = 0x0010
 
 
 def install(api: ApiRegistry) -> None:
+    # -- dynamically-resolved procs (GetProcAddress on a LoadLibrary'd
+    #    mmsystem.dll) — SimAnt's MIDI music engine resolves these by name.
+    @api.register_proc("MMSYSTEM", "midiOutGetNumDevs", ret="word")
+    def midiOutGetNumDevs(ctx: CallContext) -> int:
+        # Number of MIDI output devices.  Phase 1 reports 0 (no MIDI) so the
+        # game keeps its SOUND.DRV fallback; Phase 2 (the mciSendCommand engine)
+        # flips this to a real device once .mid playback is wired.
+        return 0
+
     @api.register("MMSYSTEM", 2, args="ptr word")       # sndPlaySound(lpszSound, flags)
     def sndPlaySound(ctx: CallContext) -> int:
         # Event-exact audio model (mirrors SOUND.DRV): every request is logged

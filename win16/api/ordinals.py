@@ -11,6 +11,10 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
     "KERNEL": {
         1: "FatalExit",
         3: "GetVersion",
+        47: "GetModuleHandle",
+        50: "GetProcAddress",
+        95: "LoadLibrary",
+        96: "FreeLibrary",
         57: "GetProfileInt",
         58: "GetProfileString",
         59: "WriteProfileString",

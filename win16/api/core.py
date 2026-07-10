@@ -107,6 +107,14 @@ class ApiRegistry:
         self.slots: dict[tuple[str, int], int] = {}      # -> thunk offset
         self.call_log: list[str] = []
         self.services: dict[str, object] = {}            # named backend objects
+        # By-NAME procs a program resolves at runtime via GetProcAddress
+        # (dynamically-loaded DLLs — e.g. SimAnt's mmsystem MIDI).  Each is
+        # handed back as a freshly-minted callable thunk (mint_proc_thunk).
+        self.named_procs: dict[tuple[str, str], ApiEntry] = {}
+        self._proc_thunks: dict[tuple[str, str], int] = {}
+        self._cpu = None
+        self._thunk_seg = 0
+        self._next_proc_off = 0
 
     # -- registration -----------------------------------------------------
     def register(self, module: str, ordinal: int, name: str | None = None,
@@ -157,6 +165,37 @@ class ApiRegistry:
     def register_equate(self, module: str, ordinal: int, value: int) -> None:
         self.equates[(module.upper(), ordinal)] = value & 0xFFFF
 
+    def register_proc(self, module: str, name: str, args: str = "", ret: str = "word"):
+        """Decorator: register a proc resolvable by NAME at runtime (via
+        GetProcAddress on a dynamically-loaded DLL).  Same pascal-arg contract
+        as register(); the handler is reached through a minted callable thunk."""
+        module = module.upper()
+        sizes = [ARG_SIZES[a] for a in args.split()] if args else []
+
+        def deco(fn):
+            self.named_procs[(module, name)] = ApiEntry(module, 0, name, fn, sizes, ret=ret)
+            return fn
+        return deco
+
+    def mint_proc_thunk(self, module: str, name: str) -> int:
+        """A far pointer (seg<<16 | off) to a thunk that dispatches to the named
+        proc, or 0 if we don't implement it (GetProcAddress returns NULL, and a
+        well-behaved program falls back).  Idempotent per (module, name)."""
+        key = (module.upper(), name)
+        if key not in self.named_procs:
+            return 0
+        off = self._proc_thunks.get(key)
+        if off is None:
+            off = self._next_proc_off
+            self._next_proc_off += self.SLOT_STRIDE
+            for i in range(self.SLOT_STRIDE):
+                self._cpu.mem.wb(self._thunk_seg, off + i, 0xCC)   # INT3 tripwire
+            self._cpu.replacement_hooks[(self._thunk_seg, off)] = \
+                self._make_named_dispatch(key)
+            self._cpu.hook_names[(self._thunk_seg, off)] = f"proc:{key[0]}.{name}"
+            self._proc_thunks[key] = off
+        return (self._thunk_seg << 16) | off
+
     # -- import resolution (loader-facing) ---------------------------------
     def resolve_import(self, module: str, ordinal: int):
         """-> ("equate", value) or ("thunk", slot_offset)."""
@@ -170,46 +209,67 @@ class ApiRegistry:
     # -- runtime dispatch ---------------------------------------------------
     def install(self, cpu, thunk_seg: int) -> None:
         """Register a replacement hook at every allocated thunk slot."""
+        self._cpu = cpu
+        self._thunk_seg = thunk_seg
+        # Runtime-minted GetProcAddress thunks live past the static import slots.
+        self._next_proc_off = len(self.slots) * self.SLOT_STRIDE
         for (module, ordinal), offset in self.slots.items():
             label = api_name(module, ordinal)
             cpu.replacement_hooks[(thunk_seg, offset)] = self._make_dispatch(module, ordinal)
             cpu.hook_names[(thunk_seg, offset)] = f"api:{label}"
+
+    def _gap(self, cpu, label: str):
+        ret_ip = cpu.mem.rw(cpu.s.ss, cpu.s.sp)
+        ret_cs = cpu.mem.rw(cpu.s.ss, (cpu.s.sp + 2) & 0xFFFF)
+        raise Win16ApiGap(
+            f"{label} called from {ret_cs:04X}:{ret_ip:04X} — not implemented")
+
+    def _invoke(self, cpu, entry: ApiEntry, label: str) -> None:
+        """Read pascal args, run the handler, and far-return with its result —
+        shared by static-ordinal and by-name (GetProcAddress) dispatch."""
+        if entry.raw:
+            self.call_log.append(label)
+            entry.handler(CallContext(cpu, self, entry.module, entry.ordinal, entry.name))
+            return
+        args = read_pascal_args(cpu, entry.arg_sizes or [])
+        ctx = CallContext(cpu, self, entry.module, entry.ordinal, entry.name, args)
+        self.call_log.append(f"{label}{args!r}")
+        # Publish this API frame for call_far's resumable-callback record
+        # (win16/callback.py): a callback dispatched by this handler needs the
+        # API's name + argbytes to complete the call if a snapshot parks inside
+        # it.  Saved/restored so nested dispatches stack.
+        prev_api = getattr(cpu, "win16_current_api", ("?", 0))
+        cpu.win16_current_api = (entry.name, sum(entry.arg_sizes or []))
+        try:
+            result = entry.handler(ctx)
+        finally:
+            cpu.win16_current_api = prev_api
+        ax = dx = None
+        if entry.ret == "void":
+            if result is not None:
+                raise ValueError(f"{label}: void API returned {result!r}")
+        elif result is None:
+            raise ValueError(f"{label}: {entry.ret} API returned None")
+        elif entry.ret == "word":
+            ax = result & 0xFFFF
+        else:  # long
+            ax, dx = result & 0xFFFF, (result >> 16) & 0xFFFF
+        ret_far(cpu, sum(entry.arg_sizes or []), ax=ax, dx=dx)
 
     def _make_dispatch(self, module: str, ordinal: int):
         def dispatch(cpu) -> None:
             entry = self.entries.get((module, ordinal))
             label = api_name(module, ordinal)
             if entry is None or entry.handler is None:
-                ret_ip = cpu.mem.rw(cpu.s.ss, cpu.s.sp)
-                ret_cs = cpu.mem.rw(cpu.s.ss, (cpu.s.sp + 2) & 0xFFFF)
-                raise Win16ApiGap(
-                    f"{label} called from {ret_cs:04X}:{ret_ip:04X} — not implemented")
-            if entry.raw:
-                self.call_log.append(label)
-                entry.handler(CallContext(cpu, self, module, ordinal, entry.name))
-                return
-            args = read_pascal_args(cpu, entry.arg_sizes or [])
-            ctx = CallContext(cpu, self, module, ordinal, entry.name, args)
-            self.call_log.append(f"{label}{args!r}")
-            # Publish this API frame for call_far's resumable-callback record
-            # (win16/callback.py): a callback dispatched by this handler needs
-            # the API's name + argbytes to complete the call if a snapshot
-            # parks inside it.  Saved/restored so nested dispatches stack.
-            prev_api = getattr(cpu, "win16_current_api", ("?", 0))
-            cpu.win16_current_api = (entry.name, sum(entry.arg_sizes or []))
-            try:
-                result = entry.handler(ctx)
-            finally:
-                cpu.win16_current_api = prev_api
-            ax = dx = None
-            if entry.ret == "void":
-                if result is not None:
-                    raise ValueError(f"{label}: void API returned {result!r}")
-            elif result is None:
-                raise ValueError(f"{label}: {entry.ret} API returned None")
-            elif entry.ret == "word":
-                ax = result & 0xFFFF
-            else:  # long
-                ax, dx = result & 0xFFFF, (result >> 16) & 0xFFFF
-            ret_far(cpu, sum(entry.arg_sizes or []), ax=ax, dx=dx)
+                self._gap(cpu, label)
+            self._invoke(cpu, entry, label)
+        return dispatch
+
+    def _make_named_dispatch(self, key: tuple[str, str]):
+        def dispatch(cpu) -> None:
+            entry = self.named_procs.get(key)
+            label = f"{key[0]}.{key[1]}"
+            if entry is None or entry.handler is None:
+                self._gap(cpu, label)
+            self._invoke(cpu, entry, label)
         return dispatch
