@@ -102,6 +102,9 @@ class InteractiveDriver:
         with self._cond:
             pending, self._input = self._input, []
         now = self.now_ms()
+        machine = getattr(self.sys, "machine", None)
+        recorder = (machine.api.services.get("demo_recorder")
+                    if machine is not None else None)
         for hwnd, msg, wparam, lparam in pending:
             m = (hwnd, msg, wparam, lparam, now, 0)
             self.sys.msg_queue.append(m)
@@ -111,6 +114,12 @@ class InteractiveDriver:
             # see the button release.  get_message/peek_message skip their own
             # _note_input while a drainer is attached (no double-note).
             self.sys._note_input(m)
+            if recorder is not None:
+                # The arrival note is part of the timeline ("a" record): a
+                # replay must make this polled state visible at the same spot
+                # (SimAnt's sim tick blocks on a GetAsyncKeyState tap that
+                # only ever arrives asynchronously).
+                recorder.async_note(m)
 
     def _next(self, sysobj):
         while True:

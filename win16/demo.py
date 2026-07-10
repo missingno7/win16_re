@@ -20,15 +20,26 @@ A demo can be anchored to a machine snapshot: recording that started from a
 restored snapshot notes the snapshot's name and instruction count in the
 header, and a replay must resume the same snapshot before feeding the stream.
 
+Polled input (GetAsyncKeyState / GetKeyState / GetCursorPos) is derived from
+input ARRIVAL, not consumption: the interactive driver notes each message's
+polled state the moment it arrives, because a game may poll inside a loop
+that isn't pumping (SimAnt's sim tick spins on GetAsyncKeyState(VK_LBUTTON)
+waiting for a click to interrupt the burst — consuming the click requires
+exiting that very loop).  A demo therefore records each arrival note as an
+"a" record at its position in the timeline; on replay the player applies all
+pending "a" records at every pump touchpoint (GetMessage / PeekMessage), and
+consumption-noting is suppressed exactly as it is live (see notes_input).
+
 Format: JSON lines.  Header, then one record per line:
-    {"kind": "win16-demo", "version": 2, "exe": "SIMANTW.EXE",
+    {"kind": "win16-demo", "version": 3, "exe": "SIMANTW.EXE",
      "snapshot": "snap_114308" | null, "instruction": 17050442}
     {"t": "m", "v": [hwnd, msg, wparam, lparam, time, pt]}
     {"t": "p", "v": [hwnd, msg, wparam, lparam, time, pt], "f": [hwnd, lo, hi]}
+    {"t": "a", "v": [hwnd, msg, wparam, lparam, time, pt]}   (arrival note)
     {"t": "d", "dlg": "myd_high_scores", "v": ["command", 1, 0]}
     {"t": "quit"}          (the recorded session ended in WM_QUIT/None)
 
-Version 1 demos (no "p" records, no anchor fields) still replay.
+Version 1/2 demos (no "p"/"a" records) still replay.
 """
 from __future__ import annotations
 
@@ -51,7 +62,7 @@ class DemoRecorder:
         self.snapshot = snapshot            # the anchor's name (or None)
         self._fh = open(self.path, "w", encoding="ascii")
         self._fh.write(json.dumps(
-            {"kind": "win16-demo", "version": 2, "exe": exe_name,
+            {"kind": "win16-demo", "version": 3, "exe": exe_name,
              "snapshot": snapshot, "instruction": instruction}) + "\n")
         self.records = 0
 
@@ -69,6 +80,13 @@ class DemoRecorder:
         NOREMOVE glances don't consume and are not part of the timeline)."""
         self._fh.write(json.dumps(
             {"t": "p", "v": list(msg), "f": list(filt)}) + "\n")
+        self._fh.flush()
+        self.records += 1
+
+    def async_note(self, msg) -> None:
+        """Tap for every input ARRIVAL note (the interactive drainer feeding
+        polled state — async keys / cursor — the moment input arrives)."""
+        self._fh.write(json.dumps({"t": "a", "v": list(msg)}) + "\n")
         self._fh.flush()
         self.records += 1
 
@@ -97,12 +115,27 @@ class DemoPlayer:
         self.exe = header.get("exe")
         self.snapshot = header.get("snapshot")          # anchor, or None
         self.instruction = header.get("instruction", 0)
+        # v3+ demos carry input-arrival notes ("a" records): polled input is
+        # noted from those, and the replay host must suppress consumption
+        # noting (install a no-op input_drainer) to match the live run.
+        self.notes_input = header.get("version", 1) >= 3
         self.records = [json.loads(line) for line in lines[1:] if line.strip()]
         self.pos = 0
 
     @property
     def exhausted(self) -> bool:
         return self.pos >= len(self.records)
+
+    def _apply_async(self, sysobj) -> None:
+        """Apply every pending input-arrival note: polled state (async keys /
+        cursor) becomes visible NOW, exactly as the live drainer made it
+        visible between consumptions.  Called at every pump touchpoint —
+        SimAnt's sim tick polls GetAsyncKeyState in a loop that also peeks,
+        so the note lands before the poll that acted on it live."""
+        while (self.pos < len(self.records)
+               and self.records[self.pos].get("t") == "a"):
+            sysobj._note_input(tuple(self.records[self.pos]["v"]))
+            self.pos += 1
 
     def _peek(self) -> dict:
         if self.exhausted:
@@ -111,6 +144,7 @@ class DemoPlayer:
         return self.records[self.pos]
 
     def next_message(self, sysobj):
+        self._apply_async(sysobj)
         rec = self._peek()
         if rec["t"] == "quit":
             self.pos += 1
@@ -133,6 +167,7 @@ class DemoPlayer:
         game's way of asking for input the demo doesn't have (a peek-spinning
         game never calls GetMessage, so this is its only end-of-demo signal;
         the stop point is deterministic: the first peek after the last record)."""
+        self._apply_async(sysobj)
         if self.exhausted:
             raise DemoEnded(
                 f"demo exhausted after {self.pos} records — machine peeked "
@@ -146,7 +181,9 @@ class DemoPlayer:
             sysobj.clock_ms = max(sysobj.clock_ms, msg[4])
         return msg
 
-    def next_dialog_event(self, dlg_name: str):
+    def next_dialog_event(self, dlg_name: str, sysobj=None):
+        if sysobj is not None:
+            self._apply_async(sysobj)
         rec = self._peek()
         if rec["t"] != "d" or rec["dlg"] != dlg_name:
             raise DemoDivergence(

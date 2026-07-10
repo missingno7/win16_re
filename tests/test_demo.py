@@ -98,6 +98,32 @@ def test_v1_demo_still_replays(tmp_path):
     player = DemoPlayer(path)
     sysobj = SimpleNamespace(clock_ms=0)
     assert player.snapshot is None
+    assert not player.notes_input                   # pre-v3: consumption-noted
     assert player.next_peek(sysobj, 0, 0, 0, True) is None   # "m" next: peek misses
     assert player.next_message(sysobj) == (1, 15, 0, 0, 5, 0)
     assert player.next_message(sysobj) is None
+
+
+def test_arrival_notes_apply_at_pump_touchpoints(tmp_path):
+    # An input ARRIVAL note ("a") must become visible to polled-input state at
+    # the next pump touchpoint, even when the next consumed record is a miss —
+    # SimAnt's sim tick spins on peek(WM_TIMER)+GetAsyncKeyState and needs the
+    # tap to arrive WITHOUT any message being consumable (the live drainer
+    # noted it asynchronously; the "a" record is that moment in the timeline).
+    path = tmp_path / "v3.jsonl"
+    rec = DemoRecorder(path, "GAME.EXE")
+    rec.peek(MSG_B, FILT_TIMER)
+    rec.async_note((330, 0x0201, 1, 0x00200020, 1020, 0))    # WM_LBUTTONDOWN arrives
+    rec.message(MSG_A)                                        # consumed later
+    rec.close()
+    player = DemoPlayer(path)
+    assert player.notes_input
+
+    noted = []
+    sysobj = SimpleNamespace(clock_ms=0, _note_input=lambda m: noted.append(m))
+    assert player.next_peek(sysobj, *FILT_TIMER, True) == MSG_B
+    assert noted == []                       # note not applied yet
+    # the spin's next peek MISSES (next consumable is "m") but applies the note
+    assert player.next_peek(sysobj, *FILT_TIMER, True) is None
+    assert noted == [(330, 0x0201, 1, 0x00200020, 1020, 0)]
+    assert player.next_message(sysobj) == MSG_A

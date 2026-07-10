@@ -143,6 +143,12 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     sysobj = pickle.loads((snap / "system.pickle").read_bytes())
     sysobj.machine = machine
     machine.api.services["system"] = sysobj
+    # `interactive` is HOST wiring like message_source/input_drainer: a live
+    # session pickles True, but a resumed machine is headless until a driver
+    # re-attaches (the driver sets it back).  Left True, tick_count() returns
+    # the bare frozen clock_ms — any GetTickCount busy-wait that runs without
+    # consuming messages (SimAnt's MAINWNDPROC drag loop) then spins forever.
+    sysobj.interactive = False
     # Re-anchor the headless GetTickCount instruction floor to the SAVED clock
     # (see Win16System.tick_count): the saved wall clock usually ran far ahead
     # of instruction_count/INSTR_PER_MS, and an un-anchored floor would freeze
