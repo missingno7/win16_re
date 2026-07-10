@@ -237,10 +237,20 @@ class Win16System:
         """The GetTickCount value, shared by USER.13 and the WM_TIMER clock so a
         busy-wait's clock and the timer it spins on stay consistent.  Interactive:
         the wall clock (clock_ms).  Headless: max(message clock, instruction
-        floor) — the floor keeps a message-less busy-wait progressing."""
+        floor) — the floor keeps a message-less busy-wait progressing.
+
+        The floor is ANCHORED: a resumed snapshot re-bases it so it continues
+        from the saved clock (vmsnap.load_snapshot sets clock_floor_anchor),
+        mirroring how the interactive driver re-anchors its wall clock.
+        Without this, a snapshot whose wall clock ran ahead of the instruction
+        pace freezes GetTickCount on resume until the raw floor catches up —
+        tens of millions of instructions of stuck busy-waits."""
         ms = self.clock_ms
         if not self.interactive:
-            ms = max(ms, self.machine.cpu.instruction_count // INSTR_PER_MS)
+            base_instr, base_ms = getattr(self, "clock_floor_anchor", (0, 0))
+            floor = base_ms + (
+                self.machine.cpu.instruction_count - base_instr) // INSTR_PER_MS
+            ms = max(ms, floor)
         return ms & 0xFFFFFFFF
 
     def _window_origin(self, hwnd: int) -> tuple[int, int]:
