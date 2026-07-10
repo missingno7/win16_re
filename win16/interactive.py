@@ -95,16 +95,28 @@ class InteractiveDriver:
         now = self.now_ms()
         if now > self.sys.clock_ms:
             self.sys.clock_ms = now
+        # Sample the (instruction -> wall tick) map periodically so a v4 demo can
+        # reproduce GetTickCount during input-free busy-waits (splash timeouts,
+        # sim-tick pacing) — the recorder rate-limits these.
+        recorder = self._recorder()
+        if recorder is not None:
+            recorder.clock_sample(self._instr(), now)
         if self._pause_requested:
             self._park()
+
+    def _instr(self) -> int:
+        return self.sys.machine.cpu.instruction_count
+
+    def _recorder(self):
+        machine = getattr(self.sys, "machine", None)
+        return (machine.api.services.get("demo_recorder")
+                if machine is not None else None)
 
     def _drain_input(self) -> None:
         with self._cond:
             pending, self._input = self._input, []
         now = self.now_ms()
-        machine = getattr(self.sys, "machine", None)
-        recorder = (machine.api.services.get("demo_recorder")
-                    if machine is not None else None)
+        recorder = self._recorder()
         for hwnd, msg, wparam, lparam in pending:
             m = (hwnd, msg, wparam, lparam, now, 0)
             self.sys.msg_queue.append(m)
@@ -115,11 +127,11 @@ class InteractiveDriver:
             # _note_input while a drainer is attached (no double-note).
             self.sys._note_input(m)
             if recorder is not None:
-                # The arrival note is part of the timeline ("a" record): a
-                # replay must make this polled state visible at the same spot
-                # (SimAnt's sim tick blocks on a GetAsyncKeyState tap that
-                # only ever arrives asynchronously).
-                recorder.async_note(m)
+                # The v4 timeline is these raw arrivals, each keyed to the
+                # instruction count at which it landed: replay injects it into
+                # the queue at that same instruction, and the game's own pump
+                # (GetMessage / PeekMessage) fetches it exactly as it did live.
+                recorder.arrival(m, self._instr())
 
     def _next(self, sysobj):
         while True:
@@ -127,6 +139,9 @@ class InteractiveDriver:
                 self._park()
             self._drain_input()
             if not self.running or sysobj.quit_posted is not None:
+                recorder = self._recorder()
+                if recorder is not None and sysobj.quit_posted is not None:
+                    recorder.quit(self._instr())        # WM_QUIT ends the timeline
                 return None
             if sysobj.msg_queue:
                 return sysobj.msg_queue.popleft()

@@ -92,6 +92,10 @@ class Win16System:
     yield_check: object = None          # optional: callable() run between chunks
     #   of a long VM callback (SimAnt's sim-tick TimerProc) so the host can pause
     #   / take a snapshot / feed input instead of the UI freezing.
+    demo_driver: object = None          # optional: a win16.demo.DemoDriver (v4
+    #   replay).  When set, GetMessage/PeekMessage inject recorded input arrivals
+    #   at their instruction counts and GetTickCount reproduces the recorded
+    #   (instruction -> tick) timeline — see win16/demo.py.
     input_drainer: object = None        # optional: callable() moving host input
     #   into msg_queue.  An interactive driver sets this so PeekMessage (which
     #   scans msg_queue directly, not via message_source) sees freshly-posted
@@ -169,16 +173,12 @@ class Win16System:
         never synthesizes paint/timer — a game's peek loop must fall through to
         its idle path (WaitMessage/GetMessage) when nothing is queued.
 
-        Every REMOVED message passes through the demo tap ("p" records), and a
-        replaying demo player serves this path entirely — a game that consumes
-        its whole timeline through PeekMessage (SimAnt in-game) records and
-        replays exactly like a GetMessage-pumping one."""
-        player = self.machine.api.services.get("demo_player")
-        if player is not None and hasattr(player, "next_peek"):
-            m = player.next_peek(self, hwnd_filter, lo, hi, remove)
-            if m is not None and remove and self.input_drainer is None:
-                self._note_input(m)             # feed polled state (mouse/keys)
-            return m
+        Under a v4 demo driver (replay) this injects any input arrivals whose
+        instruction count has been reached, then scans the real queue — a
+        busy-poll simply misses until its awaited arrival's instruction; the
+        game's own pump does the rest (see win16/demo.py)."""
+        if self.demo_driver is not None:
+            self.demo_driver.pump_peek()    # inject due arrivals into the queue
         if self.input_drainer is not None:
             self.input_drainer()            # make host input visible to the scan
         for i, m in enumerate(self.msg_queue):
@@ -190,7 +190,6 @@ class Win16System:
                 del self.msg_queue[i]
                 if self.input_drainer is None:      # else noted at drain time
                     self._note_input(m)             # feed polled state (mouse/keys)
-                self._record_peek(m, hwnd_filter, lo, hi)
             return m
         # A due WM_TIMER is discoverable by PeekMessage too, not only GetMessage.
         # SimAnt's sim tick (a SetTimer TimerProc) paces its frame by spinning on
@@ -201,16 +200,8 @@ class Win16System:
         if (lo or hi) and lo <= 0x0113 <= hi:
             tm = self._due_timer(hwnd_filter, remove)
             if tm is not None:
-                if remove:
-                    self._record_peek(tm, hwnd_filter, lo, hi)
                 return tm
         return None
-
-    def _record_peek(self, msg, hwnd_filter: int, lo: int, hi: int) -> None:
-        """Demo tap for a PeekMessage removal (see win16/demo.py)."""
-        recorder = self.machine.api.services.get("demo_recorder")
-        if recorder is not None:
-            recorder.peek(msg, (hwnd_filter, lo, hi))
 
     def _due_timer(self, hwnd_filter: int, remove: bool):
         """The earliest armed timer that is now due (by the GetTickCount clock:
@@ -245,6 +236,12 @@ class Win16System:
         Without this, a snapshot whose wall clock ran ahead of the instruction
         pace freezes GetTickCount on resume until the raw floor catches up —
         tens of millions of instructions of stuck busy-waits."""
+        driver = getattr(self, "demo_driver", None)
+        if driver is not None:
+            # Replay: reproduce the recorded wall-clock timeline from the demo's
+            # (instruction -> tick) samples, so clock-driven control flow matches
+            # the recording exactly (see win16/demo.py).
+            return driver.tick_at(self.machine.cpu.instruction_count) & 0xFFFFFFFF
         ms = self.clock_ms
         if not self.interactive:
             base_instr, base_ms = getattr(self, "clock_floor_anchor", (0, 0))
@@ -323,17 +320,16 @@ class Win16System:
         return False
 
     def get_message(self):
-        """What GetMessage returns: delegate to an interactive driver when one
-        is installed, else the deterministic pump.  Every returned message
-        passes through the demo tap when recording."""
-        if self.message_source is not None:
+        """What GetMessage returns: a v4 demo driver (replay) injects recorded
+        arrivals and runs the pump; else an interactive driver when installed;
+        else the deterministic headless pump."""
+        if self.demo_driver is not None:
+            msg = self.demo_driver.pump_get()
+        elif self.message_source is not None:
             msg = self.message_source(self)
         else:
             msg = self.next_message()
-        recorder = self.machine.api.services.get("demo_recorder")
-        if recorder is not None:
-            recorder.message(msg)
-        if msg is not None and self.input_drainer is None:
+        if msg is not None and self.input_drainer is None and self.demo_driver is None:
             # Polled input state (keys + mouse pos/buttons) is DERIVED from the
             # message stream, not from host polling, so GetAsyncKeyState /
             # GetKeyState / GetCursorPos see the same state on live play and demo

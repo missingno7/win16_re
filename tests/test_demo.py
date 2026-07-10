@@ -1,129 +1,164 @@
-"""Demo v2 record/replay round-trip (win16/demo.py) — the peek timeline.
+"""Demo v4 record/replay round-trip (win16/demo.py) — the instruction-keyed
+input timeline.
 
-A game that consumes its input through PeekMessage (SimAnt in-game) must
-record and replay through the same "p" records the GetMessage pump gets from
-"m" records: same order, same filters, same clock stamps.  These pin the
-format contract without a machine — the sysobj is just a clock holder.
+v4 keys input to the INSTRUCTION COUNT, not the fetch API: the recorder logs raw
+input arrivals ("i") + periodic clock samples ("c") + quit, and the DemoDriver
+injects each arrival into the queue when the machine reaches its instruction and
+reproduces GetTickCount from the (instr -> tick) samples.  These pin the format
+contract with a tiny fake machine (a mutable instruction counter + a queue).
 """
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
 
-from win16.demo import DemoDivergence, DemoEnded, DemoPlayer, DemoRecorder
+from win16.demo import DemoDriver, DemoEnded, DemoDivergence, DemoRecorder
 
-MSG_A = (330, 0x0115, 1, 0, 1000, 0)          # WM_VSCROLL via GetMessage
-MSG_B = (280, 0x0113, 7, 0, 1016, 0)          # WM_TIMER via PeekMessage
-MSG_C = (330, 0x0201, 0, 0x00100010, 1032, 0)  # WM_LBUTTONDOWN via PeekMessage
-FILT_TIMER = (280, 0x0113, 0x0113)
-FILT_ANY = (0, 0, 0)
+# messages: (hwnd, msg, wparam, lparam, tick, pt)
+KEY_A = (330, 0x0100, 0x41, 0, 10, 0)              # WM_KEYDOWN 'A' @ tick 10
+CLICK = (330, 0x0201, 1, 0x00100010, 30, 0)        # WM_LBUTTONDOWN @ tick 30
+
+
+def _fake_sys():
+    """A minimal Win16System stand-in: a mutable instruction counter, a message
+    queue, and the two hooks the driver drives (_note_input, next_message)."""
+    cpu = SimpleNamespace(instruction_count=0)
+    machine = SimpleNamespace(cpu=cpu)
+    noted = []
+
+    def next_message():
+        if sysobj.quit_posted is not None:
+            return None
+        if sysobj.msg_queue:
+            return sysobj.msg_queue.popleft()
+        raise RuntimeError("idle")                 # what the real pump raises
+
+    sysobj = SimpleNamespace(
+        machine=machine, msg_queue=deque(), quit_posted=None, clock_ms=0,
+        interactive=True, demo_driver=None, yield_check=None,
+        _note_input=lambda m: noted.append(m), next_message=next_message)
+    sysobj.noted = noted
+    return sysobj
 
 
 def _record(tmp_path, **hdr):
     path = tmp_path / "demo.jsonl"
     rec = DemoRecorder(path, "GAME.EXE", **hdr)
-    rec.message(MSG_A)
-    rec.peek(MSG_B, FILT_TIMER)
-    rec.peek(MSG_C, FILT_ANY)
-    rec.message(None)
+    rec.arrival(KEY_A, instr=100)
+    rec.clock_sample(200, 20, min_gap=0)
+    rec.arrival(CLICK, instr=300)
+    rec.quit(instr=400)
     rec.close()
     return path
 
 
-def test_roundtrip_m_and_p_records(tmp_path):
-    player = DemoPlayer(_record(tmp_path))
-    sysobj = SimpleNamespace(clock_ms=0)
-
-    assert player.next_message(sysobj) == MSG_A
-    assert sysobj.clock_ms == 1000
-
-    # A peek with the wrong filter misses without consuming.
-    assert player.next_peek(sysobj, 0, 0, 0, True) is None
-    assert sysobj.clock_ms == 1000
-    # A NOREMOVE glance with the right filter sees it but doesn't consume.
-    assert player.next_peek(sysobj, *FILT_TIMER, False) == MSG_B
-    assert player.next_peek(sysobj, *FILT_TIMER, False) == MSG_B
-    assert sysobj.clock_ms == 1000
-    # PM_REMOVE consumes and advances the clock.
-    assert player.next_peek(sysobj, *FILT_TIMER, True) == MSG_B
-    assert sysobj.clock_ms == 1016
-
-    assert player.next_peek(sysobj, *FILT_ANY, True) == MSG_C
-    assert sysobj.clock_ms == 1032
-
-    assert player.next_message(sysobj) is None          # the recorded quit
-    assert player.exhausted
+def test_clock_timeline_is_reproduced(tmp_path):
+    d = DemoDriver(_record(tmp_path))
+    # samples: (100,10) from KEY_A, (200,20) from "c", (300,30) from CLICK
+    assert d.tick_at(50) == 10          # before first sample -> clamp
+    assert d.tick_at(100) == 10
+    assert d.tick_at(150) == 15         # linear between (100,10) and (200,20)
+    assert d.tick_at(250) == 25         # linear between (200,20) and (300,30)
+    assert d.tick_at(300) == 30
+    assert d.tick_at(1300) == 31        # tail: instruction floor past last sample
 
 
-def test_exhausted_stream_ends_the_replay_on_either_path(tmp_path):
-    # A peek-driven game never calls GetMessage, so a peek past the last
-    # record must end the replay just like GetMessage does — deterministically
-    # at the first ask-for-more.
-    player = DemoPlayer(_record(tmp_path))
-    sysobj = SimpleNamespace(clock_ms=0)
-    while not player.exhausted:
-        if player.records[player.pos]["t"] == "p":
-            player.next_peek(sysobj, *tuple(player.records[player.pos]["f"]), True)
-        else:
-            player.next_message(sysobj)
+def test_arrivals_inject_at_their_instruction(tmp_path):
+    d = DemoDriver(_record(tmp_path))
+    d.sys = _fake_sys()
+
+    d.sys.machine.cpu.instruction_count = 99
+    d.inject_due()
+    assert not d.sys.msg_queue and d.sys.noted == []      # first arrival is @100
+
+    d.sys.machine.cpu.instruction_count = 100
+    d.inject_due()
+    assert list(d.sys.msg_queue) == [KEY_A]
+    assert d.sys.noted == [KEY_A]                          # polled state fed at arrival
+
+    d.sys.machine.cpu.instruction_count = 305             # past the click's @300
+    d.inject_due()
+    assert list(d.sys.msg_queue) == [KEY_A, CLICK]
+
+
+def test_pump_peek_misses_until_the_arrival_instruction(tmp_path):
+    # A busy-poll: PeekMessage injects nothing until the awaited arrival's
+    # instruction is reached, then the game's own queue scan finds it.
+    d = DemoDriver(_record(tmp_path))
+    d.sys = _fake_sys()
+    d.sys.machine.cpu.instruction_count = 50
+    d.pump_peek()
+    assert not d.sys.msg_queue                             # nothing due yet
+    d.sys.machine.cpu.instruction_count = 100
+    d.pump_peek()
+    assert list(d.sys.msg_queue) == [KEY_A]                # now injected
+
+
+def test_pump_get_delivers_queued_then_blocks_to_next_arrival(tmp_path):
+    d = DemoDriver(_record(tmp_path))
+    d.sys = _fake_sys()
+    # At the key's instruction, GetMessage returns it (injected + popped).
+    d.sys.machine.cpu.instruction_count = 100
+    assert d.pump_get() == KEY_A
+    # Idle between arrivals: a blocking GetMessage delivers the next arrival
+    # (the recorded wall-clock wait — the CPU was parked, instr frozen).
+    d.sys.machine.cpu.instruction_count = 150
+    assert d.pump_get() == CLICK
+    # Next blocking GetMessage hits the recorded quit.
+    assert d.pump_get() is None
+    assert d.sys.quit_posted is True
+
+
+def test_exhausted_stream_raises_demo_ended(tmp_path):
+    d = DemoDriver(_record(tmp_path))
+    d.sys = _fake_sys()
+    # Instructions advance gradually, as they do in a real run.
+    d.sys.machine.cpu.instruction_count = 100
+    assert d.pump_get() == KEY_A
+    d.sys.machine.cpu.instruction_count = 300
+    assert d.pump_get() == CLICK
+    d.sys.machine.cpu.instruction_count = 400
+    assert d.pump_get() is None                            # quit ends the timeline
+    d.sys.quit_posted = None                               # a peek-driven game keeps polling
     with pytest.raises(DemoEnded):
-        player.next_peek(sysobj, 0, 0, 0, True)
-    with pytest.raises(DemoEnded):
-        player.next_message(sysobj)
-
-
-def test_getmessage_diverges_on_pending_peek_record(tmp_path):
-    player = DemoPlayer(_record(tmp_path))
-    sysobj = SimpleNamespace(clock_ms=0)
-    player.next_message(sysobj)
-    with pytest.raises(DemoDivergence):
-        player.next_message(sysobj)     # next record is "p", not "m"
+        d.pump_peek()
 
 
 def test_snapshot_anchor_header(tmp_path):
     path = _record(tmp_path, snapshot="snap_114308", instruction=17050442)
-    player = DemoPlayer(path)
-    assert player.snapshot == "snap_114308"
-    assert player.instruction == 17050442
-    unanchored = DemoPlayer(_record(tmp_path))
-    assert unanchored.snapshot is None
-    assert unanchored.instruction == 0
+    d = DemoDriver(path)
+    assert d.snapshot == "snap_114308"
+    assert d.instruction == 17050442
+    assert DemoDriver(_record(tmp_path)).snapshot is None
 
 
-def test_v1_demo_still_replays(tmp_path):
-    path = tmp_path / "v1.jsonl"
-    path.write_text(
-        '{"kind": "win16-demo", "version": 1, "exe": "OLD.EXE"}\n'
-        '{"t": "m", "v": [1, 15, 0, 0, 5, 0]}\n'
-        '{"t": "quit"}\n', encoding="ascii")
-    player = DemoPlayer(path)
-    sysobj = SimpleNamespace(clock_ms=0)
-    assert player.snapshot is None
-    assert not player.notes_input                   # pre-v3: consumption-noted
-    assert player.next_peek(sysobj, 0, 0, 0, True) is None   # "m" next: peek misses
-    assert player.next_message(sysobj) == (1, 15, 0, 0, 5, 0)
-    assert player.next_message(sysobj) is None
-
-
-def test_arrival_notes_apply_at_pump_touchpoints(tmp_path):
-    # An input ARRIVAL note ("a") must become visible to polled-input state at
-    # the next pump touchpoint, even when the next consumed record is a miss —
-    # SimAnt's sim tick spins on peek(WM_TIMER)+GetAsyncKeyState and needs the
-    # tap to arrive WITHOUT any message being consumable (the live drainer
-    # noted it asynchronously; the "a" record is that moment in the timeline).
-    path = tmp_path / "v3.jsonl"
+def test_dialog_events_replay_in_order(tmp_path):
+    path = tmp_path / "dlg.jsonl"
     rec = DemoRecorder(path, "GAME.EXE")
-    rec.peek(MSG_B, FILT_TIMER)
-    rec.async_note((330, 0x0201, 1, 0x00200020, 1020, 0))    # WM_LBUTTONDOWN arrives
-    rec.message(MSG_A)                                        # consumed later
+    rec.dialog_event("myd_scores", ("command", 1, 0), instr=10)
+    rec.dialog_event("myd_scores", ("command", 2, 0), instr=20)
     rec.close()
-    player = DemoPlayer(path)
-    assert player.notes_input
+    d = DemoDriver(path)
+    assert d.next_dialog_event("myd_scores") == ("command", 1, 0)
+    assert d.next_dialog_event("myd_scores") == ("command", 2, 0)
+    with pytest.raises(DemoEnded):
+        d.next_dialog_event("myd_scores")
 
-    noted = []
-    sysobj = SimpleNamespace(clock_ms=0, _note_input=lambda m: noted.append(m))
-    assert player.next_peek(sysobj, *FILT_TIMER, True) == MSG_B
-    assert noted == []                       # note not applied yet
-    # the spin's next peek MISSES (next consumable is "m") but applies the note
-    assert player.next_peek(sysobj, *FILT_TIMER, True) is None
-    assert noted == [(330, 0x0201, 1, 0x00200020, 1020, 0)]
-    assert player.next_message(sysobj) == MSG_A
+
+def test_dialog_divergence_on_wrong_name(tmp_path):
+    path = tmp_path / "dlg.jsonl"
+    rec = DemoRecorder(path, "GAME.EXE")
+    rec.dialog_event("myd_scores", ("command", 1, 0), instr=10)
+    rec.close()
+    d = DemoDriver(path)
+    with pytest.raises(DemoDivergence):
+        d.next_dialog_event("some_other_dialog")
+
+
+def test_pre_v4_demo_is_rejected(tmp_path):
+    path = tmp_path / "v3.jsonl"
+    path.write_text(
+        '{"kind": "win16-demo", "version": 3, "exe": "OLD.EXE"}\n'
+        '{"t": "m", "v": [1, 15, 0, 0, 5, 0]}\n', encoding="ascii")
+    with pytest.raises(ValueError, match="pre-v4"):
+        DemoDriver(path)

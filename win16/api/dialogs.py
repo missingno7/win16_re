@@ -174,16 +174,17 @@ def _dispatch_dialog_event(ctx: CallContext, dlg: Dialog, event) -> None:
 def _run_modal(ctx: CallContext, dlg: Dialog) -> int:
     sysobj = _sys(ctx)
     host = _host(ctx)
-    player = ctx.registry.services.get("demo_player")
+    driver = getattr(sysobj, "demo_driver", None)
     recorder = ctx.registry.services.get("demo_recorder")
+    instr = lambda: sysobj.machine.cpu.instruction_count
     if host is not None:
         host.show(dlg)
     _call_proc(ctx, dlg, WM_INITDIALOG, 0, 0)
 
-    if player is not None:
-        # Replay: consume the recorded dialog-event stream, byte for byte.
+    if driver is not None:
+        # Replay: consume the recorded dialog-event stream, in order.
         while not dlg.ended:
-            _dispatch_dialog_event(ctx, dlg, player.next_dialog_event(dlg.name))
+            _dispatch_dialog_event(ctx, dlg, driver.next_dialog_event(dlg.name))
     elif host is None:
         # Headless: answer like a user pressing OK (then Cancel), same policy
         # as the auto-OK MessageBox.  Anything beyond that is a gap.
@@ -192,7 +193,7 @@ def _run_modal(ctx: CallContext, dlg: Dialog) -> int:
                 break
             event = ("command", answer, 0)
             if recorder is not None:
-                recorder.dialog_event(dlg.name, event)
+                recorder.dialog_event(dlg.name, event, instr())
             _dispatch_dialog_event(ctx, dlg, event)
         if not dlg.ended:
             raise Win16ApiGap(f"dialog {dlg.name}: proc ended on neither OK nor Cancel")
@@ -212,8 +213,9 @@ def _run_modal(ctx: CallContext, dlg: Dialog) -> int:
                     for ctrl in dlg.controls:
                         if ctrl.cls == "Edit" and ctrl.ctrl_id != 0xFFFF:
                             recorder.dialog_event(
-                                dlg.name, ("settext", ctrl.ctrl_id, ctrl.text))
-                recorder.dialog_event(dlg.name, event)
+                                dlg.name, ("settext", ctrl.ctrl_id, ctrl.text),
+                                instr())
+                recorder.dialog_event(dlg.name, event, instr())
             _dispatch_dialog_event(ctx, dlg, event)
     if host is not None:
         host.close(dlg)
