@@ -20,8 +20,8 @@ viewer**. Every third-party dependency resolves under PyPy 3.11:
   `ImageTk` blit) installs fine.
 
 So the full interactive `play.py` runs under PyPy — the game itself runs
-~8x faster in the same window. (dos_re's own viewer note predates
-pygame-ce; that discovery likely lifts its CPython-only viewer rule too.)
+~8x faster in the same window. (dos_re reached the same conclusion for its
+own pygame viewer — 2.1x measured — in its `docs/performance.md`.)
 
 Measured (PyPy 3.11 v7.3.20 vs CPython 3.11, Windows, SimAnt boot,
 20M instructions, identical end CS:IP on both):
