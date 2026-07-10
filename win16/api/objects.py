@@ -79,11 +79,14 @@ class Window:
     menu: int
     visible: bool = False
     dirty: bool = False             # True iff update_rect is not None
-    # The accumulated update region as its bounding rect (client coords), per
-    # real USER: InvalidateRect unions rects in; BeginPaint validates (clears).
-    # WAP games (SimAnt) invalidate each object's own small rect and read the
-    # region back via GetUpdateRgn/GetRgnBox — the rects must round-trip.
-    update_rect: tuple | None = None            # (l, t, r, b) or None = clean
+    # The accumulated update region (client coords), per real USER:
+    # InvalidateRect unions rects in; ValidateRgn SUBTRACTS (user._validate_rect
+    # — SimAnt's map scroll depends on subtracting the scroll strip);
+    # BeginPaint validates (clears).  WAP games (SimAnt) invalidate each
+    # object's own small rect and read the region back via
+    # GetUpdateRgn/GetRgnBox — the rects must round-trip.
+    update_rect: tuple | None = None            # region bounding box, or None
+    update_rects: list = field(default_factory=list)   # the true rect list
     update_erase: bool = False                  # an RDW_ERASE is pending
     maximized: bool = False                     # SW_SHOWMAXIMIZED applied
     restore_rect: tuple | None = None           # (x, y, w, h) before maximize

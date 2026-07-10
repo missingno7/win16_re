@@ -118,24 +118,71 @@ def _invalidate(win, rect=None, erase: bool = False) -> None:
     BeginPaint validates (clears) it; GetUpdateRgn copies it out.  WAP games
     invalidate each object's OWN rect and read it back through the region —
     collapsing this to a whole-client bool destroyed those rects (SimAnt's
-    ribbon buttons / logo halves all redrew at the region box's 0,0)."""
+    ribbon buttons / logo halves all redrew at the region box's 0,0).
+
+    The region is a true rect LIST (win.update_rects) with its bounding box
+    mirrored in win.update_rect: ValidateRgn must SUBTRACT — SimAnt's map
+    scroll validates the scroll-exposed strip out of the pending region so
+    the pre-array-shift UpdateWindow doesn't repaint stale tiles over the
+    just-scrolled pixels (the 16x16 tile-ghosting bug)."""
     cw, ch = win.client_size
     r = (0, 0, cw, ch) if rect is None else rect
     r = (max(r[0], 0), max(r[1], 0), min(r[2], cw), min(r[3], ch))
     if r[2] <= r[0] or r[3] <= r[1]:
         return
-    u = win.update_rect
-    win.update_rect = r if u is None else (
-        min(u[0], r[0]), min(u[1], r[1]), max(u[2], r[2]), max(u[3], r[3]))
+    rects = getattr(win, "update_rects", None)
+    if rects is None:                       # incl. windows from old snapshots
+        rects = win.update_rects = [win.update_rect] if win.update_rect else []
+    rects.append(r)
+    win.update_rect = _rects_bbox(rects)
     win.update_erase = win.update_erase or erase
     win.dirty = True
 
 
 def _validate(win) -> None:
     """Clear the update region (what BeginPaint does)."""
+    win.update_rects = []
     win.update_rect = None
     win.update_erase = False
     win.dirty = False
+
+
+def _validate_rect(win, rect) -> None:
+    """Subtract `rect` from the update region (ValidateRgn with a region).
+    Each stored rect loses its intersection with `rect`, splitting into up to
+    four remainder strips — real USER region subtraction, which SimAnt's map
+    scroll relies on to keep the scrolled pixels out of the next repaint."""
+    rects = getattr(win, "update_rects", None)
+    if rects is None:
+        rects = [win.update_rect] if win.update_rect else []
+    sl, st, sr, sb = rect
+    out = []
+    for (l, t, r, b) in rects:
+        il, it = max(l, sl), max(t, st)
+        ir, ib = min(r, sr), min(b, sb)
+        if ir <= il or ib <= it:            # no overlap — keep whole
+            out.append((l, t, r, b))
+            continue
+        if t < it:                          # strip above the hole
+            out.append((l, t, r, it))
+        if ib < b:                          # strip below
+            out.append((l, ib, r, b))
+        if l < il:                          # strip left (between it..ib)
+            out.append((l, it, il, ib))
+        if ir < r:                          # strip right
+            out.append((ir, it, r, ib))
+    win.update_rects = out
+    win.update_rect = _rects_bbox(out)
+    if not out:
+        win.update_erase = False
+        win.dirty = False
+
+
+def _rects_bbox(rects) -> tuple | None:
+    if not rects:
+        return None
+    return (min(r[0] for r in rects), min(r[1] for r in rects),
+            max(r[2] for r in rects), max(r[3] for r in rects))
 
 
 def _fill_window_bg(sysobj, win) -> None:
@@ -632,13 +679,14 @@ def install(api: ApiRegistry) -> None:
             _validate(win)
             return 1
         rgn = sys.handles.get(hrgn)
-        u = win.update_rect
-        # Single-bbox update model: clear only if the region fully covers the
-        # pending update box (else keep it — repainting more is safe, skipping
-        # needed repaint is not).
-        if isinstance(rgn, Region) and u is not None and \
-                rgn.x1 <= u[0] and rgn.y1 <= u[1] and rgn.x2 >= u[2] and rgn.y2 >= u[3]:
-            _validate(win)
+        if isinstance(rgn, Region):
+            # Real region subtraction.  SimAnt's map scroll validates the
+            # scroll-exposed strip out of the pending region, so the
+            # UpdateWindow it issues BEFORE shifting its screen-tile arrays
+            # repaints only the other pending rects — subtract-as-covers-all
+            # (the old single-bbox approximation) left the whole union
+            # pending and stale tiles got stamped over the scrolled pixels.
+            _validate_rect(win, (rgn.x1, rgn.y1, rgn.x2, rgn.y2))
         return 1
 
     @api.register("USER", 61, args="word s_word s_word ptr ptr")  # ScrollWindow
@@ -1514,9 +1562,22 @@ def install(api: ApiRegistry) -> None:
         hdc = sys.new_dc(window=win)
         # Real USER: rcPaint = the update region's box; the background is
         # erased ONLY when an invalidation requested it (RDW_ERASE pending);
-        # BeginPaint then validates (clears) the update region.
+        # BeginPaint then validates (clears) the update region — and the DC is
+        # CLIPPED to that region.  SimAnt's painter repaints its whole
+        # changed-objects list (ants at pre-scroll positions included) and
+        # RELIES on the clip discarding everything outside the region it
+        # built — unclipped, each map scroll stamps stale tiles over the
+        # scrolled pixels (the 16x16 tile-ghosting).  Clipping is enforced at
+        # the paint-session boundary: snapshot the surface here, and at
+        # EndPaint restore every pixel OUTSIDE the region (byte-equivalent to
+        # per-op clipping for the surface EndPaint leaves behind).
         w, h = win.client_size
         rc = win.update_rect or (0, 0, w, h)
+        rects = list(getattr(win, "update_rects", ())) or [rc]
+        full = len(rects) == 1 and rects[0] == (0, 0, w, h)
+        # Snapshot BEFORE the erase so a whole-surface erase fill cannot leak
+        # outside the region either (real USER erases only the region).
+        win._paint_clip = None if full else (rects, bytes(win.surface.pixels))
         if win.update_erase or win.update_rect is None:
             from .gdi import class_background_rgb
             rgb = class_background_rgb(sys, win.wndclass.h_background)
@@ -1538,6 +1599,21 @@ def install(api: ApiRegistry) -> None:
         sys = _sys(ctx)
         seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
         sys.handles.remove(ctx.mem.rw(seg, off))         # the BeginPaint DC
+        win = sys.handles.get(ctx.args[0])
+        clip = getattr(win, "_paint_clip", None) if isinstance(win, Window) else None
+        if clip is not None:
+            # Apply the BeginPaint clip: keep the painted pixels inside the
+            # update region, restore everything outside it.
+            win._paint_clip = None
+            rects, before = clip
+            import numpy as np
+            s = win.surface
+            cur = np.frombuffer(bytes(s.pixels), dtype=np.uint8).reshape(s.h, s.w, 3)
+            out = np.frombuffer(before, dtype=np.uint8).reshape(s.h, s.w, 3).copy()
+            for (l, t, r, b) in rects:
+                out[t:b, l:r] = cur[t:b, l:r]
+            s.pixels[:] = out.tobytes()
+            s.touch()
         return 1
 
     @api.register("USER", 66, args="word")              # GetDC(hwnd)
