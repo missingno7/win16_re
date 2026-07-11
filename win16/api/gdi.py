@@ -44,6 +44,65 @@ def _fill_rect(dst: Surface, x: int, y: int, w: int, h: int,
         dst.pixels[off:off + len(row)] = row
 
 
+def _read_points(ctx, ptr: int, n: int) -> list[tuple[int, int]]:
+    """`n` POINT structs (two signed 16-bit words each) at the far pointer."""
+    seg, off = (ptr >> 16) & 0xFFFF, ptr & 0xFFFF
+    return [(_signed(ctx.mem.rw(seg, (off + 4 * i) & 0xFFFF)),
+             _signed(ctx.mem.rw(seg, (off + 4 * i + 2) & 0xFFFF))) for i in range(n)]
+
+
+def _draw_line(dst: Surface, x0: int, y0: int, x1: int, y1: int,
+               rgb: tuple[int, int, int]) -> None:
+    """A 1px Bresenham line, clipped to the surface (GDI pen outline)."""
+    col = bytes(rgb)
+    dx, dy = abs(x1 - x0), -abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    while True:
+        if 0 <= x0 < dst.w and 0 <= y0 < dst.h:
+            o = (y0 * dst.w + x0) * 3
+            dst.pixels[o:o + 3] = col
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x0 += sx
+        if e2 <= dx:
+            err += dx
+            y0 += sy
+
+
+def _fill_polygon(dst: Surface, pts: list[tuple[int, int]],
+                  rgb: tuple[int, int, int]) -> None:
+    """Even-odd (ALTERNATE) scanline polygon fill, pixel-centre sampled so
+    adjacent trapezoids tile without seams — the GDI default poly-fill mode."""
+    import math
+    n = len(pts)
+    if rgb is None or n < 3:
+        return
+    ys = [p[1] for p in pts]
+    y_lo, y_hi = max(0, min(ys)), min(dst.h - 1, max(ys))
+    col = bytes(rgb)
+    dst.touch()
+    for y in range(y_lo, y_hi + 1):
+        yc = y + 0.5
+        xs = []
+        for i in range(n):
+            x0, y0 = pts[i]
+            x1, y1 = pts[(i + 1) % n]
+            if (y0 <= yc) != (y1 <= yc):        # edge straddles the row centre
+                xs.append(x0 + (yc - y0) * (x1 - x0) / (y1 - y0))
+        xs.sort()
+        for k in range(0, len(xs) - 1, 2):
+            xa = max(0, int(math.ceil(xs[k] - 0.5)))
+            xb = min(dst.w - 1, int(math.floor(xs[k + 1] - 0.5)))
+            if xa <= xb:
+                o = (y * dst.w + xa) * 3
+                dst.pixels[o:o + (xb - xa + 1) * 3] = col * (xb - xa + 1)
+
+
 _STOCK_BRUSH_RGB = {
     "WHITE_BRUSH": (255, 255, 255), "BLACK_BRUSH": (0, 0, 0),
     "LTGRAY_BRUSH": (192, 192, 192), "GRAY_BRUSH": (128, 128, 128),
@@ -129,6 +188,20 @@ def class_background_rgb(sysobj, h_background: int):
 def _brush_rgb(sys: Win16System, hdc: int) -> tuple[int, int, int]:
     dc = sys.handles.require(hdc, DC)
     return brush_object_rgb(dc.selected.get("brush"), dc_palette_entries(sys, dc))
+
+
+def _pen_rgb(sys: Win16System, dc) -> tuple[int, int, int] | None:
+    """The DC's pen colour, or None for a NULL pen (no outline drawn)."""
+    pen = dc.selected.get("pen")
+    if isinstance(pen, Pen):
+        return None if pen.style == 5 else colorref_rgb(  # PS_NULL == 5
+            pen.color, dc_palette_entries(sys, dc))
+    kind = getattr(pen, "kind", None)
+    if kind == "NULL_PEN":
+        return None
+    if kind == "WHITE_PEN":
+        return (255, 255, 255)
+    return (0, 0, 0)                    # BLACK_PEN / unset default
 
 
 def install(api: ApiRegistry) -> None:
@@ -359,6 +432,30 @@ def install(api: ApiRegistry) -> None:
             _fill_rect(dst, x, y, w, h, _brush_rgb(sys, hdc))
         else:
             raise NotImplementedError(f"PatBlt rop {rop:#010x}")
+        return 1
+
+    @api.register("GDI", 36, args="word ptr word")      # Polygon(hdc, lpPoints, n)
+    def Polygon(ctx: CallContext) -> int:
+        # SimAnt's _TrapFill draws filled trapezoids (nest cross-sections /
+        # terrain).  Fill with the DC's brush (even-odd scanline) and outline the
+        # edges with its pen — the presentation approximation the rest of GDI uses.
+        sys = _sys(ctx)
+        hdc, lppts, n = ctx.args
+        dst = _dc_surface(sys, hdc)
+        if dst is None or n < 2:
+            return 0
+        pts = _read_points(ctx, lppts, n)
+        dc = sys.handles.require(hdc, DC)
+        pal = dc_palette_entries(sys, dc)
+        fill = brush_object_rgb(dc.selected.get("brush"), pal)
+        if fill is not None:
+            _fill_polygon(dst, pts, fill)
+        pen = _pen_rgb(sys, dc)
+        if pen is not None:
+            for i in range(n):
+                (x0, y0), (x1, y1) = pts[i], pts[(i + 1) % n]
+                _draw_line(dst, x0, y0, x1, y1, pen)
+            dst.touch()
         return 1
 
     @api.register("GDI", 33, args="word s_word s_word ptr word")

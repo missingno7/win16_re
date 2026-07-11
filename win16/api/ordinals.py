@@ -187,6 +187,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         7: "SetStretchBltMode",
         9: "SetTextColor",
         29: "PatBlt",
+        36: "Polygon",
         33: "TextOut",
         34: "BitBlt",
         35: "StretchBlt",
