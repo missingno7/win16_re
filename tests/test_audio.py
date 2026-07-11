@@ -46,3 +46,69 @@ def test_render_is_square_wave():
     assert hi.size and lo.size
     assert np.std(hi) < 0.02 * hi.mean()                # flat top
     assert abs(hi.mean() + lo.mean()) < 0.02 * hi.mean()  # symmetric
+
+
+# -- MidiBackend MCI-play semantics (win16.audio.MidiBackend) ------------------
+from win16.audio import MidiBackend
+
+
+class _FakeMusic:
+    def __init__(self):
+        self.loads, self.plays, self.busy, self.stops = [], 0, False, 0
+
+    def load(self, p):
+        self.loads.append(p)
+
+    def play(self, *a, **k):
+        self.plays += 1
+        self.busy = True
+
+    def get_busy(self):
+        return self.busy
+
+    def stop(self):
+        self.stops += 1
+        self.busy = False
+
+
+def _midi():
+    b = MidiBackend.__new__(MidiBackend)
+    music = _FakeMusic()
+    b.ok, b._devices, b._playing = True, {}, None
+    b._pg = type("Pg", (), {"mixer": type("Mx", (), {"music": music})()})()
+    return b, music
+
+
+def test_midi_play_idempotent_while_playing():
+    """MCI_PLAY re-issued while the song is still sounding must NOT restart it
+    (the stutter fix) — real MCI continues, it does not reload from the top."""
+    b, music = _midi()
+    b.open(1, "GAMETHME.MID")
+    b.play(1)
+    assert music.plays == 1 and music.loads == ["GAMETHME.MID"]
+    b.play(1)
+    b.play(1)
+    assert music.plays == 1                         # no restart storm
+    assert music.loads == ["GAMETHME.MID"]
+
+
+def test_midi_play_restarts_after_song_ended():
+    """Once the song has finished, re-issuing MCI_PLAY (the game looping its
+    music) legitimately restarts it."""
+    b, music = _midi()
+    b.open(1, "GAMETHME.MID")
+    b.play(1)
+    music.busy = False                              # song ended
+    b.play(1)
+    assert music.plays == 2
+
+
+def test_midi_new_device_plays_over_busy():
+    """A different device id (a new song) plays even while the previous is
+    busy — the guard is per-device, not a global mute."""
+    b, music = _midi()
+    b.open(1, "A.MID")
+    b.open(2, "B.MID")
+    b.play(1)
+    b.play(2)
+    assert music.plays == 2 and music.loads[-1] == "B.MID"

@@ -175,10 +175,26 @@ class MidiBackend:
         path = self._devices.get(dev_id)
         if not self.ok or not path:
             return
+        music = self._pg.mixer.music
+        # Real MCI semantics: MCI_PLAY on a device that is already playing
+        # CONTINUES the current playback — it does not reload and restart from
+        # the top.  Only (re)start when this device's song is not currently
+        # sounding (a fresh play, or the game looping it after it ended).
+        # Without this guard a game that re-issues MCI_PLAY while polling status
+        # (SimAnt's music service loop) restarts the song every poll, which is
+        # heard as the same clip stuttering "over and over".
+        if self._playing == dev_id and music.get_busy():
+            return
         try:
-            self._pg.mixer.music.load(path)
-            self._pg.mixer.music.play()
+            import os
+            music.load(path)
+            music.play()
             self._playing = dev_id
+            self._plays = getattr(self, "_plays", 0) + 1
+            # Per-(re)start log: if a song shows up here repeatedly in quick
+            # succession, that is the repeat to chase (name + running count).
+            print(f"[audio] MIDI play #{self._plays}: {os.path.basename(path)}",
+                  flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[audio] MIDI play failed: {exc}", flush=True)
 
