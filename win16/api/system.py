@@ -404,6 +404,10 @@ class Win16System:
             data = bytearray()
         elif name in self.overlay_files:
             data = bytearray(self.overlay_files[name])
+        elif name in self.machine.api.provided_dlls:
+            # A DLL we provide as a Python API surface "exists" as a file — games
+            # probe for it (e.g. SimAnt _access()es mmsystem.dll) before loading.
+            data = bytearray(b"\x00")
         else:
             root = self.file_root or self.machine.exe.path.parent
             match = next((p for p in root.iterdir()
@@ -416,6 +420,26 @@ class Win16System:
         self.files[h] = VFile(name, data, writable=writable or create,
                               dirty=create)
         return h
+
+    def resolve_host_path(self, dos_path: str):
+        """Map a DOS path (e.g. ``C:\\sound\\gamethme.mid``) to the real file
+        under the game's root, following subdirectories case-insensitively.
+        Returns a Path or None.  Used to hand a real file to a host backend
+        (e.g. the MIDI player) — unlike file_open, it keeps the directory parts."""
+        from pathlib import Path
+        root = self.file_root or self.machine.exe.path.parent
+        p = dos_path.replace("/", "\\")
+        if len(p) >= 2 and p[1] == ":":
+            p = p[2:]
+        cur = Path(root)
+        for part in (x for x in p.split("\\") if x):
+            if not cur.is_dir():
+                return None
+            nxt = next((c for c in cur.iterdir() if c.name.upper() == part.upper()), None)
+            if nxt is None:
+                return None
+            cur = nxt
+        return cur if cur.is_file() else None
 
     def file_close(self, handle: int) -> bool:
         vf = self.files.pop(handle, None)

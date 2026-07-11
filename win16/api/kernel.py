@@ -435,28 +435,24 @@ def install(api: ApiRegistry) -> None:
         ctx.mem.load(seg, off, path + b"\x00")
         return len(path)
 
-    # -- dynamic library loading (KERNEL 95/96/97/47) ----------------------
+    # -- dynamic library loading (KERNEL 95/96/50/47) ----------------------
     # A program can LoadLibrary a DLL and GetProcAddress its exports at runtime
     # instead of static-linking it.  SimAnt does this for its MIDI music engine
     # (mmsystem.dll -> midiOutGetNumDevs / mciSendCommand).  We "provide" only
-    # the DLLs whose exports we implement as named procs; others honestly report
-    # not-found (HINSTANCE < 32) so the program falls back.
-    _SUPPORTED_DLLS = {"MMSYSTEM"}          # basename, upper, no extension
-
-    def _dll_key(name: str) -> str:
-        return name.replace("/", "\\").split("\\")[-1].upper().removesuffix(".DLL")
+    # the DLLs whose exports we implement (api.provided_dlls, e.g. MMSYSTEM.DLL);
+    # others honestly report not-found (HINSTANCE < 32) so the program falls back.
+    def _dll_file(name: str) -> str:
+        return name.replace("/", "\\").split("\\")[-1].upper()
 
     @api.register("KERNEL", 95, name="LoadLibrary", args="str")   # LoadLibrary(lpszLib)
     def LoadLibrary(ctx: CallContext) -> int:
-        sys: Win16System = ctx.registry.services["system"]
-        name = ctx.read_string(ctx.args[0]).decode("latin-1")
-        key = _dll_key(name)
-        libs = ctx.registry.services.setdefault("libraries", {})     # key -> hinst
-        if key not in _SUPPORTED_DLLS:
+        name = _dll_file(ctx.read_string(ctx.args[0]).decode("latin-1"))
+        libs = ctx.registry.services.setdefault("libraries", {})     # name -> hinst
+        if name not in ctx.registry.provided_dlls:
             return 2                    # ERROR_FILE_NOT_FOUND (< 32) — not provided
-        if key not in libs:
-            libs[key] = 0x0100 + len(libs)        # any HINSTANCE >= 32
-        return libs[key]
+        if name not in libs:
+            libs[name] = 0x0100 + len(libs)       # any HINSTANCE >= 32
+        return libs[name]
 
     @api.register("KERNEL", 96, name="FreeLibrary", args="word")  # FreeLibrary(hinst)
     def FreeLibrary(ctx: CallContext) -> int:
@@ -464,8 +460,8 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("KERNEL", 47, name="GetModuleHandle", args="str")  # GetModuleHandle(lpsz)
     def GetModuleHandle(ctx: CallContext) -> int:
-        key = _dll_key(ctx.read_string(ctx.args[0]).decode("latin-1"))
-        return ctx.registry.services.get("libraries", {}).get(key, 0)
+        name = _dll_file(ctx.read_string(ctx.args[0]).decode("latin-1"))
+        return ctx.registry.services.get("libraries", {}).get(name, 0)
 
     @api.register("KERNEL", 50, name="GetProcAddress", args="word str", ret="long")
     def GetProcAddress(ctx: CallContext) -> int:      # (hinst, lpszProc) -> FARPROC
@@ -479,7 +475,10 @@ def install(api: ApiRegistry) -> None:
         if (proc_ptr >> 16) == 0:
             return 0
         name = ctx.read_string(proc_ptr).decode("latin-1")
-        return ctx.registry.mint_proc_thunk(key, name)
+        # procs are registered under the module name (no ".DLL"); libs are keyed
+        # by the loaded file name (mmsystem.dll -> module MMSYSTEM).
+        module = key[:-4] if key.upper().endswith(".DLL") else key
+        return ctx.registry.mint_proc_thunk(module, name)
 
     @api.register("KERNEL", 5, args="word word")        # LocalAlloc(flags, size)
     def LocalAlloc(ctx: CallContext) -> int:
@@ -492,6 +491,16 @@ def install(api: ApiRegistry) -> None:
             for i in range(sys.local_heap.size_of(ptr)):
                 ctx.mem.wb(dgroup, ptr + i, 0)
         return ptr
+
+    @api.register("KERNEL", 8, name="LocalLock", args="word")   # LocalLock(handle)
+    def LocalLock(ctx: CallContext) -> int:
+        # Local blocks are fixed in the DGROUP near heap: the handle IS the near
+        # pointer, so locking is identity (matches LocalAlloc returning the offset).
+        return ctx.args[0]
+
+    @api.register("KERNEL", 9, name="LocalUnlock", args="word")  # LocalUnlock(handle)
+    def LocalUnlock(ctx: CallContext) -> int:
+        return 0                    # lock count reached 0 (fixed block)
 
     @api.register("KERNEL", 7, args="word")             # LocalFree(handle)
     def LocalFree(ctx: CallContext) -> int:

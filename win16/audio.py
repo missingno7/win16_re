@@ -141,3 +141,63 @@ class SquareWaveBackend:
             except Exception:  # noqa: BLE001
                 pass
             self.ok = False
+
+
+class MidiBackend:
+    """Plays the game's `.mid` songs through the host MIDI synth (pygame /
+    SDL_mixer's dedicated music stream).  Driven by the MMSYSTEM MCI layer's
+    open/play/stop/close (win16/api/mmsystem.py) — presentation only; the
+    deterministic record is `services["mci_log"]`, so audio never affects state.
+
+    Reuses whatever mixer a SquareWaveBackend already opened; the music stream
+    is independent of the SFX channels, so both play at once."""
+
+    def __init__(self) -> None:
+        self.ok = False
+        self._pg = None
+        self._devices: dict[int, str] = {}      # MCI device id -> host .mid path
+        self._playing = None
+        try:
+            import pygame
+            self._pg = pygame
+            if pygame.mixer.get_init() is None:
+                pygame.mixer.init()
+            self.ok = True
+            print("[audio] MIDI music via SDL_mixer", flush=True)
+        except Exception as exc:  # noqa: BLE001 — no synth is not a game bug
+            print(f"[audio] MIDI music disabled: {type(exc).__name__}: {exc}",
+                  flush=True)
+
+    def open(self, dev_id: int, host_path: str | None) -> None:
+        self._devices[dev_id] = host_path
+
+    def play(self, dev_id: int) -> None:
+        path = self._devices.get(dev_id)
+        if not self.ok or not path:
+            return
+        try:
+            self._pg.mixer.music.load(path)
+            self._pg.mixer.music.play()
+            self._playing = dev_id
+        except Exception as exc:  # noqa: BLE001
+            print(f"[audio] MIDI play failed: {exc}", flush=True)
+
+    def stop(self, dev_id: int) -> None:
+        if self.ok and self._playing == dev_id:
+            self._pg.mixer.music.stop()
+            self._playing = None
+
+    def close(self, dev_id: int) -> None:
+        self.stop(dev_id)
+        self._devices.pop(dev_id, None)
+
+    def is_playing(self, dev_id: int) -> bool:
+        return bool(self.ok and self._playing == dev_id
+                    and self._pg.mixer.music.get_busy())
+
+    def shutdown(self) -> None:
+        if self.ok:
+            try:
+                self._pg.mixer.music.stop()
+            except Exception:  # noqa: BLE001
+                pass

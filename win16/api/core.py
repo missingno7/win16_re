@@ -107,6 +107,11 @@ class ApiRegistry:
         self.slots: dict[tuple[str, int], int] = {}      # -> thunk offset
         self.call_log: list[str] = []
         self.services: dict[str, object] = {}            # named backend objects
+        # DLLs we PROVIDE (as a Python API surface, e.g. MMSYSTEM).  A provided
+        # DLL both LoadLibrary's successfully AND reports as an existing file
+        # (games probe for the .dll before loading it — SimAnt's music engine
+        # _access()es mmsystem.dll first).  Canonical names, e.g. "MMSYSTEM.DLL".
+        self.provided_dlls: set[str] = set()
         # By-NAME procs a program resolves at runtime via GetProcAddress
         # (dynamically-loaded DLLs — e.g. SimAnt's mmsystem MIDI).  Each is
         # handed back as a freshly-minted callable thunk (mint_proc_thunk).
