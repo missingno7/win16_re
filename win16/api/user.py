@@ -185,6 +185,29 @@ def _rects_bbox(rects) -> tuple | None:
             max(r[2] for r in rects), max(r[3] for r in rects))
 
 
+def _apply_paint_clip(surface, rects, before: bytes) -> None:
+    """Enforce the BeginPaint clip at EndPaint: keep the freshly-painted pixels
+    inside the update `rects`, restore everything outside from the pre-paint
+    snapshot `before`.
+
+    No-op if `before` no longer matches the surface's shape — the wndproc can
+    resize the client surface between BeginPaint and EndPaint, and the snapshot
+    of the old shape cannot be re-laid onto a differently-sized buffer.  In that
+    case the wndproc has already repainted the resized surface, so it is left
+    as-is (the correct fallback; never crash on a mid-paint resize)."""
+    import numpy as np
+    if len(before) != surface.h * surface.w * 3:
+        return
+    cur = np.frombuffer(bytes(surface.pixels), dtype=np.uint8).reshape(
+        surface.h, surface.w, 3)
+    out = np.frombuffer(before, dtype=np.uint8).reshape(
+        surface.h, surface.w, 3).copy()
+    for (l, t, r, b) in rects:
+        out[t:b, l:r] = cur[t:b, l:r]
+    surface.pixels[:] = out.tobytes()
+    surface.touch()
+
+
 def _fill_window_bg(sysobj, win) -> None:
     """Paint a window's surface with its class background brush.  Applied on
     creation and after every resize (a resize rebuilds the surface as black),
@@ -1606,14 +1629,7 @@ def install(api: ApiRegistry) -> None:
             # update region, restore everything outside it.
             win._paint_clip = None
             rects, before = clip
-            import numpy as np
-            s = win.surface
-            cur = np.frombuffer(bytes(s.pixels), dtype=np.uint8).reshape(s.h, s.w, 3)
-            out = np.frombuffer(before, dtype=np.uint8).reshape(s.h, s.w, 3).copy()
-            for (l, t, r, b) in rects:
-                out[t:b, l:r] = cur[t:b, l:r]
-            s.pixels[:] = out.tobytes()
-            s.touch()
+            _apply_paint_clip(win.surface, rects, before)
         return 1
 
     @api.register("USER", 66, args="word")              # GetDC(hwnd)
