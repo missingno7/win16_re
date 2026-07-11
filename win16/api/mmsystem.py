@@ -126,6 +126,7 @@ def install(api: ApiRegistry) -> None:
             if parm:                                    # return the device id
                 ctx.mem.ww(pseg, (poff + _OPEN_WDEVICEID) & 0xFFFF, dev_id)
             _log(ctx, "open", dev_id, element)
+            print(f"[mci] open dev={dev_id} ({element})", flush=True)
             if backend is not None and element is not None:
                 sysobj = ctx.registry.services["system"]
                 host = sysobj.resolve_host_path(element)
@@ -150,6 +151,14 @@ def install(api: ApiRegistry) -> None:
         # play / stop / close / set / seek / pause / resume — log + drive backend
         name = _MCI_NAMES.get(msg, f"#{msg:#x}")
         _log(ctx, name, dev, flags)
+        # Console trace of every state-changing MCI command so a live music
+        # toggle shows exactly what the game sends (open/play/stop/pause/resume/
+        # close) — the direct way to see whether a "disable then re-enable" even
+        # issues a play, and on which device/song.
+        if msg in (MCI_PLAY, MCI_STOP, MCI_PAUSE, MCI_RESUME, MCI_CLOSE):
+            song = state["devices"].get(dev)
+            print(f"[mci] {name} dev={dev} flags={flags:#x}"
+                  f"{f' ({song})' if song else ''}", flush=True)
         if backend is not None:
             if msg == MCI_PLAY:
                 backend.play(dev)
