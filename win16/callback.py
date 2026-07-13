@@ -138,9 +138,13 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
             f"callback {seg:04X}:{off:04X} did not return within {max_steps} "
             f"steps (at {s.cs:04X}:{s.ip:04X})")
     except _CallbackReturn:
-        pass                    # far-returned to the sentinel — done
-    finally:
-        frames.pop()
+        frames.pop()            # clean far-return to the sentinel — pop our frame
+    # No `finally` pop: if the VM STOPS mid-callback (a gap / halt / overrun
+    # re-raise), that exception propagates with our frame STILL on
+    # win16_callback_frames, so a crash snapshot records the in-flight callback
+    # and can resume it — otherwise the parked callback later far-returns to the
+    # sentinel with no frame (OrphanReturnError).  Nothing catches these and
+    # keeps running the VM, so the frame doesn't leak.
 
     if (s.sp & 0xFFFF) != saved_sp:
         raise CallbackOverrun(

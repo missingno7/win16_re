@@ -46,3 +46,24 @@ def test_unbounded_callback_runs_to_completion():
     cpu = _FakeCPU(return_after=50_000)          # would trip any finite cap
     ax, dx = call_far(cpu, 0x60, 0x0100, 0x2440, [], max_steps=None)
     assert (ax, dx) == (0x1234, 0x5678)          # the callback's result passes through
+    assert cpu.win16_callback_frames == []       # clean return pops our frame
+
+
+def test_frame_preserved_when_vm_stops_mid_callback():
+    # If the VM stops mid-callback (a gap/halt propagating), call_far must LEAVE
+    # the frame on win16_callback_frames so a crash snapshot records the in-flight
+    # callback and can resume it (else its later far-return orphans -> the
+    # OrphanReturnError seen when resuming a mid-callback crash snapshot).
+    from win16.callback import call_far
+
+    class _Stop(Exception):
+        pass
+
+    class _StoppingCPU(_FakeCPU):
+        def run(self, n):
+            raise _Stop()                        # VM stops immediately, mid-callback
+
+    cpu = _StoppingCPU(return_after=1)
+    with pytest.raises(_Stop):
+        call_far(cpu, 0x60, 0x0100, 0x2440, [], max_steps=None)
+    assert len(cpu.win16_callback_frames) == 1   # frame kept for the crash snapshot
