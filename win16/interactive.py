@@ -42,6 +42,11 @@ class InteractiveDriver:
         # Keep a long VM callback (the sim-tick TimerProc, where in-game spends
         # ALL its time) pausable, so F9/snapshot and the window stay responsive.
         sysobj.yield_check = self.check_pause
+        # ...and uncapped: a live sim-tick legitimately busy-waits on the real
+        # clock and on input (a paused game, a "press a key" prompt), so the
+        # runaway cap would kill a perfectly valid wait mid-callback.  Interactive
+        # is user-interruptible (close window / pause), so no cap is needed.
+        sysobj.callback_max_steps = None
 
     # -- host (GUI thread) side --------------------------------------------
     def now_ms(self) -> int:

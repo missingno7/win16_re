@@ -984,6 +984,7 @@ def install(api: ApiRegistry) -> None:
             ax, dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
                               [hwnd, msg, wparam,
                                (dwtime >> 16) & 0xFFFF, dwtime & 0xFFFF],
+                              max_steps=sys.callback_max_steps,
                               yield_check=sys.yield_check)
             return (dx << 16) | ax
         win = sys.handles.get(hwnd)

@@ -92,6 +92,11 @@ class Win16System:
     yield_check: object = None          # optional: callable() run between chunks
     #   of a long VM callback (SimAnt's sim-tick TimerProc) so the host can pause
     #   / take a snapshot / feed input instead of the UI freezing.
+    callback_max_steps: object = 20_000_000     # runaway cap for a VM callback
+    #   (DispatchMessage's sim-tick TimerProc).  Headless/replay keeps the cap to
+    #   catch a genuine hang; an interactive driver sets None (no cap) because a
+    #   live sim-tick legitimately busy-waits on the real clock and on input —
+    #   the cap would kill a paused game or a "press a key" wait mid-callback.
     demo_driver: object = None          # optional: a win16.demo.DemoDriver (v4
     #   replay).  When set, GetMessage/PeekMessage inject recorded input arrivals
     #   at their instruction counts and GetTickCount reproduces the recorded

@@ -89,12 +89,16 @@ def _install_return_hook(cpu, thunk_seg: int) -> None:
 
 
 def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
-             *, max_steps: int = 20_000_000, yield_check=None) -> tuple[int, int]:
+             *, max_steps: int | None = 20_000_000, yield_check=None
+             ) -> tuple[int, int]:
     """Far-call seg:off with 16-bit pascal args; returns (AX, DX) at return.
 
     `args` entries are 16-bit words, pushed in list order (pascal declaration
     order).  32-bit values must be pre-split into (hi, lo) word pairs.
     `yield_check`, if given, is called between chunks (host pause / input).
+    `max_steps` caps a runaway callback; pass None for no cap — correct for an
+    INTERACTIVE, user-pausable callback (SimAnt's sim-tick TimerProc legitimately
+    busy-waits on the real clock and on input, so a fixed cap kills a live wait).
     """
     from dos_re.cpu import HaltExecution
 
@@ -122,9 +126,10 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
     frames.append({"api": api_name, "argbytes": api_argbytes, "sp": saved_sp})
 
     steps = 0
+    unbounded = max_steps is None
     try:
-        while steps < max_steps:
-            steps += cpu.run(min(_CHUNK, max_steps - steps))
+        while unbounded or steps < max_steps:
+            steps += cpu.run(_CHUNK if unbounded else min(_CHUNK, max_steps - steps))
             if cpu.halted:
                 raise HaltExecution()
             if yield_check is not None:
