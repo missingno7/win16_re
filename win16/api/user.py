@@ -1175,6 +1175,28 @@ def install(api: ApiRegistry) -> None:
         # SimAnt walks a parent's children with it (after GetTopWindow).
         return _get_window(_sys(ctx), ctx.args[0], ctx.args[1])
 
+    @api.register("USER", 55, args="word ptr long")     # EnumChildWindows(hwnd, proc, lp)
+    def EnumChildWindows(ctx: CallContext) -> int:
+        # Call lpEnumFunc(hwndChild, lParam) for each child of hWndParent in
+        # top-to-bottom Z-order, stopping early if the callback returns FALSE.
+        # The callback is FAR PASCAL EnumChildProc(HWND, LPARAM) — the same
+        # convention DispatchMessage uses to deliver a TimerProc.  Our window
+        # tree is flat (SimAnt's children are leaf control windows), so this
+        # enumerates immediate children; a nested child would need recursion.
+        sys = _sys(ctx)
+        hwnd, proc, lparam = ctx.args
+        from win16.callback import call_far
+        from win16.loader import THUNK_SEG
+        seg, off = (proc >> 16) & 0xFFFF, proc & 0xFFFF
+        for child in _z_children(sys, hwnd):
+            ax, _dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
+                               [child.handle, (lparam >> 16) & 0xFFFF,
+                                lparam & 0xFFFF],
+                               yield_check=sys.yield_check)
+            if (ax & 0xFFFF) == 0:              # callback returned FALSE -> stop
+                break
+        return 1                                # documented non-zero success
+
     @api.register("USER", 45, args="word")              # BringWindowToTop(hwnd)
     def BringWindowToTop(ctx: CallContext) -> int:
         # Raise the window to the top of the z-order.  Draw order is the window

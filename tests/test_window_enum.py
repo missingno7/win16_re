@@ -75,3 +75,52 @@ def test_prev_and_child_and_bad_handle():
     assert _get_window(sysobj, 22, GW_HWNDPREV) == 0     # nothing above top
     assert _get_window(sysobj, 10, GW_CHILD) == 22       # top child of parent
     assert _get_window(sysobj, 999, GW_HWNDNEXT) == 0    # unknown handle
+
+
+def _enumchild_ctx(sysobj, proc, lparam):
+    from win16.api.core import ApiRegistry, CallContext
+    from win16.api import user
+    api = ApiRegistry()
+    user.install(api)
+    sysobj.yield_check = None
+    api.services["system"] = sysobj
+    ctx = CallContext(cpu=SimpleNamespace(), registry=api, module="USER",
+                      ordinal=55, name="EnumChildWindows",
+                      args=(10, proc, lparam))
+    return api, ctx
+
+
+def test_enumchildwindows_calls_back_each_child_top_to_bottom(monkeypatch):
+    from win16 import callback as cb_mod
+    sysobj = _sys_with([(10, 0), (20, 10), (21, 10), (22, 10)])
+    api, ctx = _enumchild_ctx(sysobj, 0x00AB1234, 0xDEADBEEF)
+    calls = []
+
+    def fake_call_far(cpu, thunk_seg, seg, off, args, *, yield_check=None):
+        calls.append((seg, off, tuple(args)))
+        return (1, 0)                                    # non-zero: continue
+    monkeypatch.setattr(cb_mod, "call_far", fake_call_far)
+
+    assert api.entries[("USER", 55)].handler(ctx) == 1
+    # one callback per child, top-to-bottom (22, 21, 20); proc split seg:off;
+    # lParam passed as (hi, lo) after the child handle.
+    assert calls == [
+        (0x00AB, 0x1234, (22, 0xDEAD, 0xBEEF)),
+        (0x00AB, 0x1234, (21, 0xDEAD, 0xBEEF)),
+        (0x00AB, 0x1234, (20, 0xDEAD, 0xBEEF)),
+    ]
+
+
+def test_enumchildwindows_stops_when_callback_returns_false(monkeypatch):
+    from win16 import callback as cb_mod
+    sysobj = _sys_with([(10, 0), (20, 10), (21, 10), (22, 10)])
+    api, ctx = _enumchild_ctx(sysobj, 0x00AB1234, 0)
+    seen = []
+
+    def fake_call_far(cpu, thunk_seg, seg, off, args, *, yield_check=None):
+        seen.append(args[0])
+        return (0, 0) if args[0] == 21 else (1, 0)       # stop at the 2nd child
+    monkeypatch.setattr(cb_mod, "call_far", fake_call_far)
+
+    assert api.entries[("USER", 55)].handler(ctx) == 1
+    assert seen == [22, 21]                              # 20 never reached
