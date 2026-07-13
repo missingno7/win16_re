@@ -91,6 +91,11 @@ def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
         "async_keys": sorted(machine.api.services.get("async_keys", set())),
         "async_keys_tapped": sorted(
             machine.api.services.get("async_keys_tapped", set())),
+        # Runtime LoadLibrary handles (name -> HINSTANCE).  These live on the
+        # registry, which load_snapshot rebuilds fresh, so without persisting
+        # them a resumed snapshot loses every dynamically-loaded DLL and
+        # GetProcAddress returns NULL — a stored FARPROC then far-calls NULL.
+        "libraries": dict(machine.api.services.get("libraries", {})),
         "digest": digest(machine),
     }
     (out / "state.json").write_text(json.dumps(meta, indent=1))
@@ -174,6 +179,10 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     machine.api.services["async_keys"] = set(meta.get("async_keys", []))
     machine.api.services["async_keys_tapped"] = set(
         meta.get("async_keys_tapped", []))
+    # Restore LoadLibrary handles so GetProcAddress resolves the same DLLs the
+    # live session had (else a FARPROC stored in game memory far-calls NULL).
+    if meta.get("libraries"):
+        machine.api.services["libraries"] = dict(meta["libraries"])
 
     got = digest(machine)
     if got != meta["digest"]:
