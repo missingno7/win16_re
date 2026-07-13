@@ -96,6 +96,13 @@ class Win16System:
     #   replay).  When set, GetMessage/PeekMessage inject recorded input arrivals
     #   at their instruction counts and GetTickCount reproduces the recorded
     #   (instruction -> tick) timeline — see win16/demo.py.
+    tick_recorder: object = None        # optional: a win16.tick_demo.TickDemoRecorder
+    #   — taps every consumed input-class message + WM_TIMER boundary (works on
+    #   top of live play OR a v4 replay: the conversion path).
+    tick_driver: object = None          # optional: a win16.tick_demo.TickDemoDriver
+    #   — hook-config-invariant replay: input injected per TICK bucket, the
+    #   boundary WM_TIMER delivered on the game's own ask, GetTickCount served
+    #   from the recording.  Mutually exclusive with demo_driver.
     input_drainer: object = None        # optional: callable() moving host input
     #   into msg_queue.  An interactive driver sets this so PeekMessage (which
     #   scans msg_queue directly, not via message_source) sees freshly-posted
@@ -190,7 +197,23 @@ class Win16System:
                 del self.msg_queue[i]
                 if self.input_drainer is None:      # else noted at drain time
                     self._note_input(m)             # feed polled state (mouse/keys)
+                if self.tick_recorder is not None:
+                    self._tick_record(m)
             return m
+        # Tick replay: the queue is empty — deliver the current bucket's next
+        # recorded message on demand (consumption order; see win16/tick_demo.py).
+        # Once the bucket is drained the recorded boundary WM_TIMER is offered to
+        # any ask whose filter admits it — INCLUDING the (0,0) any-scan (real
+        # PeekMessage(0,0) returns a due WM_TIMER; SimAnt's cold-start modal
+        # spins on an any-scan peek, so gating on an explicit WM_TIMER filter
+        # would stall it there forever).
+        if self.tick_driver is not None:
+            m = self.tick_driver.next_input(hwnd_filter, lo, hi, remove)
+            if m is not None:
+                return m
+            if (lo == 0 and hi == 0) or lo <= 0x0113 <= hi:
+                return self.tick_driver.timer_ask(hwnd_filter, remove)
+            return None
         # A due WM_TIMER is discoverable by PeekMessage too, not only GetMessage.
         # SimAnt's sim tick (a SetTimer TimerProc) paces its frame by spinning on
         # PeekMessage(.., WM_TIMER, WM_TIMER, PM_REMOVE) until the next tick is
@@ -200,8 +223,19 @@ class Win16System:
         if (lo or hi) and lo <= 0x0113 <= hi:
             tm = self._due_timer(hwnd_filter, remove)
             if tm is not None:
+                if remove and self.tick_recorder is not None:
+                    self.tick_recorder.boundary(tm)
                 return tm
         return None
+
+    def _tick_record(self, m) -> None:
+        """Tick-recorder tap for one CONSUMED message: external input is
+        bucketed under the current tick; a WM_TIMER closes it (the boundary)."""
+        from win16.tick_demo import is_input_message
+        if m[1] == 0x0113:
+            self.tick_recorder.boundary(m)
+        elif is_input_message(m[1]):
+            self.tick_recorder.input(m)
 
     def _due_timer(self, hwnd_filter: int, remove: bool):
         """The earliest armed timer that is now due (by the GetTickCount clock:
@@ -236,6 +270,11 @@ class Win16System:
         Without this, a snapshot whose wall clock ran ahead of the instruction
         pace freezes GetTickCount on resume until the raw floor catches up —
         tens of millions of instructions of stuck busy-waits."""
+        tick_driver = getattr(self, "tick_driver", None)
+        if tick_driver is not None:
+            # Tick replay: the current tick's recorded base + a deterministic
+            # call-count escape — no instruction counts (see win16/tick_demo.py).
+            return tick_driver.tick_count() & 0xFFFFFFFF
         driver = getattr(self, "demo_driver", None)
         if driver is not None:
             # Replay: reproduce the recorded wall-clock timeline from the demo's
@@ -309,12 +348,20 @@ class Win16System:
                 if win.visible and win.dirty:
                     self.call_wndproc(win, 0x000F, 0, 0)     # WM_PAINT
                     return True
+        if timers and self.tick_driver is not None:
+            raise NotImplementedError(
+                "tick replay through a modal timer pump — no recording has "
+                "exercised this; implement against the first one that does")
         if timers and self.timer_due:
             key, due = min(self.timer_due.items(), key=lambda kv: kv[1])
             if self.clock_ms >= due:
                 self.timer_due[key] = self.clock_ms + self.timers[key]
                 win = self.handles.get(key[0])
                 if win is not None:
+                    if self.tick_recorder is not None:
+                        self.tick_recorder.boundary(
+                            (key[0], 0x0113, key[1],
+                             self.timer_procs.get(key, 0), self.clock_ms, 0))
                     self.call_wndproc(win, 0x0113, key[1], 0)  # WM_TIMER
                     return True
         return False
@@ -329,7 +376,8 @@ class Win16System:
             msg = self.message_source(self)
         else:
             msg = self.next_message()
-        if msg is not None and self.input_drainer is None and self.demo_driver is None:
+        if msg is not None and self.input_drainer is None and self.demo_driver is None \
+                and self.tick_driver is None:
             # Polled input state (keys + mouse pos/buttons) is DERIVED from the
             # message stream, not from host polling, so GetAsyncKeyState /
             # GetKeyState / GetCursorPos see the same state on live play and demo
@@ -338,7 +386,13 @@ class Win16System:
             # GetKeyState) read this — see _note_input.  When an interactive
             # driver is attached it notes polled state at ARRIVAL time (so a
             # non-pumping poll loop still sees it), so we must not double-note.
+            # (A tick driver also notes at its bucket injection.)
             self._note_input(msg)
+        if self.tick_recorder is not None:
+            if msg is None:
+                self.tick_recorder.quit()
+            else:
+                self._tick_record(msg)
         return msg
 
     def next_message(self):
@@ -354,6 +408,21 @@ class Win16System:
         for win in self.windows:
             if win.visible and win.dirty:
                 return (win.handle, 0x000F, 0, 0, self.clock_ms, 0)   # WM_PAINT
+        if self.tick_driver is not None:
+            # Tick replay, idle: the current bucket's next recorded message on
+            # demand; once the bucket drains, the boundary — never from clock
+            # comparison (see win16/tick_demo.py).
+            m = self.tick_driver.next_input(0, 0, 0, True)
+            if m is not None:
+                return m
+            if self.quit_posted is not None:    # quit landed with the bucket end
+                return None
+            if self.timers:
+                return self.tick_driver.timer_ask(0, True)
+            from win16.demo import DemoEnded
+            raise DemoEnded(
+                "tick replay: GetMessage wanted input with no armed timer — "
+                "bucket exhausted (end of the recorded pre-tick phase?)")
         if self.timers:
             key, due = min(self.timer_due.items(), key=lambda kv: kv[1])
             self.clock_ms = max(self.clock_ms, due)
