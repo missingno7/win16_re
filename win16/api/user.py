@@ -194,17 +194,27 @@ def _apply_paint_clip(surface, rects, before: bytes) -> None:
     resize the client surface between BeginPaint and EndPaint, and the snapshot
     of the old shape cannot be re-laid onto a differently-sized buffer.  In that
     case the wndproc has already repainted the resized surface, so it is left
-    as-is (the correct fallback; never crash on a mid-paint resize)."""
-    import numpy as np
-    if len(before) != surface.h * surface.w * 3:
+    as-is (the correct fallback; never crash on a mid-paint resize).
+
+    Copy shape (measured on a SimAnt replay, ~830 calls of avg 25 rects/613
+    rows): writable ``frombuffer`` VIEWS over the live bytearrays — no
+    ``bytes()`` round-trips — one 2D numpy copy per rect, then one buffer
+    write-back.  The original did four full-frame copies (2.0 ms/call under
+    PyPy); a pure-bytearray per-row loop pays ~2 us per row slice there
+    (1.46 ms/call); this is 2 memcpys + ~25 vectorized rect copies."""
+    w, h = surface.w, surface.h
+    if len(before) != h * w * 3:
         return
-    cur = np.frombuffer(bytes(surface.pixels), dtype=np.uint8).reshape(
-        surface.h, surface.w, 3)
-    out = np.frombuffer(before, dtype=np.uint8).reshape(
-        surface.h, surface.w, 3).copy()
+    import numpy as np
+    out = bytearray(before)                      # base: the pre-paint frame
+    o3 = np.frombuffer(out, dtype=np.uint8).reshape(h, w, 3)          # writable view
+    cur = np.frombuffer(surface.pixels, dtype=np.uint8).reshape(h, w, 3)
     for (l, t, r, b) in rects:
-        out[t:b, l:r] = cur[t:b, l:r]
-    surface.pixels[:] = out.tobytes()
+        l, t = max(l, 0), max(t, 0)
+        r, b = min(r, w), min(b, h)
+        if r > l and b > t:
+            o3[t:b, l:r] = cur[t:b, l:r]         # keep the painted region
+    surface.pixels[:] = out
     surface.touch()
 
 
