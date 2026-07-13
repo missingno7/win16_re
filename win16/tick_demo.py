@@ -50,11 +50,17 @@ __all__ = ["TickDemo", "masked_digest", "record_ticks", "replay_to",
 VERSION = 1
 WM_TIMER = 0x0113
 
-#: Deterministic within-tick clock: GetTickCount advances 1 ms per this many
-#: calls past the tick's base value.  API-call counts are game-logic-driven
-#: (the same game state makes the same calls), NOT instruction-driven, so the
-#: escape is hook-config-invariant — it exists so a phase that waits purely on
-#: time (a splash timeout, the pre-tick title screen) still elapses.
+#: Within-tick clock RAMP: GetTickCount is read many times per tick (SimAnt
+#: reads it 100-250x/tick, ALL through one wrapper GR!_TickCount), returning a
+#: smooth value ramp from this tick's fire-time toward the next tick's.  We
+#: reproduce that ramp: reach the next boundary's recorded ms over this many
+#: clock reads, then hold — so a render loop that waits for the clock to cross
+#: the tick's span (a blink/animation timer) elapses, instead of spinning.  Read
+#: counts are game-logic-driven (same state -> same reads), so hook-invariant.
+RAMP_CALLS = 8
+
+#: Tail clock rate past the last recorded boundary (end-of-demo), 1 ms per N
+#: reads — only matters after every tick is consumed.
 STALL_CALLS_PER_MS = 32
 
 
@@ -143,6 +149,14 @@ class TickDemoRecorder:
         self.bucket = 0
         self.records = 0
         self._quit_done = False
+        self._clk_base = ms0            # deltas encoded off the last boundary ms
+        self._clk: list[int] = []       # this bucket's GetTickCount reads
+
+    def clock(self, value: int) -> None:
+        """One GetTickCount read the game consumed this tick — the sideband the
+        replay reproduces so clock-derived state (sim timing, tick-seeded RNG,
+        animation) matches byte-for-byte (module docstring / dos_re.tick_demo)."""
+        self._clk.append(value)
 
     def input(self, msg) -> None:
         self._fh.write(json.dumps(
@@ -150,11 +164,17 @@ class TickDemoRecorder:
         self.records += 1
 
     def boundary(self, msg) -> None:
+        # Store the tick's clock reads as deltas off the bucket base (small,
+        # monotone) — the pacing-spin tail is redundant on replay (its reads are
+        # far fewer) but harmless; the GAMEPLAY reads come first and are exact.
+        deltas = [v - self._clk_base for v in self._clk]
         self._fh.write(json.dumps(
             {"t": "b", "k": self.bucket, "key": [msg[0], msg[2]],
-             "ms": msg[4], "d": None}) + "\n")
+             "ms": msg[4], "d": None, "cb": self._clk_base, "clk": deltas}) + "\n")
         self.bucket += 1
         self.records += 1
+        self._clk_base = msg[4]
+        self._clk = []
 
     def quit(self) -> None:
         if not self._quit_done:
@@ -209,8 +229,14 @@ class TickDemoDriver:
             raise ValueError(
                 f"{path}: no digests recorded — run the canonicalization pass "
                 f"first (a tick replay with mode='record', then save())")
+        # Per-bucket recorded GetTickCount reads (absolute), if the demo carries
+        # them (the clock sideband); else None -> synthetic ramp fallback.
+        self.clocks: list[list[int] | None] = [
+            ([b["cb"] + d for d in b["clk"]] if "clk" in b else None)
+            for b in self.boundaries]
         self.bucket = 0                     # current bucket (0 = pre-tick)
         self._cursor = 0                    # next undelivered msg in the bucket
+        self._clk_i = 0                     # next clock-read index in the bucket
         self.ticks_checked = 0
         self._calls = 0                     # GetTickCount stall-escape counter
         self._ms_floor = self.ms0
@@ -282,6 +308,7 @@ class TickDemoDriver:
                 self.ticks_checked += 1
             self.bucket += 1
             self._cursor = 0
+            self._clk_i = 0
             self._calls = 0
             if self.quit_k == self.bucket and not self.buckets[self.bucket]:
                 self.sys.quit_posted = True
@@ -295,11 +322,33 @@ class TickDemoDriver:
         return self.boundaries[self.bucket - 1]["ms"]
 
     def tick_count(self) -> int:
-        """GetTickCount under tick replay: the current tick's recorded base
-        plus a deterministic call-count escape (see STALL_CALLS_PER_MS), clamped
-        monotonic across boundaries."""
+        """GetTickCount under tick replay.  If the demo carries the clock
+        sideband, return the exact recorded read for this tick (by index; the
+        gameplay reads come first and align regardless of the shorter replay
+        pacing-spin) — this is what makes clock-derived state byte-faithful.
+        Otherwise (or once the recorded reads run out), fall back to the
+        synthetic ramp+escape.  Clamped monotonic either way."""
+        clk = self.clocks[self.bucket] if self.bucket < len(self.clocks) else None
+        if clk is not None and self._clk_i < len(clk):
+            ms = clk[self._clk_i]
+            self._clk_i += 1
+            self._calls += 1
+            if ms < self._ms_floor:
+                ms = self._ms_floor
+            self._ms_floor = ms
+            return ms
         self._calls += 1
-        ms = self._base_ms() + self._calls // STALL_CALLS_PER_MS
+        lo = self._base_ms()
+        span = (self.boundaries[self.bucket]["ms"] - lo
+                if self.bucket < len(self.boundaries) else 0)
+        if span < 0:
+            span = 0
+        # RAMP fast to the next boundary (so a render loop waiting on the tick's
+        # clock ramp elapses), but also keep ESCAPING past it (so the long
+        # pre-tick init / any multi-tick wait elapses instead of pinning at the
+        # boundary).  The max of the two advances gives both.
+        ramp = span if self._calls >= RAMP_CALLS else span * self._calls // RAMP_CALLS
+        ms = lo + max(ramp, self._calls // STALL_CALLS_PER_MS)
         if ms < self._ms_floor:
             ms = self._ms_floor
         self._ms_floor = ms
@@ -316,7 +365,11 @@ class TickDemoDriver:
                     out.write(json.dumps({"t": "i", "k": k, "v": list(m)}) + "\n")
                 if k < len(self.boundaries):
                     b = self.boundaries[k]
-                    out.write(json.dumps({"t": "b", "k": k, "key": b["key"],
-                                          "ms": b["ms"], "d": b["d"]}) + "\n")
+                    rec = {"t": "b", "k": k, "key": b["key"], "ms": b["ms"],
+                           "d": b["d"]}
+                    if "clk" in b:                       # preserve the sideband
+                        rec["cb"] = b["cb"]
+                        rec["clk"] = b["clk"]
+                    out.write(json.dumps(rec) + "\n")
             if self.quit_k is not None:
                 out.write(json.dumps({"t": "quit", "k": self.quit_k}) + "\n")

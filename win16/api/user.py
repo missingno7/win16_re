@@ -1510,7 +1510,11 @@ def install(api: ApiRegistry) -> None:
         # instruction-derived floor: monotonic, deterministic (oracle-safe),
         # and driven purely by progress.  Message-timed games keep their
         # larger clock_ms unchanged.
-        return _sys(ctx).tick_count()
+        sys = _sys(ctx)
+        v = sys.tick_count()
+        if sys.tick_recorder is not None:       # clock sideband (tick demos)
+            sys.tick_recorder.clock(v)
+        return v
 
     @api.register("USER", 17, args="ptr")               # GetCursorPos(lpPoint)
     def GetCursorPos(ctx: CallContext) -> int:

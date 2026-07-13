@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from win16.demo import DemoDivergence, DemoEnded
-from win16.tick_demo import (STALL_CALLS_PER_MS, TickDemoDriver,
+from win16.tick_demo import (RAMP_CALLS, STALL_CALLS_PER_MS, TickDemoDriver,
                              TickDemoRecorder, WM_TIMER, is_input_message)
 
 CLICK0 = (5, 0x0201, 1, 0x00100010, 100, 0)      # WM_LBUTTONDOWN, bucket 0
@@ -26,13 +26,27 @@ TIMER = (7, WM_TIMER, 1, 0, 0, 0)
 def _record(tmp_path):
     p = tmp_path / "t.tickdemo"
     rec = TickDemoRecorder(p, "GAME.EXE", ms0=90)
+    rec.clock(95); rec.clock(120)                # bucket 0's GetTickCount reads
     rec.input(CLICK0)                            # consumed pre-tick
     rec.boundary((7, WM_TIMER, 1, 0, 200, 0))    # boundary 0 (ends bucket 0)
+    rec.clock(205)                               # bucket 1's read
     rec.input(KEY1)                              # consumed in tick 1
     rec.boundary((7, WM_TIMER, 1, 0, 217, 0))    # boundary 1
     rec.quit()
     rec.close()
     return p
+
+
+def test_clock_sideband_replays_recorded_reads_exactly(tmp_path):
+    d = TickDemoDriver(_record(tmp_path), mode="off")
+    sysobj, _ = _fake_sys()
+    d.install(sysobj)
+    assert d.clocks[0] == [95, 120] and d.clocks[1] == [205]
+    assert d.tick_count() == 95                  # exact recorded reads, in order
+    assert d.tick_count() == 120
+    assert d.tick_count() >= 120                 # past the recorded reads -> ramp/escape, monotonic
+    _drain_then_boundary(d)                       # boundary 0 -> bucket 1
+    assert d.tick_count() == 205                 # bucket 1's recorded read
 
 
 def _fake_sys():
@@ -92,20 +106,25 @@ def _drain_then_boundary(d):
     return d.timer_ask(0, True)
 
 
-def test_clock_serves_base_plus_stall_escape_monotonic(tmp_path):
+def test_clock_ramps_to_next_boundary_then_holds_monotonic(tmp_path):
     d = TickDemoDriver(_record(tmp_path), mode="off")
     sysobj, _ = _fake_sys()
     d.install(sysobj)
-    assert d.tick_count() == 90                  # pre-tick: header ms0
-    for _ in range(STALL_CALLS_PER_MS):
-        last = d.tick_count()
-    assert last == 91                            # the deterministic escape
-    _drain_then_boundary(d)
-    assert d.tick_count() == 200                 # tick 1: recorded base
-    # a recording whose next base steps backward is clamped monotonic
+    # bucket 0: ramp from ms0=90 toward boundary 0's ms=200 over RAMP_CALLS.
+    first = d.tick_count()
+    assert 90 <= first < 200
+    for _ in range(RAMP_CALLS):
+        v = d.tick_count()
+    assert v >= 200                              # reached the boundary...
+    assert d.tick_count() >= 200                 # ...and keeps escaping past it
+    _drain_then_boundary(d)                       # boundary 0 -> tick 1
+    # bucket 1: ramp from boundary0.ms=200 toward boundary1.ms=217, monotonic.
+    for _ in range(RAMP_CALLS):
+        v = d.tick_count()
+    assert v >= 217
+    # a recording whose next base steps backward stays clamped monotonic
     d.boundaries[1]["ms"] = 150
-    _drain_then_boundary(d)
-    assert d.tick_count() >= 200
+    assert d.tick_count() >= 217
 
 
 def test_check_mode_raises_at_first_divergent_tick(tmp_path):
