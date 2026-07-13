@@ -346,10 +346,12 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("KERNEL", 22, args="word")            # GlobalFlags(handle)
     def GlobalFlags(ctx: CallContext) -> int:
-        # Low byte = lock count, high byte = GMEM flags (GMEM_DISCARDABLE 0x01,
-        # GMEM_DISCARDED 0x40).  Every block in the selector heap is fixed,
-        # non-discardable and never discarded, so the flags word is 0.
-        return 0
+        # Low byte = lock count, 0x0100 = GMEM_DISCARDABLE (a discardable cache —
+        # SimAnt's tile chunk-heap — evicts only blocks reported discardable and
+        # unlocked; without these it finds nothing evictable and panics).  We
+        # never move/discard blocks, so GMEM_DISCARDED (0x4000) stays clear.
+        sys: Win16System = ctx.registry.services["system"]
+        return sys.huge_heap.flags(ctx.args[0])
 
     @api.register("KERNEL", 25, args="long", ret="long")  # GlobalCompact(minfree)
     def GlobalCompact(ctx: CallContext) -> int:
@@ -362,14 +364,17 @@ def install(api: ApiRegistry) -> None:
     def GlobalAlloc(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
         flags, size = ctx.args
-        return sys.global_alloc(size, zero=bool(flags & 0x0040))   # GMEM_ZEROINIT
+        return sys.global_alloc(size, zero=bool(flags & 0x0040),   # GMEM_ZEROINIT
+                                discardable=bool(flags & 0x0100))  # GMEM_DISCARDABLE
 
     @api.register("KERNEL", 16, args="word long word")  # GlobalReAlloc(h, size, flags)
     def GlobalReAlloc(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
         handle, size, flags = ctx.args
         hh = sys.huge_heap
-        if flags & 0x0080:                  # GMEM_MODIFY: attributes only
+        if flags & 0x0080:                  # GMEM_MODIFY: attributes only, no move
+            if hh.is_block(handle):         # toggle GMEM_DISCARDABLE in place
+                hh.set_discardable(handle, bool(flags & 0x0100))
             return handle
         old_lin = hh.linear_base(handle)
         old_size = hh.size_of(handle)
@@ -391,11 +396,17 @@ def install(api: ApiRegistry) -> None:
     def GlobalLock(ctx: CallContext) -> int:
         sys: Win16System = ctx.registry.services["system"]
         h = ctx.args[0]
-        return (h << 16) if sys.is_global(h) else 0           # far ptr selector:0
+        if not sys.is_global(h):
+            return 0
+        sys.huge_heap.lock(h)               # count it so GlobalFlags reports it
+        return h << 16                      # far ptr selector:0
 
     @api.register("KERNEL", 19, args="word")            # GlobalUnlock(handle)
     def GlobalUnlock(ctx: CallContext) -> int:
-        return 0                    # nothing moves; unlock is a no-op success
+        sys: Win16System = ctx.registry.services["system"]
+        # Drop the lock count (never moves memory).  Returns TRUE while still
+        # locked, FALSE when fully unlocked — real GlobalUnlock's contract.
+        return 1 if sys.huge_heap.unlock(ctx.args[0]) > 0 else 0
 
     @api.register("KERNEL", 17, args="word")            # GlobalFree(handle)
     def GlobalFree(ctx: CallContext) -> int:

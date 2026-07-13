@@ -66,3 +66,39 @@ def test_exhaustion_returns_zero_not_crash():
     assert h.alloc(1000)
     assert h.alloc(1000)
     assert h.alloc(1000) == 0                 # out of linear space
+
+
+def test_globalflags_lock_count_low_byte():
+    # GlobalFlags' low byte is the lock count; a discardable cache reads it to
+    # skip blocks still in use.  Lock/unlock count, saturating and never below 0.
+    sb: dict[int, int] = {}
+    h = HugeHeap(sb, 0x100000, 0x400000)
+    s = h.alloc(1000)
+    assert h.flags(s) == 0                    # freshly allocated, unlocked
+    h.lock(s); h.lock(s)
+    assert h.flags(s) & 0xFF == 2             # two locks held
+    assert h.unlock(s) == 1 and h.flags(s) & 0xFF == 1
+    assert h.unlock(s) == 0 and h.flags(s) & 0xFF == 0
+    assert h.unlock(s) == 0                   # never underflows
+    assert h.flags(0xDEAD) == 0              # unknown handle -> 0, no crash
+
+
+def test_discardable_attribute_toggles_and_clears_on_free():
+    # A block allocated moveable is later re-marked discardable in place
+    # (GlobalReAlloc GMEM_MODIFY); GlobalFlags must then report 0x0100 so the
+    # tile cache can identify it as evictable.  Freeing forgets the attribute.
+    sb: dict[int, int] = {}
+    h = HugeHeap(sb, 0x100000, 0x400000)
+    s = h.alloc(1000)                         # moveable, not discardable
+    assert not (h.flags(s) & 0x0100)
+    h.set_discardable(s, True)
+    assert h.flags(s) & 0x0100               # now reported discardable
+    h.set_discardable(s, False)
+    assert not (h.flags(s) & 0x0100)
+    # alloc(discardable=True) is the direct path
+    d = h.alloc(1000, discardable=True)
+    assert h.flags(d) & 0x0100
+    h.free(d)
+    assert h.flags(d) == 0                    # attribute + lock state gone
+    h.set_discardable(0xDEAD, True)          # unknown handle -> no-op, no crash
+    assert h.flags(0xDEAD) == 0

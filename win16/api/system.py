@@ -544,10 +544,13 @@ class Win16System:
     def h_instance(self) -> int:
         return self.machine.seg_bases[self.machine.exe.header.auto_data_seg]
 
-    def global_alloc(self, size: int, *, zero: bool = False) -> int:
+    def global_alloc(self, size: int, *, zero: bool = False,
+                     discardable: bool = False) -> int:
         """Allocate a global block via the selector heap; the returned base
-        selector IS the handle.  Returns 0 on failure (out of memory)."""
-        seg = self.huge_heap.alloc(size)
+        selector IS the handle.  Returns 0 on failure (out of memory).
+        `discardable` (GMEM_DISCARDABLE) is remembered for GlobalFlags so a
+        discardable cache can identify evictable blocks."""
+        seg = self.huge_heap.alloc(size, discardable=discardable)
         if seg and zero:
             base = self.huge_heap.linear_base(seg)
             self.machine.mem.data[base:base + size] = b"\x00" * size

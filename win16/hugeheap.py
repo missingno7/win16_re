@@ -44,6 +44,12 @@ class HugeHeap:
         self._sel_free: list[tuple[int, int]] = []  # (start_selector, count)
         self._blocks: dict[int, tuple[int, int, int, int]] = {}
         #              base_selector -> (lin_base, lin_size, n_selectors, req_size)
+        # GlobalFlags state: GMEM_DISCARDABLE blocks + per-handle lock counts.
+        # A discardable cache (SimAnt's tile chunk-heap) evicts by GlobalFlags:
+        # it only frees blocks reported discardable and NOT locked, so both must
+        # be tracked or the cache finds nothing evictable and panics.
+        self._discardable: set[int] = set()
+        self._locks: dict[int, int] = {}
 
     # -- linear space (byte-granular, coalescing) --------------------------
     def _alloc_lin(self, size: int) -> int | None:
@@ -86,7 +92,7 @@ class HugeHeap:
         self._sel_free.append((start, count))
 
     # -- public API --------------------------------------------------------
-    def alloc(self, size: int) -> int:
+    def alloc(self, size: int, *, discardable: bool = False) -> int:
         """Returns a base selector (handle), or 0 on failure."""
         n = max((size + SEG - 1) // SEG, 1)
         lin_size = n * SEG if n > 1 else max(size, 1)
@@ -100,7 +106,45 @@ class HugeHeap:
         for k in range(n):
             self.sel_base[descriptor(base_sel + k * 8)] = lin_base + k * SEG
         self._blocks[base_sel] = (lin_base, lin_size, n, size)
+        if discardable:
+            self._discardable.add(base_sel)
         return base_sel
+
+    # -- GlobalFlags state (lock count + GMEM_DISCARDABLE) ------------------
+    def lock(self, base_sel: int) -> int:
+        """GlobalLock: bump the lock count (saturating at 0xFF, as GlobalFlags'
+        low byte does)."""
+        if base_sel in self._blocks:
+            self._locks[base_sel] = min(self._locks.get(base_sel, 0) + 1, 0xFF)
+        return self._locks.get(base_sel, 0)
+
+    def unlock(self, base_sel: int) -> int:
+        """GlobalUnlock: drop the lock count; returns the remaining count."""
+        n = self._locks.get(base_sel, 0)
+        if n > 0:
+            n -= 1
+            self._locks[base_sel] = n
+        return n
+
+    def set_discardable(self, base_sel: int, on: bool) -> None:
+        """GlobalReAlloc(GMEM_MODIFY): toggle the GMEM_DISCARDABLE attribute of
+        an existing block without moving it.  Win16 apps allocate moveable then
+        re-mark discardable, which is what makes a block cache-evictable."""
+        if base_sel not in self._blocks:
+            return
+        if on:
+            self._discardable.add(base_sel)
+        else:
+            self._discardable.discard(base_sel)
+
+    def flags(self, base_sel: int) -> int:
+        """GlobalFlags word: low byte = lock count, 0x0100 = GMEM_DISCARDABLE."""
+        if base_sel not in self._blocks:
+            return 0
+        f = self._locks.get(base_sel, 0) & 0xFF
+        if base_sel in self._discardable:
+            f |= 0x0100
+        return f
 
     def free(self, base_sel: int) -> bool:
         info = self._blocks.pop(base_sel, None)
@@ -111,6 +155,8 @@ class HugeHeap:
             self.sel_base.pop(descriptor(base_sel + k * 8), None)
         self._free_lin(lin_base, lin_size)
         self._free_selectors(base_sel, n)
+        self._discardable.discard(base_sel)
+        self._locks.pop(base_sel, None)
         return True
 
     def free_bytes(self) -> int:
