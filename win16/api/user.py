@@ -1606,7 +1606,12 @@ def install(api: ApiRegistry) -> None:
     @api.register("USER", 125, args="word ptr word")    # InvalidateRect(hwnd, rc, erase)
     def InvalidateRect(ctx: CallContext) -> int:
         sys = _sys(ctx)
-        win = sys.handles.require(ctx.args[0], Window)
+        win = sys.handles.get(ctx.args[0])
+        if not isinstance(win, Window):
+            # A dialog control's HWND (e.g. SimAnt's SaveAs list box, from
+            # GetDlgItem): our dialog UI paints on demand, so invalidating a
+            # control is a benign no-op rather than a Window-only crash.
+            return 1
         rect = None
         if ctx.args[1]:
             seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF

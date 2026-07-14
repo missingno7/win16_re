@@ -54,6 +54,24 @@ EM_GETSEL = WM_USER + 0
 EM_SETSEL = WM_USER + 1
 EM_LIMITTEXT = WM_USER + 21
 
+# List-box messages (WM_USER-relative in Win16).
+LB_ADDSTRING = WM_USER + 1
+LB_INSERTSTRING = WM_USER + 2
+LB_DELETESTRING = WM_USER + 3
+LB_RESETCONTENT = WM_USER + 5
+LB_SETSEL = WM_USER + 6
+LB_SETCURSEL = WM_USER + 7
+LB_GETSEL = WM_USER + 8
+LB_GETCURSEL = WM_USER + 9
+LB_GETTEXT = WM_USER + 10
+LB_GETTEXTLEN = WM_USER + 11
+LB_GETCOUNT = WM_USER + 12
+LB_SELECTSTRING = WM_USER + 13
+LB_GETTOPINDEX = WM_USER + 15
+LB_FINDSTRING = WM_USER + 16
+LB_SETTOPINDEX = WM_USER + 18
+LB_ERR = 0xFFFF
+
 
 @dataclass
 class DialogControlState:
@@ -128,6 +146,33 @@ def _dialog(ctx: CallContext, hdlg: int) -> Dialog:
 
 def _host(ctx: CallContext):
     return ctx.registry.services.get("dialog_ui")
+
+
+def _fill_dir_control(ctx: CallContext, hdlg: int, spec_ptr: int,
+                      list_id: int, static_id: int) -> int:
+    """Shared body of DlgDirList / DlgDirListComboBox: fill a list-box / combo
+    control with the game-directory file names matching the spec, update the
+    optional static "current path", and return non-zero when any matched."""
+    import fnmatch
+    dlg = _dialog(ctx, hdlg)
+    sysobj = _sys(ctx)
+    spec = ctx.read_string(spec_ptr).decode("latin-1") or "*.*"
+    pattern = sysobj._canonical(spec)
+    root = sysobj.file_root or sysobj.machine.exe.path.parent
+    names = sorted(p.name.upper() for p in root.iterdir()
+                   if p.is_file() and fnmatch.fnmatch(p.name.upper(), pattern))
+    ctrl = dlg.control(list_id)
+    ctrl.items = names
+    ctrl.sel = 0 if names else -1
+    host = _host(ctx)
+    if host is not None:
+        host.update(dlg, ctrl)
+    if static_id:                       # static shows the "current path"
+        static = dlg.control(static_id)
+        static.text = "C:\\"
+        if host is not None:
+            host.update(dlg, static)
+    return 1 if names else 0
 
 
 def _call_proc(ctx: CallContext, dlg: Dialog, msg: int, wparam: int,
@@ -380,6 +425,60 @@ def install(api: ApiRegistry) -> None:
                             refresh()
                         return i
                 return 0xFFFF
+        elif ctrl.cls == "ListBox":
+            # The list-box twin of the ComboBox item-list messages (same backing
+            # store: ctrl.items + ctrl.sel).  SimAnt's SaveAs dialog fills the box
+            # with DlgDirList, then reads it back with LB_GETTEXT / LB_GETCURSEL.
+            if msg == LB_RESETCONTENT:
+                ctrl.items.clear()
+                ctrl.sel = -1
+                refresh()
+                return 0
+            if msg in (LB_ADDSTRING, LB_INSERTSTRING):
+                text = ctx.read_string(lparam).decode("latin-1")
+                if msg == LB_ADDSTRING:
+                    ctrl.items.append(text)
+                    index = len(ctrl.items) - 1
+                else:
+                    index = wparam if wparam != LB_ERR else len(ctrl.items)
+                    ctrl.items.insert(index, text)
+                refresh()
+                return index
+            if msg == LB_DELETESTRING:
+                if 0 <= wparam < len(ctrl.items):
+                    del ctrl.items[wparam]
+                    refresh()
+                return len(ctrl.items)
+            if msg == LB_GETCOUNT:
+                return len(ctrl.items)
+            if msg == LB_GETCURSEL:
+                return ctrl.sel if ctrl.sel >= 0 else LB_ERR
+            if msg == LB_SETCURSEL:
+                ctrl.sel = wparam if wparam != LB_ERR else -1
+                refresh()
+                return ctrl.sel if ctrl.sel >= 0 else LB_ERR
+            if msg == LB_GETSEL:                # single-select: 1 iff wparam is it
+                return 1 if wparam == ctrl.sel else 0
+            if msg == LB_GETTEXT:
+                if 0 <= wparam < len(ctrl.items):
+                    text = ctrl.items[wparam].encode("latin-1")
+                    ctx.mem.load((lparam >> 16) & 0xFFFF, lparam & 0xFFFF,
+                                 text + b"\x00")
+                    return len(text)
+                return LB_ERR
+            if msg == LB_GETTEXTLEN:
+                return len(ctrl.items[wparam]) if 0 <= wparam < len(ctrl.items) else LB_ERR
+            if msg in (LB_FINDSTRING, LB_SELECTSTRING):
+                prefix = ctx.read_string(lparam).decode("latin-1").upper()
+                for i, item in enumerate(ctrl.items):
+                    if item.upper().startswith(prefix):
+                        if msg == LB_SELECTSTRING:
+                            ctrl.sel = i
+                            refresh()
+                        return i
+                return LB_ERR
+            if msg in (LB_GETTOPINDEX, LB_SETTOPINDEX):
+                return 0            # scroll position is host-managed
         elif ctrl.cls == "Edit":
             if msg == EM_LIMITTEXT:
                 ctrl.limit = wparam
@@ -392,33 +491,22 @@ def install(api: ApiRegistry) -> None:
             f"SendDlgItemMessage {ctrl.cls} msg {msg:#06x} not implemented "
             f"(dialog {dlg.name}, control {ctrl.ctrl_id})")
 
+    @api.register("USER", 100, args="word ptr word word word")
+    def DlgDirList(ctx: CallContext) -> int:
+        # (hdlg, path_spec, listbox_id, static_id, filetype) — fill the list box
+        # with files matching the spec from the game's directory (SimAnt's SaveAs
+        # dialog).  Directory/drive entries (the DDL_* filetype bits) are not
+        # modelled — the game directory is flat, same as DlgDirListComboBox.
+        return _fill_dir_control(ctx, ctx.args[0], ctx.args[1],
+                                 ctx.args[2], ctx.args[3])
+
     @api.register("USER", 195, args="word ptr word word word")
     def DlgDirListComboBox(ctx: CallContext) -> int:
-        # (hdlg, path_spec, combo_id, static_id, filetype) — fill the combo
-        # with files matching the spec from the game's directory.
-        dlg = _dialog(ctx, ctx.args[0])
-        sysobj = _sys(ctx)
-        spec_ptr = ctx.args[1]
-        spec = ctx.read_string(spec_ptr).decode("latin-1") or "*.*"
-        pattern = sysobj._canonical(spec)
-        root = sysobj.file_root or sysobj.machine.exe.path.parent
-        import fnmatch
-        names = sorted(p.name.upper() for p in root.iterdir()
-                       if p.is_file() and fnmatch.fnmatch(p.name.upper(), pattern))
-        combo = dlg.control(ctx.args[2])
-        combo.items = names
-        combo.sel = 0 if names else -1
-        host = _host(ctx)
-        if host is not None:
-            host.update(dlg, combo)
-        if ctx.args[3]:                     # static shows the "current path"
-            static = dlg.control(ctx.args[3])
-            static.text = "C:\\"
-            if host is not None:
-                host.update(dlg, static)
-        # Real USER rewrites the spec buffer to the filename part; the spec
-        # already is one here.
-        return 1 if names else 0
+        # (hdlg, path_spec, combo_id, static_id, filetype) — the combo-box twin
+        # of DlgDirList.  Real USER rewrites the spec buffer to the filename part;
+        # the spec already is one here.
+        return _fill_dir_control(ctx, ctx.args[0], ctx.args[1],
+                                 ctx.args[2], ctx.args[3])
 
     @api.register("USER", 194, args="word ptr word")
     def DlgDirSelectComboBox(ctx: CallContext) -> int:  # (hdlg, buf, combo_id)
