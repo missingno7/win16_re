@@ -22,6 +22,7 @@ from win16.dialog import DialogTemplate, parse_dialog
 from .core import ApiRegistry, CallContext, Win16ApiGap
 from .system import Win16System
 
+WM_SETREDRAW = 0x000B
 WM_INITDIALOG = 0x0110
 WM_COMMAND = 0x0111
 WM_TIMER = 0x0113
@@ -314,6 +315,12 @@ def install(api: ApiRegistry) -> None:
         def refresh():
             if host is not None:
                 host.update(dlg, ctrl)
+
+        # WM_SETREDRAW toggles a control's repaint flag while it is bulk-updated
+        # (e.g. filling a list box before showing it); our dialog model paints on
+        # demand, so it is a benign no-op for every control class.
+        if msg == WM_SETREDRAW:
+            return 0
 
         if ctrl.cls == "Button":
             if msg == BM_GETCHECK:
