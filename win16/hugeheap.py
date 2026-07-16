@@ -51,6 +51,16 @@ class HugeHeap:
         self._discardable: set[int] = set()
         self._locks: dict[int, int] = {}
 
+    def __setstate__(self, state: dict) -> None:
+        """Restore from a pickle (vmsnap snapshots / verifier clones).
+
+        Snapshots recorded before the GlobalFlags state existed carry no
+        `_discardable`/`_locks`; backfill them so a resumed machine's first
+        GlobalLock/GlobalFlags does not die on the restored heap."""
+        self.__dict__.update(state)
+        self.__dict__.setdefault("_discardable", set())
+        self.__dict__.setdefault("_locks", {})
+
     # -- linear space (byte-granular, coalescing) --------------------------
     def _alloc_lin(self, size: int) -> int | None:
         for i, (base, avail) in enumerate(self._lin_free):

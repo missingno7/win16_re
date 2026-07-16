@@ -102,3 +102,24 @@ def test_discardable_attribute_toggles_and_clears_on_free():
     assert h.flags(d) == 0                    # attribute + lock state gone
     h.set_discardable(0xDEAD, True)          # unknown handle -> no-op, no crash
     assert h.flags(0xDEAD) == 0
+
+
+def test_pickle_restore_backfills_pre_globalflags_snapshots():
+    # Regression: vmsnap snapshots recorded before the GlobalFlags state
+    # existed pickle a HugeHeap with no _discardable/_locks; the resumed
+    # machine's first GlobalLock then died with AttributeError.  __setstate__
+    # must backfill the missing fields.
+    import pickle
+
+    sb: dict[int, int] = {}
+    h = HugeHeap(sb, 0x100000, 0x400000)
+    s = h.alloc(1000)
+    state = h.__getstate__() if hasattr(h, "__getstate__") else dict(h.__dict__)
+    state = dict(state)
+    state.pop("_discardable")
+    state.pop("_locks")                      # the pre-GlobalFlags pickle shape
+    restored = pickle.loads(pickle.dumps(h))
+    restored.__setstate__(state)
+    assert restored.lock(s) == 1             # backfilled, no AttributeError
+    assert restored.flags(s) & 0xFF == 1
+    assert not (restored.flags(s) & 0x0100)
