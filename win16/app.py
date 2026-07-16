@@ -5,41 +5,19 @@ MMSYSTEM/win87em + the dialog engine) over the dos_re CPU and returns a booted
 `Win16Machine` with a `Win16System` attached.  A game adapter (e.g. ppython)
 is only a thin wrapper choosing the EXE path and boot flags; other games run
 through the same launcher to exercise and harden this layer.
+
+The registry factory itself lives in ``win16.api.surface`` (re-exported here
+unchanged) so the EXE-independent boot path (``win16.bootimage``) can build
+the API surface without this module's loader imports on its import graph.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from win16.api import dialogs, gdi, kernel, mmsystem, sound, user, win87em
-from win16.api.core import ApiRegistry
+from win16.api.surface import WINFLAGS_NO_FPU, build_registry  # noqa: F401 (re-export)
 from win16.api.system import Win16System
 from win16.loader import Win16Machine, load_ne
-from win16.ne import NEExecutable, parse_ne
-
-# __WINFLAGS (KERNEL.178 equate) default: WF_PMODE | WF_CPU286 | WF_STANDARD,
-# no WF_80x87 — the loader leaves FP OSFIXUPs unapplied, so a program's INT
-# 34h..3Dh emulator forms stay live.  A game with real x87 (no OSFIXUPs) can
-# pass a value with WF_80x87 set.
-WINFLAGS_NO_FPU = 0x0013
-
-
-def build_registry(*, winflags: int = WINFLAGS_NO_FPU) -> ApiRegistry:
-    api = ApiRegistry()
-    api.register_equate("KERNEL", 178, winflags)       # __WINFLAGS
-    # Huge-pointer stride: apps add __AHINCR to a selector to reach the next
-    # 64K.  With the selector model (win16/hugeheap.py) selectors step by 8 and
-    # consecutive ones map to consecutive 64K, so these are the real
-    # protected-mode values — a >64K buffer walk lands on the right descriptor.
-    api.register_equate("KERNEL", 113, 3)              # __AHSHIFT
-    api.register_equate("KERNEL", 114, 8)              # __AHINCR
-    kernel.install(api)
-    user.install(api)
-    gdi.install(api)
-    sound.install(api)
-    mmsystem.install(api)
-    dialogs.install(api)
-    win87em.install(api)
-    return api
+from win16.ne import parse_ne
 
 
 def create_machine(exe_path: str | Path, *,

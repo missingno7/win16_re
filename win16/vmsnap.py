@@ -34,14 +34,26 @@ class SnapshotError(RuntimeError):
     pass
 
 
-def digest(machine) -> str:
+def digest(machine, *, mask_ranges=()) -> str:
     """Fingerprint of the GAME-OBSERVABLE state: memory, CPU registers, every
     window surface, the virtual clock and the armed timer intervals.  The
     pump's internal schedule (timer_due) is deliberately excluded — a demo
     replay dictates message timing instead of scheduling it, and the game
-    cannot observe the difference."""
+    cannot observe the difference.
+
+    ``mask_ranges`` — (linear_start, length) byte ranges hashed AS ZERO.  The
+    EXE-independence comparison seam (dos_re_2.0 §1a'): a data-only boot image
+    has the recovered code bytes poisoned to zero, so a run from it can only
+    be digest-compared against an EXE-full oracle when both sides mask the
+    poison ranges; on the poisoned side the mask is a no-op by construction."""
     h = hashlib.sha256()
-    h.update(bytes(machine.mem.data))
+    if mask_ranges:
+        data = bytearray(machine.mem.data)
+        for start, length in mask_ranges:
+            data[start:start + length] = bytes(length)
+        h.update(bytes(data))
+    else:
+        h.update(bytes(machine.mem.data))
     state = asdict(machine.cpu.s)
     h.update(json.dumps(state, sort_keys=True, default=repr).encode())
     sysobj = machine.api.services.get("system")
@@ -120,13 +132,30 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     """Rebuild a machine from a snapshot.  `machine_factory` is the game
     adapter's create_machine (fresh loader + API registry); the snapshot then
     overlays memory, CPU and the OS object graph."""
-    from dos_re.cpu import CPUState
     snap = Path(snap_dir)
     meta = json.loads((snap / "state.json").read_text())
     if meta.get("kind") != "win16-snapshot":
         raise SnapshotError(f"{snap}: not a win16 snapshot")
 
     machine = machine_factory()
+    restore_machine_state(machine, snap, meta)
+
+    got = digest(machine)
+    if got != meta["digest"]:
+        raise SnapshotError(
+            f"restored digest {got[:16]} != saved {meta['digest'][:16]} — "
+            "snapshot did not restore bit-exact")
+    return machine
+
+
+def restore_machine_state(machine, snap: Path, meta: dict) -> None:
+    """Overlay a snapshot's memory + CPU state + OS object graph onto a
+    constructed machine — the shared body of :func:`load_snapshot` and the
+    EXE-free boot-image load path (``win16.bootimage``, dos_re_2.0 §1a').
+    Performs NO digest check: each caller owns its own integrity gate
+    (load_snapshot the game-observable digest; the boot loader the
+    manifest's post-poison memory hash)."""
+    from dos_re.cpu import CPUState
     mem_image = (snap / "memory.bin").read_bytes()
     if len(mem_image) != len(machine.mem.data):
         raise SnapshotError("memory image size mismatch")
@@ -183,10 +212,3 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
     # live session had (else a FARPROC stored in game memory far-calls NULL).
     if meta.get("libraries"):
         machine.api.services["libraries"] = dict(meta["libraries"])
-
-    got = digest(machine)
-    if got != meta["digest"]:
-        raise SnapshotError(
-            f"restored digest {got[:16]} != saved {meta['digest'][:16]} — "
-            "snapshot did not restore bit-exact")
-    return machine
