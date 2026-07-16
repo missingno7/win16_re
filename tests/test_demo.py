@@ -124,6 +124,31 @@ def test_exhausted_stream_raises_demo_ended(tmp_path):
         d.pump_peek()
 
 
+def test_polled_input_refresh_injects_due_arrivals(tmp_path):
+    # THE CONFIG-INVARIANCE RULE: a poll (GetAsyncKeyState/GetKeyState/
+    # GetCursorPos -> refresh_polled_input) must inject arrivals due at ITS
+    # instruction count — the poll instant is identical on the interpreted
+    # oracle and on a virtual-time-preserving lifted graph, while yield_check
+    # (the only other in-callback touchpoint) fires per interpreter STEP and
+    # so shifts with the installed hook set.  Found live as the first
+    # oracle-vs-VMless-graph divergence on a real game (a VK_LBUTTON poll
+    # racing a recorded WM_LBUTTONDOWN between two yields).
+    from win16.api.system import Win16System
+    d = DemoDriver(_record(tmp_path))
+    d.sys = _fake_sys()
+    d.sys.demo_driver = d
+    d.sys.input_drainer = None
+
+    d.sys.machine.cpu.instruction_count = 299     # click arrives at 300
+    Win16System.refresh_polled_input(d.sys)
+    assert CLICK not in d.sys.msg_queue
+
+    d.sys.machine.cpu.instruction_count = 300
+    Win16System.refresh_polled_input(d.sys)       # the poll injects it NOW
+    assert CLICK in d.sys.msg_queue
+    assert CLICK in d.sys.noted                   # polled state fed at arrival
+
+
 def test_snapshot_anchor_header(tmp_path):
     path = _record(tmp_path, snapshot="snap_114308", instruction=17050442)
     d = DemoDriver(path)

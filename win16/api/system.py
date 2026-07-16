@@ -331,14 +331,24 @@ class Win16System:
                 services.get("async_keys", set()).discard(up[mtype])
 
     def refresh_polled_input(self) -> None:
-        """Make freshly-arrived host input visible to a game that POLLS
+        """Make freshly-arrived input visible to a game that POLLS
         GetAsyncKeyState/GetKeyState/GetCursorPos without pumping the queue.
         SimAnt's caste-slider drag spins on GetAsyncKeyState(VK_LBUTTON) waiting
         for the button to release WITHOUT calling Peek/GetMessage — so without
         this the WM_LBUTTONUP never drains, the button reads down forever, and
         the game freezes.  The interactive drainer feeds polled state at arrival
-        time (see the driver), so one drain here refreshes it; headless/replay
-        has no drainer and derives state on message consumption instead."""
+        time (see the driver), so one drain here refreshes it.
+
+        Under a v4 demo driver, injecting HERE — at the poll itself — is what
+        makes polled input CONFIG-INVARIANT: the poll executes at the same
+        instruction count on the interpreted oracle and on a virtual-time-
+        preserving lifted graph, while the driver's other in-callback
+        touchpoint (yield_check) fires per interpreter STEP, whose instruction
+        coverage changes with the installed hook set.  Found live as the first
+        oracle-vs-VMless-graph divergence: a GetAsyncKeyState(VK_LBUTTON) poll
+        racing a recorded WM_LBUTTONDOWN arrival between two yields."""
+        if self.demo_driver is not None:
+            self.demo_driver.inject_due()   # arrivals due AT THIS instruction
         if self.input_drainer is not None:
             self.input_drainer()
 
