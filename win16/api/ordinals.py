@@ -183,6 +183,7 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         39: "RestoreDC",
         64: "CreateRectRgn",
         134: "GetRgnBox",
+        136: "RemoveFontResource",
         181: "RectInRegion",
         7: "SetStretchBltMode",
         9: "SetTextColor",

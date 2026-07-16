@@ -285,6 +285,15 @@ def install(api: ApiRegistry) -> None:
         # nothing is actually installed.  Report one font added (success).
         return 1
 
+    @api.register("GDI", 136, args="str")               # RemoveFontResource(lpFilename)
+    def RemoveFontResource(ctx: CallContext) -> int:
+        # AddFontResource's pair, called on the way out (the observed caller is
+        # a "close the fonts" cleanup routine).  Since AddFontResource installs
+        # nothing — our text renderer maps every font onto the fixed 8x13 cell —
+        # there is nothing to uninstall: report TRUE (removed) so the caller's
+        # cleanup path completes.
+        return 1
+
     @api.register("GDI", 150, args="word")              # UnrealizeObject(hObject)
     def UnrealizeObject(ctx: CallContext) -> int:
         # For a palette: reset it so the next RealizePalette fully re-maps it.
