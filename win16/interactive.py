@@ -18,6 +18,32 @@ import time
 WM_PAINT = 0x000F
 WM_TIMER = 0x0113
 
+#: PER-HEAD PARK COSTS (dos_re lift/emit boundary heads; the vocabulary is
+#: dos_re's own — see its 4-arg observer ABI, which passes the head identity
+#: precisely so a host can price each head differently).
+#:
+#: ``PACING_SPIN`` — one pass is one delay/poll iteration of a bounded wait
+#: (a GetTickCount deadline spin, an input poll, a queue drain).  The park
+#: pays a small fixed real-time cost: enough for the clock the loop watches
+#: to move, little enough that the loop's own exit condition still fires
+#: promptly, and never a host core burnt.
+#: ``FRAME_GATE`` — one pass IS one frame: the loop is the game's own frame
+#: driver, gated on a timer it waits for and doing a tick's real work when
+#: it arrives (SimAnt: the sim-tick TimerProc's loop).  Its park cost is
+#: therefore the whole per-frame quota — ``wait_for_work()``, i.e. block
+#: until the game's next timer is actually due or input arrives, exactly as
+#: a GetMessage boundary would.  Same cadence as the original busy-spin,
+#: zero CPU burnt between frames.
+#:
+#: Parking is pure control flow either way — the kind prices the park, it
+#: never changes what executes.  It also bounds the lifted module's
+#: per-invocation runaway budget to ONE pass: a frame driver the game lives
+#: inside for a whole session otherwise accumulates block transitions until
+#: MAX_ITERATIONS trips (found live: SimAnt's MYTIMERFUNC at ~15 min of
+#: play), even though every iteration is genuine progress.
+FRAME_GATE = "frame_gate"
+PACING_SPIN = "pacing_spin"
+
 
 class BoundaryParked(Exception):
     """A lifted boundary head parked (dos_re lift/emit ``boundary_heads``).
@@ -66,7 +92,8 @@ class InteractiveDriver:
         sysobj.callback_max_steps = None
 
     # -- boundary parks (fact-declared wall-clock wait loops) ----------------
-    def arm_boundary_parks(self, cpu, *, spin_sleep: float = 0.001) -> None:
+    def arm_boundary_parks(self, cpu, *, head_kinds=None,
+                           spin_sleep: float = 0.001) -> None:
         """Arm the lifted graph's boundary observers for INTERACTIVE pacing.
 
         A fact-declared wait head (dos_re lift/emit ``boundary_heads`` — e.g.
@@ -74,28 +101,73 @@ class InteractiveDriver:
         interactively that clock only advances between ``cpu.run`` chunks
         (``check_pause``): inside one lifted invocation the spin can never
         exit and would die at the module's MAX_ITERATIONS runaway guard.
-        The armed observer parks the spin on every pass — sleeps the
-        pacing-spin cost (so the wait doesn't burn a host core), re-points
-        CS:IP at the head's RESUME entry and raises :class:`BoundaryParked`,
-        unwinding the lifted Python chain back to the nearest step loop.
-        EVERY step loop that drives lifted code on an interactive host must
-        catch it as a yield: the CPU worker (``boundary_yield``) and
-        ``win16.callback.call_far``'s chunk loop (a wait head reached inside
-        a WndProc/TimerProc callback parks there) — the next ``cpu.step()``
-        resumes INSIDE the lifted body at the RESUME entry, and abandoned
-        outer lifted frames re-establish through their own call-continuation
-        resume entries as the guest stack unwinds (the unwind re-entry rule).
-        Headless/demo runs never arm this: the emitted observer is inert
-        with ``cpu.boundary_hook`` None.
+        The armed observer parks the head on every pass — pays the head's
+        park cost, re-points CS:IP at its RESUME entry and raises
+        :class:`BoundaryParked`, unwinding the lifted Python chain back to
+        the nearest step loop.  EVERY step loop that drives lifted code on an
+        interactive host must catch it as a yield: the CPU worker
+        (``boundary_yield``) and ``win16.callback.call_far``'s chunk loop (a
+        head reached inside a WndProc/TimerProc callback parks there) — the
+        next ``cpu.step()`` resumes INSIDE the lifted body at the RESUME
+        entry, and abandoned outer lifted frames re-establish through their
+        own call-continuation resume entries as the guest stack unwinds (the
+        unwind re-entry rule).  Headless/demo runs never arm this: the
+        emitted observer is inert with ``cpu.boundary_hook`` None.
+
+        ``head_kinds`` prices each head: ``{(cs, ip): FRAME_GATE |
+        PACING_SPIN}``, default :data:`PACING_SPIN` (see the module
+        constants).  Parking is identical for both kinds — the kind only
+        decides what the park COSTS in real time.
         """
+        kinds = {(cs & 0xFFFF, ip & 0xFFFF): k
+                 for (cs, ip), k in dict(head_kinds or {}).items()}
+        unknown = {k for k in kinds.values() if k not in (FRAME_GATE,
+                                                          PACING_SPIN)}
+        if unknown:
+            raise ValueError(f"unknown boundary park kind(s): {sorted(unknown)}")
 
         def hook(cpu2, head_cs: int, head_ip: int, resume_ip: int) -> None:
-            time.sleep(spin_sleep)
+            if kinds.get((head_cs, head_ip), PACING_SPIN) == FRAME_GATE:
+                self.wait_for_work()        # one pass = one frame
+            else:
+                time.sleep(spin_sleep)      # a pass of a bounded wait
             s = cpu2.s
             s.cs, s.ip = head_cs & 0xFFFF, resume_ip & 0xFFFF
             raise BoundaryParked(head_cs, head_ip, resume_ip)
 
         cpu.boundary_hook = hook
+
+    def wait_for_work(self, cap_ms: float = 10.0) -> None:
+        """Block until the game has something to do — its next armed timer is
+        due, host input arrives, or ``cap_ms`` elapses; return IMMEDIATELY if
+        a timer is already due or input is pending.
+
+        The FRAME_GATE park cost, and the same rule ``_next`` (GetMessage)
+        already paces by: a frame driver that busy-spins on PeekMessage until
+        its timer comes due is waiting for exactly this, so the host may sleep
+        through it without changing the cadence.  The cap keeps a game whose
+        loop watches something else (a flag its own callback sets) responsive
+        rather than parked indefinitely.
+        """
+        now = self.now_ms()
+        if now > self.sys.clock_ms:
+            self.sys.clock_ms = now
+        if self._input:
+            return
+        due = None
+        if getattr(self.sys, "timer_due", None):
+            due = min(self.sys.timer_due.values())
+            if now >= due:
+                return                      # a tick is already waiting
+        timeout = cap_ms / 1000.0
+        if due is not None:
+            timeout = min(timeout, max((due - now) / 1000.0 / self.speed, 0.0))
+        with self._cond:
+            if not self._input and self.running:
+                self._cond.wait(timeout)
+        now = self.now_ms()
+        if now > self.sys.clock_ms:
+            self.sys.clock_ms = now
 
     def boundary_yield(self) -> None:
         """Handle one :class:`BoundaryParked` in the CPU worker loop: advance
