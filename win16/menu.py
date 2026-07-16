@@ -45,8 +45,21 @@ class MenuItem:
 
     def text_and_accel(self) -> tuple[str, str]:
         """Display label (mnemonic '&' stripped) and its accelerator hint."""
-        label, _, accel = self.label.partition("\t")
-        return label.replace("&", ""), accel
+        return split_label(self.label)
+
+
+def split_label(label: str) -> tuple[str, str]:
+    """Split a Win16 menu string into (display label, accelerator hint).
+
+    A menu string carries its accelerator after a TAB — "&New\tCtrl+N" — and
+    Windows right-aligns that half in the popup.  Both menu sources speak this
+    convention: the MENU resource template above, and the runtime items the
+    program appends through AppendMenu/InsertMenu (win16.api.objects.MenuItem),
+    which is why the split lives here as a free function rather than only as a
+    method on the parsed item.
+    """
+    text, _, accel = label.partition("\t")
+    return text.replace("&", ""), accel
 
 
 def _asciiz(data: bytes, pos: int) -> tuple[str, int]:
