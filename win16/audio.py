@@ -10,6 +10,9 @@ captured — never a silent fake.
 """
 from __future__ import annotations
 
+import io
+import os
+
 
 class SquareWaveBackend:
     def __init__(self, rate: int = 22050, volume: float = 0.22) -> None:
@@ -143,6 +146,101 @@ class SquareWaveBackend:
             self.ok = False
 
 
+# --- Windows 3.x MIDI Mapper level filtering ---------------------------------
+# MIDI files authored for Windows 3.x follow the Microsoft MIDI Mapper
+# authoring guideline: the same music appears TWICE in one file — an
+# "extended level" arrangement on channels 1-10 (percussion on channel 10)
+# and a "base level" duplicate on channels 13-16 (percussion on channel 16).
+# The MCI sequencer routed playback through the MIDI Mapper, whose setup
+# passed only ONE of the two levels to the synthesizer.  A modern General
+# MIDI synth (our SDL_mixer stream) has no Mapper and plays both: every
+# melody doubles, and the base-level percussion channel 16 renders as a
+# *melodic* GM instrument — the SimAnt soundtrack sets program 126
+# ("Applause") there, heard as a constant re-triggering hiss riding over the
+# music.  Playing the extended level only (channels 1-10, which line up with
+# General MIDI, percussion on 10) reproduces what the original setup played.
+
+EXTENDED_LEVEL_CHANNELS = frozenset(range(0, 10))   # 0-based: channels 1-10
+BASE_LEVEL_CHANNELS = frozenset(range(12, 16))       # 0-based: channels 13-16
+MAPPER_LEVELS = {"extended": EXTENDED_LEVEL_CHANNELS,
+                 "base": BASE_LEVEL_CHANNELS}
+
+
+def _read_vlq(data: bytes, pos: int) -> tuple[int, int]:
+    value = 0
+    while True:
+        byte = data[pos]
+        pos += 1
+        value = (value << 7) | (byte & 0x7F)
+        if not byte & 0x80:
+            return value, pos
+
+
+def _write_vlq(value: int) -> bytes:
+    out = bytearray([value & 0x7F])
+    value >>= 7
+    while value:
+        out.insert(0, 0x80 | (value & 0x7F))
+        value >>= 7
+    return bytes(out)
+
+
+def midi_keep_channels(data: bytes, keep: frozenset[int]) -> bytes:
+    """Rewrite a Standard MIDI File keeping only channel-voice events on the
+    0-based channels in `keep`.  Deltas of dropped events fold into the next
+    kept event, so every surviving event keeps its absolute time; meta and
+    sysex events are preserved verbatim.  The output never relies on running
+    status.  Raises ValueError on anything that is not a well-formed SMF."""
+    if data[:4] != b"MThd":
+        raise ValueError("not a Standard MIDI File (no MThd)")
+    header_len = int.from_bytes(data[4:8], "big")
+    ntrks = int.from_bytes(data[10:12], "big")
+    out = bytearray(data[:8 + header_len])
+    pos = 8 + header_len
+    for _ in range(ntrks):
+        if data[pos:pos + 4] != b"MTrk":
+            raise ValueError(f"bad track chunk at {pos:#x}")
+        length = int.from_bytes(data[pos + 4:pos + 8], "big")
+        p, end = pos + 8, pos + 8 + length
+        pos = end
+        body = bytearray()
+        running: int | None = None
+        pending = 0                       # accumulated delta of dropped events
+        while p < end:
+            delta, p = _read_vlq(data, p)
+            pending += delta
+            byte = data[p]
+            if byte == 0xFF:              # meta event: keep verbatim
+                ln, q = _read_vlq(data, p + 2)
+                event = data[p:q + ln]
+                p = q + ln
+                running = None
+            elif byte in (0xF0, 0xF7):    # sysex: keep verbatim
+                ln, q = _read_vlq(data, p + 1)
+                event = data[p:q + ln]
+                p = q + ln
+                running = None
+            else:                         # channel voice message
+                if byte & 0x80:
+                    status = running = byte
+                    p += 1
+                elif running is None:
+                    raise ValueError(f"dangling running status at {p:#x}")
+                else:
+                    status = running
+                nparams = 1 if status & 0xF0 in (0xC0, 0xD0) else 2
+                params = data[p:p + nparams]
+                p += nparams
+                if status & 0x0F not in keep:
+                    continue              # dropped: delta stays pending
+                event = bytes([status]) + params
+            body += _write_vlq(pending)
+            body += event
+            pending = 0
+        out += b"MTrk" + len(body).to_bytes(4, "big") + bytes(body)
+    return bytes(out)
+
+
 class MidiBackend:
     """Plays the game's `.mid` songs through the host MIDI synth (pygame /
     SDL_mixer's dedicated music stream).  Driven by the MMSYSTEM MCI layer's
@@ -150,12 +248,18 @@ class MidiBackend:
     deterministic record is `services["mci_log"]`, so audio never affects state.
 
     Reuses whatever mixer a SquareWaveBackend already opened; the music stream
-    is independent of the SFX channels, so both play at once."""
+    is independent of the SFX channels, so both play at once.
 
-    def __init__(self) -> None:
+    `level` selects which MIDI Mapper device level to emulate ("extended",
+    the default — the best-quality authoring intent, channels 1-10 aligned
+    with General MIDI — or "base", channels 13-16)."""
+
+    def __init__(self, level: str = "extended") -> None:
         self.ok = False
         self._pg = None
         self._devices: dict[int, str] = {}      # MCI device id -> host .mid path
+        self._filtered: dict[str, bytes] = {}   # host path -> Mapper-filtered SMF
+        self._keep = MAPPER_LEVELS[level]       # KeyError on an unknown level
         self._playing = None
         try:
             import pygame
@@ -163,10 +267,29 @@ class MidiBackend:
             if pygame.mixer.get_init() is None:
                 pygame.mixer.init()
             self.ok = True
-            print("[audio] MIDI music via SDL_mixer", flush=True)
+            print(f"[audio] MIDI music via SDL_mixer "
+                  f"(MIDI Mapper {level}-level filter)", flush=True)
         except Exception as exc:  # noqa: BLE001 — no synth is not a game bug
             print(f"[audio] MIDI music disabled: {type(exc).__name__}: {exc}",
                   flush=True)
+
+    def _mapper_filtered(self, path: str) -> bytes:
+        """The Mapper-level view of the song at `path`, filtered once and
+        cached.  A file the SMF filter cannot parse plays unfiltered — loudly:
+        the anomaly is printed with the reason, never swallowed."""
+        payload = self._filtered.get(path)
+        if payload is None:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            try:
+                payload = midi_keep_channels(raw, self._keep)
+            except (ValueError, IndexError) as exc:
+                print(f"[audio] MIDI Mapper filter skipped for "
+                      f"{os.path.basename(path)} ({exc}) — playing the file "
+                      f"as-is", flush=True)
+                payload = raw
+            self._filtered[path] = payload
+        return payload
 
     def open(self, dev_id: int, host_path: str | None) -> None:
         self._devices[dev_id] = host_path
@@ -186,8 +309,9 @@ class MidiBackend:
         if self._playing == dev_id and music.get_busy():
             return
         try:
-            import os
-            music.load(path)
+            # The MIDI Mapper level filter runs on the SMF image; SDL_mixer
+            # gets the filtered bytes (BytesIO + namehint, no temp files).
+            music.load(io.BytesIO(self._mapper_filtered(path)), namehint="mid")
             music.play()
             self._playing = dev_id
             self._plays = getattr(self, "_plays", 0) + 1

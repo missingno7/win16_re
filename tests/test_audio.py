@@ -56,8 +56,10 @@ class _FakeMusic:
     def __init__(self):
         self.loads, self.plays, self.busy, self.stops = [], 0, False, 0
 
-    def load(self, p):
-        self.loads.append(p)
+    def load(self, p, namehint=None):
+        # the backend hands SDL a BytesIO of the Mapper-filtered SMF; record
+        # the logical song it carries so the assertions stay readable
+        self.loads.append(p.getvalue().decode() if hasattr(p, "getvalue") else p)
 
     def play(self, *a, **k):
         self.plays += 1
@@ -75,6 +77,10 @@ def _midi():
     b = MidiBackend.__new__(MidiBackend)
     music = _FakeMusic()
     b.ok, b._devices, b._playing = True, {}, None
+    b._filtered = {}
+    # these tests pin the MCI play/stop semantics, not the SMF rewrite (which
+    # has its own suite in test_midi_mapper.py) — stub the filter to identity
+    b._mapper_filtered = lambda path: path.encode()
     b._pg = type("Pg", (), {"mixer": type("Mx", (), {"music": music})()})()
     return b, music
 
