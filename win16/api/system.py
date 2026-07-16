@@ -239,6 +239,26 @@ class Win16System:
                 if remove and self.tick_recorder is not None:
                     self.tick_recorder.boundary(tm)
                 return tm
+        # An INTERACTIVE host delivers WM_PAINT through PeekMessage too (lowest
+        # priority, real-USER retrieval-time generation): a PeekMessage-only
+        # pump (SimAnt's title/scenario loops never call GetMessage) otherwise
+        # never sees a paint, so a window invalidated by a host resize (WM_SIZE
+        # -> the game's SetWindowPos re-layout invalidates its children) stays
+        # dirty forever and its surface is never repainted.  WM_PAINT is not
+        # consumed by retrieval (BeginPaint/ValidateRect clear the region), so
+        # `remove` is irrelevant.  Deliberately NOT synthesized on headless /
+        # replay paths (demo_driver / tick_driver / interactive=False): their
+        # recorded baselines are instruction-keyed and were recorded without
+        # peek-time paints; GetMessage's pump delivers their paints.  (Honest
+        # residue: a v4 demo RECORDED live under an interactive driver replays
+        # without these peek paints — same class of live-vs-replay divergence
+        # as the wall clock, and pinned here until the demo model reproduces
+        # them.)
+        if self.interactive and (not (lo or hi) or lo <= 0x000F <= hi):
+            for win in self.windows:
+                if win.visible and win.dirty and \
+                        (not hwnd_filter or win.handle == hwnd_filter):
+                    return (win.handle, 0x000F, 0, 0, self.clock_ms, 0)
         return None
 
     def _tick_record(self, m) -> None:
