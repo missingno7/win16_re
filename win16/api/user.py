@@ -1265,7 +1265,11 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 82, args="word ptr")          # InvertRect(hdc, lpRect)
     def InvertRect(ctx: CallContext) -> int:
-        from .gdi import _dc_surface
+        # DSTINVERT in the 16-colour device's palette-index domain (idx ^ 0xF),
+        # NOT a per-channel RGB invert: on the original 4-bit device inverting
+        # grey (128,128,128) yields light grey (192,192,192) — a per-channel
+        # invert yields the invisible (127,127,127).  See invert_rect_16color.
+        from .gdi import _dc_surface, invert_rect_16color
         sys = _sys(ctx)
         hdc, rc_ptr = ctx.args
         dst = _dc_surface(sys, hdc)
@@ -1274,14 +1278,7 @@ def install(api: ApiRegistry) -> None:
         seg, off = (rc_ptr >> 16) & 0xFFFF, rc_ptr & 0xFFFF
         l, t, r, b = (_signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF))
                       for i in range(4))
-        x0, y0 = max(l, 0), max(t, 0)
-        x1, y1 = min(r, dst.w), min(b, dst.h)
-        if x0 >= x1 or y0 >= y1:
-            return 1
-        import numpy as np
-        arr = np.frombuffer(dst.pixels, dtype=np.uint8).reshape(dst.h, dst.w, 3)
-        arr[y0:y1, x0:x1] ^= 0xFF                        # invert each channel
-        dst.touch()
+        invert_rect_16color(dst, l, t, r, b)
         return 1
 
     @api.register("USER", 124, args="word")             # UpdateWindow(hwnd)

@@ -109,6 +109,48 @@ _STOCK_BRUSH_RGB = {
     "DKGRAY_BRUSH": (64, 64, 64), "NULL_BRUSH": None, "HOLLOW_BRUSH": None,
 }
 
+# The Windows 3.x 16-colour display driver's physical palette (driver order).
+# On the original 4-bit planar device every framebuffer pixel IS one of these
+# sixteen entries, and the inversion-class raster ops (InvertRect, PatBlt
+# DSTINVERT, R2_NOT, ...) invert the 4-bit PHYSICAL INDEX — idx ^ 0xF — not
+# RGB channels.  The driver's ordering pairs each entry with a visible
+# complement under ^0xF: black<->white (0/15), dark grey<->light grey (8/7),
+# dark blue<->yellow (4/11), dark red<->cyan (1/14), ...  A truecolor
+# per-channel invert loses that platform truth: ~(128,128,128) is the
+# near-identical (127,127,127), so a rubber-band rectangle over a grey
+# background all but vanishes — the original device showed light grey.
+# A 16-colour driver is not RC_PALETTE: RealizePalette cannot reprogram it,
+# so this is a fixed platform constant, independent of any logical palette
+# an app creates (apps' logical entries nearest-match INTO it).
+DEVICE_PALETTE_16 = (
+    (0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
+    (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
+    (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0),
+    (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
+)
+
+
+def invert_rect_16color(dst: Surface, l: int, t: int, r: int, b: int) -> None:
+    """DSTINVERT over [l,r)x[t,b) in the 16-colour device's index domain:
+    each destination pixel maps to its nearest DEVICE_PALETTE_16 entry and is
+    replaced by the entry at (index ^ 0xF).  Involutive on device colours
+    (^0xF is a bijection), so a draw/erase toggle pair (the classic InvertRect
+    rubber band — SimAnt's map-cursor drag) restores the destination exactly;
+    a non-device colour snaps to its nearest device entry on the first toggle
+    pair — the same pixel the real 4-bit device would have displayed."""
+    x0, y0 = max(l, 0), max(t, 0)
+    x1, y1 = min(r, dst.w), min(b, dst.h)
+    if x0 >= x1 or y0 >= y1:
+        return
+    import numpy as np
+    pal = np.array(DEVICE_PALETTE_16, dtype=np.int32)
+    arr = np.frombuffer(dst.pixels, dtype=np.uint8).reshape(dst.h, dst.w, 3)
+    box = arr[y0:y1, x0:x1]
+    d = box[:, :, None, :].astype(np.int32) - pal[None, None, :, :]
+    idx = (d * d).sum(axis=-1).argmin(axis=-1)
+    box[:] = pal.astype(np.uint8)[idx ^ 0xF]
+    dst.touch()
+
 
 def colorref_rgb(colorref: int, palette=None) -> tuple[int, int, int]:
     """Resolve a Win16 COLORREF to (r, g, b).  The high byte selects the type:
