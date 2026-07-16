@@ -163,7 +163,14 @@ class Win16System:
         self.machine.mem.sel_min = self.huge_heap.selector_floor
 
     def call_wndproc(self, window, msg: int, wparam: int, lparam: int) -> int:
-        """Send a message straight to the window's proc (SendMessage path)."""
+        """Send a message straight to the window's proc (SendMessage path).
+
+        The step budget is the SYSTEM's callback policy (callback_max_steps),
+        not call_far's hard default: an interactive driver sets None because
+        a wndproc legitimately busy-waits on user input (SimAnt's title
+        screen polls GetAsyncKeyState/GetCursorPos inside MAINWNDPROC until
+        a click) — a fixed cap would kill that live wait as a "runaway".
+        Headless/replay keeps the cap and catches genuine hangs."""
         from win16.callback import call_far
         from win16.loader import THUNK_SEG
         seg, off = window.wndclass.wndproc
@@ -171,6 +178,7 @@ class Win16System:
                           [window.handle, msg,
                            wparam & 0xFFFF,
                            (lparam >> 16) & 0xFFFF, lparam & 0xFFFF],
+                          max_steps=self.callback_max_steps,
                           yield_check=self.yield_check)
         return (dx << 16) | ax
 

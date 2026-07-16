@@ -179,11 +179,16 @@ def _call_proc(ctx: CallContext, dlg: Dialog, msg: int, wparam: int,
                lparam: int) -> int:
     from win16.callback import call_far
     from win16.loader import THUNK_SEG
+    sys_ = _sys(ctx)
     seg, off = dlg.proc
-    machine = _sys(ctx).machine
-    ax, _dx = call_far(machine.cpu, THUNK_SEG, seg, off,
+    # Same callback policy as call_wndproc: the SYSTEM's budget (None under
+    # an interactive driver — a dialog proc may legitimately wait on the
+    # user), never call_far's hard default.
+    ax, _dx = call_far(sys_.machine.cpu, THUNK_SEG, seg, off,
                        [dlg.handle, msg, wparam & 0xFFFF,
-                        (lparam >> 16) & 0xFFFF, lparam & 0xFFFF])
+                        (lparam >> 16) & 0xFFFF, lparam & 0xFFFF],
+                       max_steps=sys_.callback_max_steps,
+                       yield_check=sys_.yield_check)
     return ax
 
 

@@ -30,6 +30,8 @@ resumable this way and fail loudly by name.
 """
 from __future__ import annotations
 
+from win16.interactive import BoundaryParked
+
 CALLBACK_RET_IP = 0xFFFE        # sentinel offset inside the thunk segment
 _CHUNK = 8192                   # steps between yield_check / max-step checks
 #   Small so the interactive driver's yield_check refreshes the wall clock often
@@ -129,7 +131,19 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
     unbounded = max_steps is None
     try:
         while unbounded or steps < max_steps:
-            steps += cpu.run(_CHUNK if unbounded else min(_CHUNK, max_steps - steps))
+            try:
+                steps += cpu.run(_CHUNK if unbounded else min(_CHUNK, max_steps - steps))
+            except BoundaryParked:
+                # A fact-declared wait loop parked INSIDE this callback (an
+                # interactive host armed the lifted graph's boundary
+                # observers — e.g. a pacing delay reached from a WndProc).
+                # A yield, not a stop: CS:IP already points at the RESUME
+                # entry, so just refresh the wall clock the wait polls and
+                # keep stepping — the callback still far-returns through the
+                # sentinel exactly as before.
+                if yield_check is not None:
+                    yield_check()
+                continue
             if cpu.halted:
                 raise HaltExecution()
             if yield_check is not None:

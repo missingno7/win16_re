@@ -83,6 +83,7 @@ def _enumchild_ctx(sysobj, proc, lparam):
     api = ApiRegistry()
     user.install(api)
     sysobj.yield_check = None
+    sysobj.callback_max_steps = 20_000_000   # the system's callback policy
     api.services["system"] = sysobj
     ctx = CallContext(cpu=SimpleNamespace(), registry=api, module="USER",
                       ordinal=55, name="EnumChildWindows",
@@ -96,7 +97,9 @@ def test_enumchildwindows_calls_back_each_child_top_to_bottom(monkeypatch):
     api, ctx = _enumchild_ctx(sysobj, 0x00AB1234, 0xDEADBEEF)
     calls = []
 
-    def fake_call_far(cpu, thunk_seg, seg, off, args, *, yield_check=None):
+    def fake_call_far(cpu, thunk_seg, seg, off, args, *, max_steps="MISSING",
+                      yield_check=None):
+        assert max_steps == sysobj.callback_max_steps    # the policy seam
         calls.append((seg, off, tuple(args)))
         return (1, 0)                                    # non-zero: continue
     monkeypatch.setattr(cb_mod, "call_far", fake_call_far)
@@ -117,7 +120,8 @@ def test_enumchildwindows_stops_when_callback_returns_false(monkeypatch):
     api, ctx = _enumchild_ctx(sysobj, 0x00AB1234, 0)
     seen = []
 
-    def fake_call_far(cpu, thunk_seg, seg, off, args, *, yield_check=None):
+    def fake_call_far(cpu, thunk_seg, seg, off, args, *, max_steps="MISSING",
+                      yield_check=None):
         seen.append(args[0])
         return (0, 0) if args[0] == 21 else (1, 0)       # stop at the 2nd child
     monkeypatch.setattr(cb_mod, "call_far", fake_call_far)

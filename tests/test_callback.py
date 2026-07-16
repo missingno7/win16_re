@@ -49,6 +49,98 @@ def test_unbounded_callback_runs_to_completion():
     assert cpu.win16_callback_frames == []       # clean return pops our frame
 
 
+def test_boundary_park_inside_callback_is_a_yield_not_a_stop():
+    """A fact-declared wait loop that parks INSIDE a WndProc/TimerProc
+    callback (win16.interactive boundary parks, lifted graph) must be caught
+    by call_far's chunk loop as a yield — the callback keeps stepping (the
+    next step resumes at the RESUME entry) and still far-returns cleanly.
+    Found live: SimAnt's _WaitHundredths pacing delay reached from
+    MAINWNDPROC during a scenario start."""
+    from win16.callback import call_far
+    from win16.interactive import BoundaryParked
+
+    yields = []
+
+    class _ParkingCPU(_FakeCPU):
+        def __init__(self):
+            super().__init__(return_after=30_000)
+            self._parks = 3
+
+        def run(self, n):
+            if self._parks:
+                self._parks -= 1
+                raise BoundaryParked(0x0E99, 0x4A0D, 0x4A10)
+            return super().run(n)
+
+    cpu = _ParkingCPU()
+    ax, dx = call_far(cpu, 0x60, 0x0100, 0x2930, [], max_steps=None,
+                      yield_check=lambda: yields.append(1))
+    assert (ax, dx) == (0x1234, 0x5678)          # callback completed normally
+    assert cpu.win16_callback_frames == []       # clean far-return
+    assert len(yields) >= 3                      # each park refreshed the clock
+
+
+def test_call_wndproc_honours_system_callback_budget(monkeypatch):
+    """EVERY callback dispatch site must honour the SYSTEM's budget policy
+    (callback_max_steps: None under an interactive driver, capped headless) —
+    not call_far's hard default.  Found live: a title screen polling
+    GetAsyncKeyState/GetCursorPos for a click INSIDE its wndproc was killed
+    at 20M steps as a 'runaway' (CallbackOverrun) although the interactive
+    driver had already declared the wait legitimate (callback_max_steps=None,
+    exactly as the TimerProc branch honoured all along)."""
+    import win16.callback as callback_mod
+    from win16.api.system import Win16System
+
+    seen = {}
+
+    def fake_call_far(cpu, thunk_seg, seg, off, args, *, max_steps="MISSING",
+                      yield_check=None):
+        seen["max_steps"] = max_steps
+        seen["yield_check"] = yield_check
+        return 0x1111, 0x2222
+
+    monkeypatch.setattr(callback_mod, "call_far", fake_call_far)
+
+    def _yield():
+        pass
+
+    fake_sys = SimpleNamespace(machine=SimpleNamespace(cpu=object()),
+                               callback_max_steps=None,     # interactive policy
+                               yield_check=_yield)
+    window = SimpleNamespace(handle=0x30,
+                             wndclass=SimpleNamespace(wndproc=(0x0100, 0x2930)))
+    result = Win16System.call_wndproc(fake_sys, window, 0x0201, 1, 0x00640064)
+    assert seen["max_steps"] is None, \
+        "call_wndproc ignored the system's callback budget policy"
+    assert seen["yield_check"] is _yield
+    assert result == (0x2222 << 16) | 0x1111
+
+
+def test_dialog_proc_honours_system_callback_budget(monkeypatch):
+    """The dialog-proc dispatcher is a callback site like any other: same
+    policy seam (a dialog proc may legitimately wait on the user)."""
+    import win16.callback as callback_mod
+    from win16.api import dialogs as dialogs_mod
+
+    seen = {}
+
+    def fake_call_far(cpu, thunk_seg, seg, off, args, *, max_steps="MISSING",
+                      yield_check=None):
+        seen["max_steps"] = max_steps
+        return 1, 0
+
+    monkeypatch.setattr(callback_mod, "call_far", fake_call_far)
+
+    fake_sys = SimpleNamespace(machine=SimpleNamespace(cpu=object()),
+                               callback_max_steps=None,
+                               yield_check=None)
+    monkeypatch.setattr(dialogs_mod, "_sys", lambda ctx: fake_sys)
+    dlg = SimpleNamespace(handle=0x40, proc=(0x0100, 0x1000))
+    assert dialogs_mod._call_proc(object(), dlg, 0x0110, 0, 0) == 1
+    assert seen["max_steps"] is None, \
+        "_call_proc ignored the system's callback budget policy"
+
+
 def test_frame_preserved_when_vm_stops_mid_callback():
     # If the VM stops mid-callback (a gap/halt propagating), call_far must LEAVE
     # the frame on win16_callback_frames so a crash snapshot records the in-flight

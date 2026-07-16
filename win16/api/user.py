@@ -1193,6 +1193,7 @@ def install(api: ApiRegistry) -> None:
             ax, _dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
                                [child.handle, (lparam >> 16) & 0xFFFF,
                                 lparam & 0xFFFF],
+                               max_steps=sys.callback_max_steps,
                                yield_check=sys.yield_check)
             if (ax & 0xFFFF) == 0:              # callback returned FALSE -> stop
                 break

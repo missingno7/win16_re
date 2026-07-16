@@ -19,6 +19,23 @@ WM_PAINT = 0x000F
 WM_TIMER = 0x0113
 
 
+class BoundaryParked(Exception):
+    """A lifted boundary head parked (dos_re lift/emit ``boundary_heads``).
+
+    Raised by the observer installed via ``arm_boundary_parks``: CS:IP has
+    already been re-pointed at the head's RESUME entry, so the CPU worker
+    must treat this as a YIELD, not a VM stop — handle it with
+    ``boundary_yield`` and keep running; the next ``cpu.run`` re-enters the
+    lifted body at the resume entry (zero interpreted instructions).
+    """
+
+    def __init__(self, head_cs: int, head_ip: int, resume_ip: int) -> None:
+        super().__init__(f"boundary park at {head_cs:04X}:{head_ip:04X} "
+                         f"(resume {head_cs:04X}:{resume_ip:04X})")
+        self.head = (head_cs, head_ip)
+        self.resume_ip = resume_ip
+
+
 class InteractiveDriver:
     def __init__(self, sysobj, *, speed: float = 1.0) -> None:
         self.sys = sysobj
@@ -47,6 +64,46 @@ class InteractiveDriver:
         # runaway cap would kill a perfectly valid wait mid-callback.  Interactive
         # is user-interruptible (close window / pause), so no cap is needed.
         sysobj.callback_max_steps = None
+
+    # -- boundary parks (fact-declared wall-clock wait loops) ----------------
+    def arm_boundary_parks(self, cpu, *, spin_sleep: float = 0.001) -> None:
+        """Arm the lifted graph's boundary observers for INTERACTIVE pacing.
+
+        A fact-declared wait head (dos_re lift/emit ``boundary_heads`` — e.g.
+        a splash timeout spinning on GetTickCount) polls the WALL clock, but
+        interactively that clock only advances between ``cpu.run`` chunks
+        (``check_pause``): inside one lifted invocation the spin can never
+        exit and would die at the module's MAX_ITERATIONS runaway guard.
+        The armed observer parks the spin on every pass — sleeps the
+        pacing-spin cost (so the wait doesn't burn a host core), re-points
+        CS:IP at the head's RESUME entry and raises :class:`BoundaryParked`,
+        unwinding the lifted Python chain back to the nearest step loop.
+        EVERY step loop that drives lifted code on an interactive host must
+        catch it as a yield: the CPU worker (``boundary_yield``) and
+        ``win16.callback.call_far``'s chunk loop (a wait head reached inside
+        a WndProc/TimerProc callback parks there) — the next ``cpu.step()``
+        resumes INSIDE the lifted body at the RESUME entry, and abandoned
+        outer lifted frames re-establish through their own call-continuation
+        resume entries as the guest stack unwinds (the unwind re-entry rule).
+        Headless/demo runs never arm this: the emitted observer is inert
+        with ``cpu.boundary_hook`` None.
+        """
+
+        def hook(cpu2, head_cs: int, head_ip: int, resume_ip: int) -> None:
+            time.sleep(spin_sleep)
+            s = cpu2.s
+            s.cs, s.ip = head_cs & 0xFFFF, resume_ip & 0xFFFF
+            raise BoundaryParked(head_cs, head_ip, resume_ip)
+
+        cpu.boundary_hook = hook
+
+    def boundary_yield(self) -> None:
+        """Handle one :class:`BoundaryParked` in the CPU worker loop: advance
+        the wall clock / honour a pause request (``check_pause``) and keep
+        running.  The spin exits by its own original condition (the game
+        re-polls the clock on resume); the pacing sleep already happened in
+        the observer."""
+        self.check_pause()
 
     # -- host (GUI thread) side --------------------------------------------
     def now_ms(self) -> int:
