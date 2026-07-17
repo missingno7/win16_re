@@ -15,14 +15,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from win16.api.core import ARG_SIZES, CallContext
-from win16.api.core import Win16ApiGap
+from win16.api.core import ARG_SIZES, CallContext, Win16ApiGap
 from win16.api.dialogs import (Dialog, DialogControlState, LB_GETCURSEL,
                                _decode_dir_entry, _split_spec)
 from win16.api.gdi import SYS_COLORS, sys_colors
 from win16.api.kernel import FatalAppExitError
 from win16.api.keyboard import _US_LAYOUT
-from win16.api.objects import DC, Menu, Region, Surface, Window, WndClass
+from win16.api.objects import DC, Menu, Surface, Window, WndClass
 from win16.api.surface import build_registry
 from win16.api.user import AtomTable
 
