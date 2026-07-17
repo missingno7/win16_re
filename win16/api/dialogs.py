@@ -175,6 +175,20 @@ def _fill_dir_control(ctx: CallContext, hdlg: int, spec_ptr: int,
     return 1 if names else 0
 
 
+def _decode_dir_entry(text: str) -> tuple[str, bool]:
+    """A DlgDirList entry -> (path fragment, is_directory).
+
+    USER's list-box encoding: "[SUBDIR]" is a directory, "[-c-]" a drive,
+    anything else a plain file name.  The fragment each decodes to is what can
+    be pasted straight into a path — "SUBDIR\\", "c:", or the name unchanged.
+    """
+    if not text.startswith("["):
+        return text, False
+    if text.startswith("[-"):                   # "[-c-]" -> "c:"
+        return text[2:3] + ":", True
+    return text[1:-1] + "\\", True              # "[SUBDIR]" -> "SUBDIR\"
+
+
 def _call_proc(ctx: CallContext, dlg: Dialog, msg: int, wparam: int,
                lparam: int) -> int:
     from win16.callback import call_far
@@ -512,6 +526,31 @@ def install(api: ApiRegistry) -> None:
         # the spec already is one here.
         return _fill_dir_control(ctx, ctx.args[0], ctx.args[1],
                                  ctx.args[2], ctx.args[3])
+
+    @api.register("USER", 99, args="word ptr word")
+    def DlgDirSelect(ctx: CallContext) -> int:          # (hdlg, buf, listbox_id)
+        # Copy the list box's current selection into the caller's buffer and
+        # report whether it names a DIRECTORY (or a drive) rather than a file.
+        # That boolean is the whole point of the API: USER lists directories as
+        # "[NAME]" and drives as "[-c-]", and DlgDirSelect hands back a fragment
+        # ready to be pasted into a path — brackets stripped, a directory given
+        # its trailing '\', a drive turned into "c:".  A caller that appends its
+        # file spec to the result therefore builds "SUBDIR\*.SAV" for a
+        # directory, and must NOT do that for a plain file.
+        #
+        # Observed contract (SimAnt's OPENDLG/SAVEASDLG, control 0x194): on
+        # non-zero it lstrcat()s the spec onto the returned name and re-lists;
+        # on zero it puts the name straight into the filename edit box.  Getting
+        # the boolean wrong would paste "*.*" onto a file name.
+        dlg = _dialog(ctx, ctx.args[0])
+        ctrl = dlg.control(ctx.args[2])
+        text = (ctrl.items[ctrl.sel] if 0 <= ctrl.sel < len(ctrl.items)
+                else ctrl.text)
+        text, is_dir = _decode_dir_entry(text)
+        p = ctx.args[1]
+        ctx.mem.load((p >> 16) & 0xFFFF, p & 0xFFFF,
+                     text.encode("latin-1") + b"\x00")
+        return 1 if is_dir else 0
 
     @api.register("USER", 194, args="word ptr word")
     def DlgDirSelectComboBox(ctx: CallContext) -> int:  # (hdlg, buf, combo_id)

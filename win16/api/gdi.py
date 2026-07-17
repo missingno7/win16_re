@@ -192,6 +192,13 @@ def dc_palette_entries(sys, dc):
 # A WNDCLASS hbrBackground is commonly (HBRUSH)(COLOR_xxx + 1) rather than a
 # real brush handle; resolving that to a fill colour is what keeps window
 # backgrounds their intended grey/white instead of an unpainted black.
+# These are the DEFAULTS: SetSysColors replaces entries in the live per-machine
+# table (see sys_colors), which is what everything reads.  Win 3.1 defines
+# exactly COLOR_SCROLLBAR(0)..COLOR_BTNTEXT(18) — 19 colours, and a program
+# that saves/restores "all of them" iterates precisely that range.
+# SetSystemPaletteUse / GetSystemPaletteUse.
+SYSPAL_ERROR, SYSPAL_STATIC, SYSPAL_NOSTATIC = 0, 1, 2
+
 SYS_COLORS = {
     0: (0xC0, 0xC0, 0xC0),   # SCROLLBAR
     1: (0x00, 0x80, 0x80),   # BACKGROUND (desktop)
@@ -215,6 +222,22 @@ SYS_COLORS = {
 }
 
 
+def sys_colors(sysobj) -> dict[int, tuple[int, int, int]]:
+    """The LIVE system-colour table for this machine.
+
+    Defaults to Win 3.1's, and SetSysColors mutates it — so it is per-machine
+    state, not the module constant (two machines in one process must not share
+    a program's colour scheme).  Every reader goes through here, which is what
+    makes SetSysColors actually visible: a window whose class background is
+    (COLOR_xxx + 1) repaints in the new colour with no further plumbing.
+    """
+    services = sysobj.machine.api.services
+    table = services.get("sys_colors")
+    if table is None:
+        table = services["sys_colors"] = dict(SYS_COLORS)
+    return table
+
+
 def class_background_rgb(sysobj, h_background: int):
     """Resolve a WNDCLASS hbrBackground to an (r,g,b) fill, or None for no
     background.  Accepts a real Brush/StockObject handle OR the common
@@ -222,8 +245,9 @@ def class_background_rgb(sysobj, h_background: int):
     obj = sysobj.handles.get(h_background)
     if obj is not None:
         return brush_object_rgb(obj, sysobj.system_palette)
-    if 1 <= h_background <= len(SYS_COLORS):
-        return SYS_COLORS[h_background - 1]      # (COLOR_xxx + 1) convention
+    table = sys_colors(sysobj)
+    if 1 <= h_background <= len(table):
+        return table[h_background - 1]           # (COLOR_xxx + 1) convention
     return None
 
 
@@ -330,7 +354,7 @@ def install(api: ApiRegistry) -> None:
         dc = _sys(ctx).handles.require(ctx.args[0], DC)
         dc.save_stack.append((dc.text_color, dc.bk_color, dc.bk_mode,
                               dc.stretch_mode, dict(dc.selected), dc.palette,
-                              dc.clip_rect, dc.text_align))
+                              dc.clip_rect, dc.text_align, dc.cur_pos))
         return len(dc.save_stack)
 
     @api.register("GDI", 39, args="word s_word")        # RestoreDC(hdc, level)
@@ -342,7 +366,7 @@ def install(api: ApiRegistry) -> None:
         if not 0 <= idx < len(st):
             return 0
         (dc.text_color, dc.bk_color, dc.bk_mode, dc.stretch_mode,
-         selected, dc.palette, dc.clip_rect, dc.text_align) = st[idx]
+         selected, dc.palette, dc.clip_rect, dc.text_align, dc.cur_pos) = st[idx]
         dc.selected = dict(selected)
         del st[idx:]                                    # discard idx and later
         return 1
@@ -365,6 +389,36 @@ def install(api: ApiRegistry) -> None:
             l, t, r, b = max(l, cl), max(t, ct), min(r, cr), min(b, cb)
         dc.clip_rect = (l, t, r, b)
         return NULLREGION if r <= l or b <= t else SIMPLEREGION
+
+    @api.register("GDI", 44, args="word word")          # SelectClipRgn(hdc, hrgn)
+    def SelectClipRgn(ctx: CallContext) -> int:
+        # REPLACE the DC's clip with a COPY of hrgn (device coords), or remove
+        # clipping entirely when hrgn is NULL.  The copy is why every caller may
+        # DeleteObject the region on the very next line — SimAnt does exactly
+        # that, twice, in _AboutDialog.
+        #
+        # Same model as IntersectClipRect: the clip is TRACKED as a rect (so
+        # SaveDC/RestoreDC round-trip it and the region-type return is right),
+        # not ENFORCED in the blitters — our surfaces already bound writes, and
+        # Region is a bounding box, so a true clip would need real region
+        # algebra plus a clip test in every draw path.  Nothing has proven that
+        # need yet; when one does, this is the single place the rect comes from.
+        #
+        # Observed contract (SimAnt's _AboutDialog): CreateRectRgn over the
+        # credits box -> SelectClipRgn -> DeleteObject, around the scrolling
+        # text.  The return is ignored at both sites.
+        NULLREGION, SIMPLEREGION, ERROR = 1, 2, 0xFFFF
+        sys = _sys(ctx)
+        hdc, hrgn = ctx.args
+        dc = sys.handles.require(hdc, DC)
+        if hrgn == 0:                       # remove the clip: the whole surface
+            dc.clip_rect = None
+            return SIMPLEREGION
+        rgn = sys.handles.get(hrgn)
+        if not isinstance(rgn, Region):
+            return ERROR
+        dc.clip_rect = rgn.bounds
+        return NULLREGION if rgn.is_empty() else SIMPLEREGION
 
     @api.register("GDI", 45, args="word word")          # SelectObject(hdc, hobj)
     def SelectObject(ctx: CallContext) -> int:
@@ -483,6 +537,37 @@ def install(api: ApiRegistry) -> None:
             _fill_rect(dst, x, y, w, h, _brush_rgb(sys, hdc))
         else:
             raise NotImplementedError(f"PatBlt rop {rop:#010x}")
+        return 1
+
+    @api.register("GDI", 20, args="word s_word s_word", ret="long")
+    def MoveTo(ctx: CallContext) -> int:                # (hdc, X, Y)
+        # Move the current position; -> the PREVIOUS one packed as
+        # MAKELONG(x, y).  Draws nothing.
+        dc = _sys(ctx).handles.require(ctx.args[0], DC)
+        prev_x, prev_y = dc.cur_pos
+        dc.cur_pos = (_signed(ctx.args[1]), _signed(ctx.args[2]))
+        return ((prev_y & 0xFFFF) << 16) | (prev_x & 0xFFFF)
+
+    @api.register("GDI", 19, args="word s_word s_word")
+    def LineTo(ctx: CallContext) -> int:                # (hdc, X, Y)
+        # Draw with the selected PEN from the current position to (X, Y), then
+        # make (X, Y) the current position — the move is GDI's contract and
+        # happens whether or not anything was painted, so a polyline chain
+        # stays connected even over a DC with no surface.
+        #
+        # Observed contract (SimAnt's _GLine): CreatePen -> SelectObject ->
+        # MoveTo -> LineTo -> restore -> DeleteObject, for the laser fire and
+        # the history graph.  A NULL pen draws nothing but still moves.
+        sys = _sys(ctx)
+        hdc = ctx.args[0]
+        dc = sys.handles.require(hdc, DC)
+        x0, y0 = dc.cur_pos
+        x1, y1 = _signed(ctx.args[1]), _signed(ctx.args[2])
+        dc.cur_pos = (x1, y1)
+        dst = _dc_surface(sys, hdc)
+        rgb = _pen_rgb(sys, dc)             # None = NULL/hollow pen
+        if dst is not None and rgb is not None:
+            _draw_line(dst, x0, y0, x1, y1, rgb)
         return 1
 
     @api.register("GDI", 36, args="word ptr word")      # Polygon(hdc, lpPoints, n)
@@ -805,7 +890,32 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("GDI", 374, args="word")              # GetSystemPaletteUse(hdc)
     def GetSystemPaletteUse(ctx: CallContext) -> int:
-        return 1                    # SYSPAL_STATIC
+        return _sys(ctx).machine.api.services.get("syspal_use", SYSPAL_STATIC)
+
+    @api.register("GDI", 373, args="word word")         # SetSystemPaletteUse
+    def SetSystemPaletteUse(ctx: CallContext) -> int:   # (hdc, usage)
+        # SYSPAL_NOSTATIC releases 18 of the 20 reserved system colours so a
+        # full-screen app can own all 256; SYSPAL_STATIC gives them back.  -> the
+        # PREVIOUS usage (SYSPAL_ERROR == 0 if the DC has no palette).
+        #
+        # Recorded, not enforced: our system palette is the single-app model
+        # (RealizePalette copies the app's logical palette wholesale — see
+        # GetSystemPaletteEntries), so the app ALREADY effectively owns every
+        # entry and there are no static colours to reserve or release.  The
+        # value is kept so GetSystemPaletteUse answers truthfully.
+        #
+        # Observed contract (SimAnt's _SetUpPalette): guarded by
+        # GetDeviceCaps(RASTERCAPS) & RC_PALETTE, NOSTATIC on the way in and
+        # STATIC on the way out; the return is ignored at both sites.
+        sys = _sys(ctx)
+        hdc, usage = ctx.args
+        if not isinstance(sys.handles.get(hdc), DC):
+            return SYSPAL_ERROR
+        if usage not in (SYSPAL_STATIC, SYSPAL_NOSTATIC):
+            raise NotImplementedError(f"SetSystemPaletteUse usage {usage}")
+        prev = sys.machine.api.services.get("syspal_use", SYSPAL_STATIC)
+        sys.machine.api.services["syspal_use"] = usage
+        return prev
 
     @api.register("GDI", 375, args="word word word ptr")  # GetSystemPaletteEntries
     def GetSystemPaletteEntries(ctx: CallContext) -> int:  # (hdc, start, count, lppe)

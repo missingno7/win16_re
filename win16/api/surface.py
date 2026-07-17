@@ -1,7 +1,7 @@
 """The full Win16 API surface as a registry factory — loader-free.
 
-``build_registry`` constructs the complete KERNEL/USER/GDI/SOUND/MMSYSTEM/
-dialog/win87em API registry.  It lives here (not in ``win16.app``) so an
+``build_registry`` constructs the complete KERNEL/USER/GDI/KEYBOARD/SOUND/
+MMSYSTEM/dialog/win87em API registry.  It lives here (not in ``win16.app``) so an
 EXE-independent runtime (``win16.bootimage`` — dos_re_2.0 §1a') can rebuild
 the API surface WITHOUT importing the NE loader: ``win16.app`` composes this
 factory with ``load_ne``/``parse_ne`` for the normal EXE boot path, while the
@@ -11,7 +11,8 @@ loader symbol — this module is what keeps that graph closed.
 """
 from __future__ import annotations
 
-from win16.api import dialogs, gdi, kernel, mmsystem, sound, user, win87em
+from win16.api import (dialogs, gdi, kernel, keyboard, mmsystem, sound, user,
+                       win87em)
 from win16.api.core import ApiRegistry
 
 # __WINFLAGS (KERNEL.178 equate) default: WF_PMODE | WF_CPU286 | WF_STANDARD,
@@ -33,6 +34,7 @@ def build_registry(*, winflags: int = WINFLAGS_NO_FPU) -> ApiRegistry:
     kernel.install(api)
     user.install(api)
     gdi.install(api)
+    keyboard.install(api)
     sound.install(api)
     mmsystem.install(api)
     dialogs.install(api)

@@ -27,6 +27,69 @@ def _sys(ctx: CallContext) -> Win16System:
     return ctx.registry.services["system"]
 
 
+class AtomTable:
+    """The system-wide string atom table (GlobalAddAtom / RegisterWindowMessage).
+
+    Win16's contract, and every part of it is load-bearing somewhere:
+      * one atom per DISTINCT string, compared case-insensitively;
+      * atoms are ref-counted — n adds need n deletes before the atom dies;
+      * string atoms live in 0xC000..0xFFFF.  RegisterWindowMessage mints from
+        this same space, which is what puts a registered message above every
+        WM_USER-relative control message and lets a wndproc tell them apart.
+    Integer atoms (the "#1234" form / MAKEINTATOM) are a separate space that no
+    caller has needed yet: they raise rather than silently colliding with the
+    string space.
+    """
+
+    FIRST, LAST = 0xC000, 0xFFFF
+
+    def __init__(self) -> None:
+        self.by_name: dict[str, int] = {}
+        self.names: dict[int, str] = {}
+        self.refs: dict[int, int] = {}
+
+    def add(self, name: bytes | str) -> int:
+        if isinstance(name, bytes):
+            name = name.decode("latin-1")
+        if name.startswith("#"):
+            raise NotImplementedError(
+                f"integer atom {name!r} — only string atoms are implemented")
+        key = name.upper()
+        atom = self.by_name.get(key)
+        if atom is None:
+            atom = self.FIRST + len(self.by_name)
+            if atom > self.LAST:
+                return 0                        # table full — real USER's answer
+            self.by_name[key] = atom
+            self.names[atom] = name
+            self.refs[atom] = 0
+        self.refs[atom] += 1
+        return atom
+
+    def delete(self, atom: int) -> int:
+        """-> 0 when the reference is dropped, else the atom (USER's failure)."""
+        if atom not in self.refs:
+            return atom & 0xFFFF
+        self.refs[atom] -= 1
+        if self.refs[atom] <= 0:
+            del self.by_name[self.names.pop(atom).upper()]
+            del self.refs[atom]
+        return 0
+
+    def find(self, name: bytes | str) -> int:
+        if isinstance(name, bytes):
+            name = name.decode("latin-1")
+        return self.by_name.get(name.upper(), 0)
+
+
+def _atoms(sysobj: Win16System) -> AtomTable:
+    services = sysobj.machine.api.services
+    table = services.get("atoms")
+    if table is None:
+        table = services["atoms"] = AtomTable()
+    return table
+
+
 def _desktop_window(sys: Win16System) -> Window:
     """The screen/desktop pseudo-window (GetDesktopWindow / GetDC(NULL))."""
     win = sys.machine.api.services.get("desktop_window")
@@ -639,6 +702,22 @@ def install(api: ApiRegistry) -> None:
 
     @api.register("USER", 151)                          # CreateMenu()
     def CreateMenu(ctx: CallContext) -> int:
+        sys = _sys(ctx)
+        menu = Menu(None)
+        sys.handles.add(menu)
+        return menu.handle
+
+    @api.register("USER", 415)                          # CreatePopupMenu()
+    def CreatePopupMenu(ctx: CallContext) -> int:
+        # An empty menu meant to be attached with AppendMenu(MF_POPUP) or shown
+        # by TrackPopupMenu.  Real USER distinguishes a popup from a menu bar by
+        # a style bit it uses when it DRAWS; our Menu is a pure item tree and
+        # whoever renders it (the host chrome) derives bar-vs-popup from where
+        # it is attached, so this is CreateMenu's twin rather than a new object.
+        #
+        # Observed contract (SimAnt's _InitMenu): create, fill with AppendMenu,
+        # then AppendMenu(hBar, MF_POPUP, hPopup, title) — the submenu path of
+        # its programmatic menu builder.
         sys = _sys(ctx)
         menu = Menu(None)
         sys.handles.add(menu)
@@ -1592,6 +1671,142 @@ def install(api: ApiRegistry) -> None:
         for i, v in enumerate(ctx.args[1:]):
             ctx.mem.ww(seg, (off + 2 * i) & 0xFFFF, v & 0xFFFF)
         return 1
+
+    @api.register("USER", 180, args="word", ret="long")  # GetSysColor(nIndex)
+    def GetSysColor(ctx: CallContext) -> int:
+        # -> the COLORREF (0x00BBGGRR) of a COLOR_* system colour.  Win 3.1
+        # defines 0..18; an out-of-range index gives black, as USER does.
+        from .gdi import sys_colors
+        r, g, b = sys_colors(_sys(ctx)).get(ctx.args[0], (0, 0, 0))
+        return (b << 16) | (g << 8) | r
+
+    @api.register("USER", 181, args="word ptr ptr")     # SetSysColors
+    def SetSysColors(ctx: CallContext) -> int:          # (n, lpIndices, lpColors)
+        # Replace n system colours: lpIndices is an array of n COLOR_* WORDs,
+        # lpColors the matching array of n COLORREF DWORDs.  Real USER then
+        # broadcasts WM_SYSCOLORCHANGE and repaints every window; we have no
+        # second application to notify, and our own readers resolve through the
+        # live table at PAINT time (gdi.sys_colors), so the new colours land on
+        # the next repaint with nothing to broadcast.
+        #
+        # Observed contract (SimAnt's _SetUpPalette): GetSysColor all 19 into a
+        # save array, SetSysColors(19, ...) its own scheme on the way in, and
+        # SetSysColors(19, ..., saved) to put Windows back on the way out.  An
+        # index it never touches must keep its default — hence a targeted
+        # update, not a wholesale table replace.
+        from .gdi import sys_colors
+        table = sys_colors(_sys(ctx))
+        n, idx_ptr, col_ptr = ctx.args
+        iseg, ioff = (idx_ptr >> 16) & 0xFFFF, idx_ptr & 0xFFFF
+        cseg, coff = (col_ptr >> 16) & 0xFFFF, col_ptr & 0xFFFF
+        for i in range(n):
+            index = ctx.mem.rw(iseg, (ioff + 2 * i) & 0xFFFF)
+            lo = ctx.mem.rw(cseg, (coff + 4 * i) & 0xFFFF)
+            hi = ctx.mem.rw(cseg, (coff + 4 * i + 2) & 0xFFFF)
+            colorref = lo | (hi << 16)
+            table[index] = (colorref & 0xFF, (colorref >> 8) & 0xFF,
+                            (colorref >> 16) & 0xFF)
+        return 1
+
+    @api.register("USER", 76, args="ptr long")          # PtInRect(lprc, pt)
+    def PtInRect(ctx: CallContext) -> int:
+        # The POINT arrives as one DWORD: x in the low word, y in the high.
+        # Half-open on right/bottom, exactly as USER: a point ON the right or
+        # bottom edge is OUTSIDE.  Both the rect and the point are signed.
+        seg, off = (ctx.args[0] >> 16) & 0xFFFF, ctx.args[0] & 0xFFFF
+        left, top, right, bottom = (
+            _signed(ctx.mem.rw(seg, (off + 2 * i) & 0xFFFF)) for i in range(4))
+        x, y = _signed(ctx.args[1] & 0xFFFF), _signed((ctx.args[1] >> 16) & 0xFFFF)
+        return 1 if left <= x < right and top <= y < bottom else 0
+
+    @api.register("USER", 473, args="str segptr", ret="long")
+    def AnsiPrev(ctx: CallContext) -> int:              # (lpszStart, lpszCurrent)
+        # -> a far pointer to the character BEFORE lpszCurrent, clamped to
+        # lpszStart.  Win 3.1 defines this for DBCS (where "the previous
+        # character" cannot be found by subtracting one, so the scan must start
+        # from lpszStart); on a single-byte code page it is lpszCurrent - 1.
+        # We are single-byte throughout (latin-1 everywhere in this layer), so
+        # the DBCS scan collapses to the decrement — implemented as the clamped
+        # decrement rather than a fake lead-byte walk.
+        #
+        # Observed contract (SimAnt's file dialogs — OPENDLG/SAVEASDLG/
+        # _ChangeDirectory/_SeparateFile all share one idiom): start at the
+        # string's NUL and step back looking for ':' or '\\', i.e. find the last
+        # path separator.  The caller's own `cmp ax,start / jbe done` guard
+        # means it never asks past the start, and it reads the result as DX:AX
+        # (`mov es,dx / mov bx,ax`) — so the far pointer must keep the segment.
+        start, current = ctx.args
+        seg = (current >> 16) & 0xFFFF
+        off = current & 0xFFFF
+        if (start >> 16) & 0xFFFF == seg and off > (start & 0xFFFF):
+            off -= 1
+        return (seg << 16) | off
+
+    @api.register("USER", 36, args="word segptr word")
+    def GetWindowText(ctx: CallContext) -> int:         # (hwnd, lpsz, cch)
+        # -> the count copied, NOT counting the NUL; the buffer is always
+        # terminated, and cch counts the NUL (so at most cch-1 characters land).
+        # SimAnt's MAINWNDPROC reads two window titles into 128-byte buffers and
+        # prints them; a control/dialog handle or a bad one yields the empty
+        # string, as USER does.
+        win = _sys(ctx).handles.get(ctx.args[0])
+        title = getattr(win, "title", "") if isinstance(win, Window) else ""
+        text = title.encode("latin-1")[:max(ctx.args[2] - 1, 0)]
+        buf = ctx.args[1]
+        ctx.mem.load((buf >> 16) & 0xFFFF, buf & 0xFFFF, text + b"\x00")
+        return len(text)
+
+    @api.register("USER", 70, args="word word")         # SetCursorPos(x, y)
+    def SetCursorPos(ctx: CallContext) -> int:
+        # Warp the pointer to a SCREEN position.  Two halves, split by who owns
+        # what: the guest-visible cursor state is ours (a poll of GetCursorPos
+        # must observe the move immediately — that is the half every program can
+        # detect), while moving the HOST's real pointer is presentation and only
+        # happens if the host installed a "cursor_warp" callback.  Without one
+        # the guest's model still moves and the next host mouse event resyncs
+        # it, which is exactly what real Windows does when the user's hand moves
+        # the mouse after a warp.
+        #
+        # Observed contract (SimAnt's _DoKeyDown): the arrow keys nudge the
+        # pointer 8px — GetCursorPos, adjust, SetCursorPos.  The return is
+        # ignored (real USER returns void).
+        sys = _sys(ctx)
+        x, y = _signed(ctx.args[0]), _signed(ctx.args[1])
+        sys.machine.api.services["cursor_pos"] = (x & 0xFFFF, y & 0xFFFF)
+        warp = sys.machine.api.services.get("cursor_warp")
+        if warp is not None:
+            warp(x, y)
+        return 0
+
+    @api.register("USER", 118, args="str")              # RegisterWindowMessage
+    def RegisterWindowMessage(ctx: CallContext) -> int:
+        # A message id unique to the string, system-wide and stable for the
+        # session: the same string always maps to the same id, a different one
+        # never does.  Real USER allocates from the global atom space, so the
+        # ids land in 0xC000..0xFFFF — above every WM_USER-relative control
+        # message, which is the property callers rely on.  We mint from the same
+        # atom table for exactly that reason (see _atoms).
+        #
+        # Observed contract (SimAnt's _snd_Install): register one name, keep the
+        # id in a global, and compare incoming message ids against it.
+        return _atoms(_sys(ctx)).add(ctx.read_string(ctx.args[0]))
+
+    @api.register("USER", 268, args="str")              # GlobalAddAtom(lpString)
+    def GlobalAddAtom(ctx: CallContext) -> int:
+        # -> the atom for the string (0 on failure).  Case-INSENSITIVE, and
+        # ref-counted: adding the same string twice yields the same atom and two
+        # deletes are needed to drop it.
+        #
+        # Observed contract (SimAnt's _GtInitiateDDE): add the application and
+        # topic atoms, broadcast WM_DDE_INITIATE with MAKELONG(aApp, aTopic),
+        # then delete both — the standard DDE client handshake.
+        return _atoms(_sys(ctx)).add(ctx.read_string(ctx.args[0]))
+
+    @api.register("USER", 269, args="word")             # GlobalDeleteAtom(atom)
+    def GlobalDeleteAtom(ctx: CallContext) -> int:
+        # -> 0 on success, else the atom (still referenced / not ours).  Drops
+        # one reference; the atom dies when the last one goes.
+        return _atoms(_sys(ctx)).delete(ctx.args[0])
 
     @api.register("USER", 111, args="word word word long", ret="long")
     def SendMessage(ctx: CallContext) -> int:           # (hwnd, msg, wp, lp)

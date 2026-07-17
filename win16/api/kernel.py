@@ -23,7 +23,74 @@ OF_REOPEN = 0x8000
 OF_KNOWN = OF_ACCESS_MASK | OF_CREATE | OF_EXIST | OF_REOPEN
 
 
+class FatalAppExitError(RuntimeError):
+    """The program's C runtime declared a fatal error and asked Windows to end
+    the task.  A STOP, never a return: see FatalExit / FatalAppExit."""
+
+
+def _debug_out(ctx: CallContext, text: str) -> None:
+    """Route a program's debug output to the harness console (stderr).
+
+    Real KERNEL sends OutputDebugString to whatever debugger is attached, and
+    to the AUX device when none is.  Our debugger is the operator's console —
+    the same place VM stops and API gaps go — so a game's own tracing lands
+    beside ours.  A host that wants it elsewhere installs "debug_out".
+    """
+    sink = ctx.registry.services.get("debug_out")
+    if sink is not None:
+        sink(text)
+        return
+    import sys
+    sys.stderr.write(text)
+    sys.stderr.flush()
+
+
 def install(api: ApiRegistry) -> None:
+    @api.register("KERNEL", 115, args="str", ret="void")
+    def OutputDebugString(ctx: CallContext) -> None:
+        # Emit a debug string; no newline is added — the caller punctuates.
+        #
+        # Observed contract (SimAnt's _WinPrintf/_DebugWinPrintf, and the MSC
+        # runtime's __NMSG_WRITE): wvsprintf into a local buffer, then
+        # OutputDebugString the pieces, adding "\r" before a leading "\n" and
+        # after a trailing one.  All of it sits behind the game's own debug flag
+        # (DGROUP 08F2), which ships as 0 — this is how the game TALKS when a
+        # developer switches tracing on, and how the CRT announces a run-time
+        # error just before it kills the task.
+        _debug_out(ctx, ctx.read_string(ctx.args[0]).decode("latin-1"))
+
+    @api.register("KERNEL", 137, args="word str", ret="void")
+    def FatalAppExit(ctx: CallContext) -> None:
+        # The C runtime's PANIC path: "end this task NOW".  Real KERNEL shows
+        # the message in a system-modal box with only a Close button and
+        # terminates the task — it NEVER returns to the caller, and the caller
+        # is written on that assumption (SimAnt's __amsg_exit falls straight
+        # into FatalExit(0xFF) after it).
+        #
+        # So this must STOP, loudly, and must never look like success: returning
+        # would resume a program that has already declared its state
+        # unrecoverable, and any state we then observed would be a lie.
+        # wAction is a debugging-behaviour hint (0 = show the box); the message
+        # is what matters, and it is the CRT's own "run-time error R6xxx ..."
+        # text — the single most useful thing to put in front of the operator.
+        action, msg_ptr = ctx.args
+        msg = ctx.read_string(msg_ptr).decode("latin-1") if msg_ptr else ""
+        raise FatalAppExitError(
+            f"FatalAppExit(action={action:#x}): {msg.strip()!r} — the program's "
+            "C runtime declared a fatal error and asked Windows to end the task")
+
+    @api.register("KERNEL", 1, args="word", ret="void")
+    def FatalExit(ctx: CallContext) -> None:
+        # The lowest-level panic: real KERNEL breaks into the debugger with a
+        # stack backtrace, and without one ends the task.  Never returns.
+        #
+        # Observed contract (SimAnt's __amsg_exit tail): FatalExit(0xFF), placed
+        # AFTER FatalAppExit as the CRT's belt-and-braces — reaching it at all
+        # means the program is already past saving.
+        raise FatalAppExitError(
+            f"FatalExit(code={ctx.args[0]:#x}) — the program panicked and asked "
+            "KERNEL to break into the debugger / end the task")
+
     @api.register_raw("KERNEL", 91)     # InitTask() — -register contract
     def InitTask(ctx: CallContext) -> None:
         sys: Win16System = ctx.registry.services["system"]

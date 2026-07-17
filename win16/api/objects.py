@@ -310,5 +310,6 @@ class DC:
     selected: dict[str, object] = field(default_factory=dict)
     palette: object = None          # selected logical Palette (None = default)
     clip_rect: tuple | None = None  # (l,t,r,b) intersect-clip; None = unclipped
+    cur_pos: tuple = (0, 0)         # GDI current position (MoveTo/LineTo)
     save_stack: list = field(default_factory=list)   # SaveDC/RestoreDC states
     handle: int = 0
