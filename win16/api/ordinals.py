@@ -1,9 +1,16 @@
 """Ordinal -> exported-name tables for the Win16 system modules.
 
 Source of truth: the Wine project's 16-bit spec files (krnl386.exe16.spec,
-user.exe16.spec, gdi.exe16.spec, sound.drv16.spec, win87em.dll16.spec),
-fetched 2026-07-07.  Only ordinals that a target executable has actually
-imported are listed; extend from the same source as new games need more.
+user.exe16.spec, gdi.exe16.spec, keyboard.drv16.spec, sound.drv16.spec,
+win87em.dll16.spec), fetched 2026-07-07 (extended 2026-07-17).  Only ordinals
+that a target executable has actually imported are listed; extend from the same
+source as new games need more.
+
+A name here is a FACT read off that table, never inferred from a call site or
+from Win3.x folklore — `ApiRegistry.register` cross-checks every handler
+against it and raises on a mismatch, so a misidentified ordinal fails loud at
+import time rather than mis-servicing a call.  An entry may exist with no
+handler: the name then only sharpens the `Win16ApiGap` a tripwire raises.
 """
 from __future__ import annotations
 
@@ -18,11 +25,14 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         57: "GetProfileInt",
         58: "GetProfileString",
         59: "WriteProfileString",
+        103: "NetBIOSCall",
+        115: "OutputDebugString",
         135: "GetSystemDirectory",
         5: "LocalAlloc",
         6: "LocalReAlloc",
         7: "LocalFree",
         10: "LocalSize",
+        13: "LocalCompact",
         15: "GlobalAlloc",
         16: "GlobalReAlloc",
         17: "GlobalFree",
@@ -32,6 +42,10 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         23: "LockSegment",
         24: "UnlockSegment",
         30: "WaitEvent",
+        111: "GlobalWire",
+        112: "GlobalUnWire",
+        191: "GlobalPageLock",
+        192: "GlobalPageUnlock",
         49: "GetModuleFileName",
         51: "MakeProcInstance",
         52: "FreeProcInstance",
@@ -47,6 +61,8 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         85: "_lopen",
         86: "_lwrite",
         88: "lstrcpy",
+        89: "lstrcat",
+        90: "lstrlen",
         91: "InitTask",
         102: "DOS3Call",
         113: "__AHSHIFT",           # equate: absolute constant (3)
@@ -66,7 +82,20 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         28: "ClientToScreen",
         29: "ScreenToClient",
         30: "WindowFromPoint",
+        36: "GetWindowText",
+        70: "SetCursorPos",
+        76: "PtInRect",
+        99: "DlgDirSelect",
+        100: "DlgDirList",
         104: "MessageBeep",
+        118: "RegisterWindowMessage",
+        180: "GetSysColor",
+        181: "SetSysColors",
+        268: "GlobalAddAtom",
+        269: "GlobalDeleteAtom",
+        415: "CreatePopupMenu",
+        416: "TrackPopupMenu",
+        473: "AnsiPrev",
         272: "IsZoomed",
         45: "BringWindowToTop",
         49: "IsWindowVisible",
@@ -176,6 +205,9 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
     "GDI": {
         1: "SetBkColor",
         2: "SetBkMode",
+        19: "LineTo",
+        20: "MoveTo",
+        44: "SelectClipRgn",
         61: "CreatePen",
         3: "SetMapMode",
         22: "IntersectClipRect",
@@ -212,9 +244,13 @@ ORDINAL_NAMES: dict[str, dict[int, str]] = {
         360: "CreatePalette",
         363: "GetPaletteEntries",
         370: "GetNearestPaletteIndex",
+        373: "SetSystemPaletteUse",
         374: "GetSystemPaletteUse",
         375: "GetSystemPaletteEntries",
         443: "SetDIBitsToDevice",
+    },
+    "KEYBOARD": {
+        131: "MapVirtualKey",
     },
     "SOUND": {
         1: "OpenSound",

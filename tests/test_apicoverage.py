@@ -22,6 +22,14 @@ from win16.apicoverage import (
 
 THUNK_SEG = 0x0060
 
+# The exemplar for the UNNAMED path: imported, slot allocated, no handler and
+# no name anywhere.  It must be an ordinal the real Wine table can never
+# resolve, or the fixture rots the moment a game proves a real ordinal and it
+# gains a name — which is exactly what happened to the previous choice, GDI.44
+# (now SelectClipRgn).  GDI exports nothing near 4000.
+UNNAMED_ORD = 4000
+UNNAMED_TARGET = f"GDI.{UNNAMED_ORD}"
+
 
 # --------------------------------------------------------------------------
 # the synthetic machine (mock CPU + flat byte memory — enough for dispatch)
@@ -95,9 +103,9 @@ def _registry() -> ApiRegistry:
 
 def _machine() -> _Machine:
     api = _registry()
-    # The loader-facing slot allocation: GDI.44 gets a slot but has no
+    # The loader-facing slot allocation: the unnamed target gets a slot but has no
     # handler — the tripwire case.
-    for module, ordinal in (("USER", 109), ("KERNEL", 22), ("GDI", 44)):
+    for module, ordinal in (("USER", 109), ("KERNEL", 22), ("GDI", UNNAMED_ORD)):
         kind, _ = api.resolve_import(module, ordinal)
         assert kind == "thunk"
     kind, value = api.resolve_import("KERNEL", 114)
@@ -140,7 +148,7 @@ _DOC = {
             {"ip": "0020", "kind": "call_far",
              "platform_effect": "api:USER.109:PeekMessage"},
             {"ip": "0025", "kind": "call_far",
-             "platform_effect": "api:GDI.44"},
+             "platform_effect": f"api:GDI.{UNNAMED_ORD}"},
             {"ip": "002A", "kind": "call_far",
              "platform_effect": "api:slot_0044"},
         ]),
@@ -165,7 +173,7 @@ def test_parse_api_tag():
 
 def test_static_usage_dedupes_overlapping_records_and_skips_unliftable():
     api_sites, int_sites, unresolved = static_usage(_DOC)
-    assert set(api_sites) == {("USER", 109), ("KERNEL", 22), ("GDI", 44)}
+    assert set(api_sites) == {("USER", 109), ("KERNEL", 22), ("GDI", UNNAMED_ORD)}
     # Two distinct PeekMessage sites (the non-liftable _Dead one is skipped).
     assert api_sites[("USER", 109)]["sites"] == ["0100:0010", "0200:0020"]
     assert api_sites[("USER", 109)]["callers"] == {"_Alpha", "_Beta"}
@@ -183,17 +191,17 @@ def test_identity_resolution_is_honest():
     assert resolve_name(api, "KERNEL", 22) == ("GlobalFlags", "handler-name")
     # KERNEL.114 has no handler but the ordinal table knows the equate.
     assert resolve_name(api, "KERNEL", 114) == ("__AHINCR", "ordinal-table")
-    # GDI.44: no table entry, no handler, no IR name -> unnamed, not guessed.
-    assert resolve_name(api, "GDI", 44) == (None, "unnamed")
+    # No table entry, no handler, no IR name -> unnamed, never guessed.
+    assert resolve_name(api, "GDI", UNNAMED_ORD) == (None, "unnamed")
     # The IR tag's name part is the last resort before unnamed.
-    assert resolve_name(api, "GDI", 44, ir_name="TagName") == ("TagName", "ir-tag")
+    assert resolve_name(api, "GDI", UNNAMED_ORD, ir_name="TagName") == ("TagName", "ir-tag")
 
 
 def test_implementation_status():
     api = _registry()
     assert implementation_status(api, "USER", 109) == "handler-raw"
     assert implementation_status(api, "KERNEL", 114) == "equate"
-    assert implementation_status(api, "GDI", 44) == "tripwire"
+    assert implementation_status(api, "GDI", UNNAMED_ORD) == "tripwire"
 
 
 # --------------------------------------------------------------------------
@@ -218,7 +226,7 @@ def test_instrumented_dispatch_counts_slots_procs_and_ints():
     assert counts.api == {("USER", 109): 3}
 
     # A tripwire dispatch still fails loud through the wrapper.
-    trip = (THUNK_SEG, api.slots[("GDI", 44)])
+    trip = (THUNK_SEG, api.slots[("GDI", UNNAMED_ORD)])
     with pytest.raises(Win16ApiGap):
         cpu.replacement_hooks[trip](cpu)
 
@@ -251,7 +259,7 @@ def test_build_coverage_static_only():
     machine = _machine()
     report = build_coverage(_DOC, machine.api)
     t = report["targets"]
-    assert set(t) == {"USER.109", "KERNEL.22", "KERNEL.114", "GDI.44"}
+    assert set(t) == {"USER.109", "KERNEL.22", "KERNEL.114", UNNAMED_TARGET}
     assert t["USER.109"]["classification"] == "implemented"
     assert t["USER.109"]["static_sites"] == 2
     assert t["USER.109"]["runtime_calls"] is None
@@ -260,8 +268,8 @@ def test_build_coverage_static_only():
         "name_source": "ordinal-table", "unnamed": False,
         "implemented": "equate", "imported": True, "static_sites": 0,
         "callers": [], "runtime_calls": None, "classification": "equate"}
-    assert t["GDI.44"]["classification"] == "unimplemented-tripwire"
-    assert t["GDI.44"]["unnamed"] is True
+    assert t[UNNAMED_TARGET]["classification"] == "unimplemented-tripwire"
+    assert t[UNNAMED_TARGET]["unnamed"] is True
     assert report["summary"]["exercised"] is None
     assert report["summary"]["unnamed"] == 1
     assert report["ints"]["static_sites"] == {"int21_dos": 1}
@@ -305,6 +313,6 @@ def test_format_table_lists_risk_and_dynamic_sections():
     assert "PeekMessage" in text
     assert "implemented+never-exercised" in text
     assert "GlobalFlags" in text            # the risk list names KERNEL.22
-    assert "(unnamed)" in text              # GDI.44 reported honestly
+    assert "(unnamed)" in text              # the unnamed target, reported honestly
     assert "int21_dos" in text
     assert "MMSYSTEM.midiOutOpen" in text
