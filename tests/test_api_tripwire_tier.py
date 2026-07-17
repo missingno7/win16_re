@@ -16,7 +16,9 @@ from types import SimpleNamespace
 import pytest
 
 from win16.api.core import ARG_SIZES, CallContext
-from win16.api.dialogs import Dialog, DialogControlState, _decode_dir_entry
+from win16.api.core import Win16ApiGap
+from win16.api.dialogs import (Dialog, DialogControlState, LB_GETCURSEL,
+                               _decode_dir_entry, _split_spec)
 from win16.api.gdi import SYS_COLORS, sys_colors
 from win16.api.kernel import FatalAppExitError
 from win16.api.keyboard import _US_LAYOUT
@@ -168,6 +170,119 @@ def test_dlgdirselect_copies_the_name_and_reports_file_vs_directory():
     dlg.controls[0].sel = 2
     assert _call(api, cpu, "USER", 99, (dlg.handle, buf, 0x194)) == 1
     assert cpu.mem.block(0x6000, 0x10, 4).split(b"\x00")[0] == b"c:"
+
+
+# --------------------------------------------------------------------------
+# USER.100 DlgDirList — the DDL_* filetype decides what a listing IS
+# --------------------------------------------------------------------------
+
+def _dir_rig(tmp_path):
+    api, cpu, sysobj = _rig()
+    (tmp_path / "SAVE.ANT").write_bytes(b"x")
+    (tmp_path / "OTHER.ANT").write_bytes(b"x")
+    (tmp_path / "GAME.EXE").write_bytes(b"x")
+    (tmp_path / "SOUND").mkdir()
+    sysobj.file_root = tmp_path
+    dlg = _dialog_with_list(sysobj, [], -1)
+    dlg.by_id[0x193] = DialogControlState(0x193, "Static", 0, "", None)
+    dlg.controls.append(dlg.by_id[0x193])
+    return api, cpu, sysobj, dlg
+
+
+def _list(api, cpu, dlg, spec, filetype, static_id=0x193):
+    ptr = _put_str(cpu, 0x5000, 0, spec)
+    rv = _call(api, cpu, "USER", 100,
+               (dlg.handle, ptr, 0x194, static_id, filetype))
+    return rv, dlg.by_id[0x194].items
+
+
+DDL_DIRECTORY, DDL_DRIVES, DDL_EXCLUSIVE = 0x0010, 0x4000, 0x8000
+
+
+def test_dlgdirlist_exclusive_dirs_and_drives_lists_no_files(tmp_path):
+    # SimAnt's SAVEASDLG asks for exactly this (0xC010) to show "where am I":
+    # folders and drives ONLY.  Listing files here inverts the answer — and its
+    # spec is deliberately EMPTY, which must not become "*.*" and match all.
+    api, cpu, _sysobj, dlg = _dir_rig(tmp_path)
+    rv, items = _list(api, cpu, dlg, "",
+                      DDL_EXCLUSIVE | DDL_DRIVES | DDL_DIRECTORY)
+    assert items == ["[-c-]", "[SOUND]"]
+    assert not any(i.endswith(".ANT") or i.endswith(".EXE") for i in items)
+    assert rv == 1
+
+
+def test_dlgdirlist_non_exclusive_lists_matching_files_plus_dirs_and_drives(tmp_path):
+    # OPENDLG's 0x4010: the spec's files AND the folders AND the drives.
+    api, cpu, _sysobj, dlg = _dir_rig(tmp_path)
+    rv, items = _list(api, cpu, dlg, "*.ANT", DDL_DRIVES | DDL_DIRECTORY)
+    assert items == ["OTHER.ANT", "SAVE.ANT", "[-c-]", "[SOUND]"]
+    assert rv == 1
+
+
+def test_dlgdirlist_plain_files_only_when_no_class_bits_are_set(tmp_path):
+    api, cpu, _sysobj, dlg = _dir_rig(tmp_path)
+    _rv, items = _list(api, cpu, dlg, "*.ANT", 0)
+    assert items == ["OTHER.ANT", "SAVE.ANT"]           # no dirs, no drives
+    _rv, items = _list(api, cpu, dlg, "*.*", 0)
+    assert items == ["GAME.EXE", "OTHER.ANT", "SAVE.ANT"]
+
+
+def test_dlgdirlist_reports_no_match_and_updates_the_current_path(tmp_path):
+    api, cpu, _sysobj, dlg = _dir_rig(tmp_path)
+    rv, items = _list(api, cpu, dlg, "*.SAV", 0)
+    assert (rv, items) == (0, [])                       # nothing matched
+    assert dlg.by_id[0x193].text == "C:\\"
+    # static_id 0 means "no current-path static" — must not raise.
+    rv, _items = _list(api, cpu, dlg, "*.ANT", 0, static_id=0)
+    assert rv == 1
+
+
+def test_dlgdirlist_entries_round_trip_through_dlgdirselect(tmp_path):
+    # The producer and the consumer must agree on the bracket encoding, or the
+    # dialog pastes a malformed path.  This is the pair, end to end.
+    api, cpu, _sysobj, dlg = _dir_rig(tmp_path)
+    _rv, items = _list(api, cpu, dlg, "*.ANT", DDL_DRIVES | DDL_DIRECTORY)
+    buf = (0x6000 << 16) | 0x10
+    expected = {"[SOUND]": ("SOUND\\", 1), "[-c-]": ("c:", 1),
+                "SAVE.ANT": ("SAVE.ANT", 0)}
+    for entry, (fragment, is_dir) in expected.items():
+        dlg.by_id[0x194].sel = items.index(entry)
+        assert _call(api, cpu, "USER", 99, (dlg.handle, buf, 0x194)) == is_dir
+        got = cpu.mem.block(0x6000, 0x10, 16).split(b"\x00")[0]
+        assert got == fragment.encode("latin-1")
+
+
+def test_dlgdirlist_leaves_the_box_unselected(tmp_path):
+    # LB_GETCURSEL must answer LB_ERR until a user clicks: SimAnt's SAVEASDLG
+    # reads it on OK to ask "did they pick a directory?"
+    api, cpu, _sysobj, dlg = _dir_rig(tmp_path)
+    _list(api, cpu, dlg, "*.ANT", 0)
+    assert dlg.by_id[0x194].sel == -1
+    assert _call(api, cpu, "USER", 101,
+                 (dlg.handle, 0x194, LB_GETCURSEL, 0, 0)) == 0xFFFFFFFF
+
+
+def test_dlgdirlist_fails_loud_on_a_path_it_cannot_serve(tmp_path):
+    # The file model is flat (system._canonical keeps only the last component),
+    # so descending is impossible.  An empty list would say "that folder is
+    # empty" — indistinguishable from the truth, and the worst answer.
+    api, cpu, _sysobj, dlg = _dir_rig(tmp_path)
+    for spec in ("SOUND\\*.ANT", "C:\\ANT\\*.ANT", "D:*.ANT"):
+        with pytest.raises(Win16ApiGap):
+            _list(api, cpu, dlg, spec, 0)
+    # ...but the root, however it is spelled, IS servable.
+    for spec in ("*.ANT", "C:*.ANT", "C:\\*.ANT", "\\*.ANT"):
+        rv, items = _list(api, cpu, dlg, spec, 0)
+        assert (rv, items) == (1, ["OTHER.ANT", "SAVE.ANT"]), spec
+
+
+def test_split_spec_separates_the_directory_from_the_file_part():
+    assert _split_spec("*.SAV") == ("", "*.SAV")
+    assert _split_spec("C:\\ANT\\*.SAV") == ("C:\\ANT", "*.SAV")
+    assert _split_spec("SUB\\*.SAV") == ("SUB", "*.SAV")
+    assert _split_spec("C:*.SAV") == ("C:", "*.SAV")
+    assert _split_spec("\\*.SAV") == ("", "*.SAV")
+    assert _split_spec("SAVE.ANT") == ("", "SAVE.ANT")
 
 
 def test_dlgdirselect_falls_back_to_the_control_text_with_no_selection():

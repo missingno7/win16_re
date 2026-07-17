@@ -659,6 +659,43 @@ def _dos_get_drive(ctx: CallContext) -> None:
     ctx.cpu.s.ax = (ctx.cpu.s.ax & 0xFF00) | 2
 
 
+# The disk geometry AH=36h reports.  DETERMINISTIC, like AH=2Ah/2Ch's date and
+# time above and for the same reason: a demo replay must not depend on how full
+# the operator's real disk happens to be.  512-byte sectors in 4K clusters over
+# a 256MB volume — an ordinary 1994 hard disk, and roomy enough that a program
+# asking "is there space?" always hears yes.  Both counts must stay inside a
+# WORD (that is the DOS interface), so 0xFFFF clusters is the ceiling.
+DISK_BYTES_PER_SECTOR = 512
+DISK_SECTORS_PER_CLUSTER = 8
+DISK_TOTAL_CLUSTERS = 0xFFFF
+DISK_FREE_CLUSTERS = 0xFFFF
+
+
+def _dos_get_free_space(ctx: CallContext) -> None:
+    # AH=36h, DL = drive (0 = current, 1 = A:, 3 = C:).  Returns AX = sectors
+    # per cluster (0FFFFh = invalid drive), BX = free clusters, CX = bytes per
+    # sector, DX = total clusters.  Free BYTES is the product of three of those,
+    # which is the number every caller actually wants.
+    #
+    # Observed contract (SimAnt's _SaveGame via the MSC runtime's
+    # __dos_getdiskfree, which reads the four registers straight into a
+    # diskfree_t): the game multiplies free clusters x sectors x bytes and
+    # refuses to save unless the result exceeds its save size by 25%.  So the
+    # answer must be a real, generous geometry — AX = 0FFFFh here would mean
+    # "invalid drive" and fail the save.
+    sysobj: Win16System = ctx.registry.services["system"]
+    s = ctx.cpu.s
+    drive = s.dx & 0xFF                         # 0 = current, else 1-based
+    # We present exactly one volume (C:), matching AH=19h's answer above.
+    if drive not in (0, 3):
+        s.ax = 0xFFFF                           # invalid drive
+        return
+    s.ax = DISK_SECTORS_PER_CLUSTER
+    s.bx = DISK_FREE_CLUSTERS
+    s.cx = DISK_BYTES_PER_SECTOR
+    s.dx = DISK_TOTAL_CLUSTERS
+
+
 def _dos_get_set_attr(ctx: CallContext) -> None:
     # AH=43h: AL=0 get / AL=1 set file attributes.  DS:DX = ASCIIZ name.
     # Get: CF clear + CX=attributes if it exists, else CF set + AX=2 (not
@@ -824,6 +861,7 @@ DOS_SERVICES = {
     0x2C: _dos_get_time,
     0x30: _dos_get_version,
     0x35: _dos_get_vector,
+    0x36: _dos_get_free_space,
     0x3E: _dos_close,
     0x3F: _dos_read,
     0x40: _dos_write,

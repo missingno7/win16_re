@@ -70,7 +70,32 @@ LB_SELECTSTRING = WM_USER + 13
 LB_GETTOPINDEX = WM_USER + 15
 LB_FINDSTRING = WM_USER + 16
 LB_SETTOPINDEX = WM_USER + 18
-LB_ERR = 0xFFFF
+LB_ERR = 0xFFFF         # the WORD sentinel, as it ARRIVES in a 16-bit wParam
+# ...and as it LEAVES.  SendMessage/SendDlgItemMessage return a LONG, and
+# LB_ERR/CB_ERR are -1 — so the error must go back SIGN-EXTENDED (DX:AX =
+# FFFF:FFFF).  Returning the bare 0xFFFF sets DX=0, which the guest reads as
+# 65535, not -1.  Callers compare the full long: SimAnt's SAVEASDLG and
+# _ChangeDirectory both do `cmp ax,FFFF / jnz else / cmp dx,ax / jnz else`
+# after LB_GETCURSEL, so a DX of 0 told them a directory WAS selected and the
+# Save As dialog re-listed forever instead of saving.
+LB_ERR_LONG = 0xFFFFFFFF
+
+# DlgDirList / DlgDirListComboBox filetype (DDL_*).  The low bits name FILE
+# ATTRIBUTE classes; DDL_EXCLUSIVE flips the sense of the whole set from
+# "ordinary files PLUS these" to "ONLY these".
+DDL_READWRITE = 0x0000
+DDL_READONLY = 0x0001
+DDL_HIDDEN = 0x0002
+DDL_SYSTEM = 0x0004
+DDL_DIRECTORY = 0x0010
+DDL_ARCHIVE = 0x0020
+DDL_POSTMSGS = 0x2000
+DDL_DRIVES = 0x4000
+DDL_EXCLUSIVE = 0x8000
+
+# The one volume this layer presents, matching INT 21h AH=19h's answer and the
+# "current path" static below.
+DRIVE_LETTER = "C"
 
 
 @dataclass
@@ -148,28 +173,95 @@ def _host(ctx: CallContext):
     return ctx.registry.services.get("dialog_ui")
 
 
+def _split_spec(spec: str) -> tuple[str, str]:
+    """A DlgDirList lpPathSpec -> (directory part, file part).
+
+    "*.SAV" -> ("", "*.SAV");  "C:\\ANT\\*.SAV" -> ("C:\\ANT", "*.SAV");
+    "SUB\\*.SAV" -> ("SUB", "*.SAV");  "C:*.SAV" -> ("C:", "*.SAV").
+    """
+    spec = spec.replace("/", "\\")
+    head, sep, tail = spec.rpartition("\\")
+    if sep:
+        return head, tail
+    if len(spec) > 1 and spec[1] == ":":        # a bare drive prefix, no path
+        return spec[:2], spec[2:]
+    return "", spec
+
+
 def _fill_dir_control(ctx: CallContext, hdlg: int, spec_ptr: int,
-                      list_id: int, static_id: int) -> int:
-    """Shared body of DlgDirList / DlgDirListComboBox: fill a list-box / combo
-    control with the game-directory file names matching the spec, update the
-    optional static "current path", and return non-zero when any matched."""
+                      list_id: int, static_id: int, filetype: int) -> int:
+    """Shared body of DlgDirList / DlgDirListComboBox.
+
+    Fills a list box / combo with a directory listing and returns non-zero when
+    anything matched.  `filetype` is the DDL_* set, and it decides WHAT is
+    listed — files, directories, drives, or only some of those:
+
+      * plain files matching the spec, UNLESS DDL_EXCLUSIVE says the caller
+        wants only the attribute classes it named;
+      * DDL_DIRECTORY adds each subdirectory as "[NAME]";
+      * DDL_DRIVES adds each drive as "[-x-]".
+
+    Ignoring `filetype` is not a shortcut, it inverts the answer: a caller
+    asking DDL_EXCLUSIVE|DDL_DIRECTORY|DDL_DRIVES for "the folders here" would
+    get every FILE instead — and its empty spec (no files wanted) would fall
+    through a "*.*" default and match all of them.
+
+    Ordering: the whole listing is sorted together.  Real USER hands the
+    entries to the control and a LBS_SORT/CBS_SORT box sorts them itself; our
+    control model has no sorting of its own, so this sorts unconditionally.
+    For a sorted box the two are identical, and both list boxes reaching this
+    today are LBS_SORT — an UNsorted box would differ, and nothing has proven
+    that case, so this is where it would be fixed.  (Note "[" is 0x5B, above
+    "Z" — bracketed entries therefore collate last naturally; an app that wants
+    them first reorders the box itself.)
+    """
     import fnmatch
     dlg = _dialog(ctx, hdlg)
     sysobj = _sys(ctx)
-    spec = ctx.read_string(spec_ptr).decode("latin-1") or "*.*"
-    pattern = sysobj._canonical(spec)
+    spec = ctx.read_string(spec_ptr).decode("latin-1")
     root = sysobj.file_root or sysobj.machine.exe.path.parent
-    names = sorted(p.name.upper() for p in root.iterdir()
-                   if p.is_file() and fnmatch.fnmatch(p.name.upper(), pattern))
+
+    # The file model is FLAT — win16.api.system._canonical reduces every path to
+    # its last component, so there is exactly one directory and it is the root.
+    # A spec that asks to descend cannot be served, and answering with an empty
+    # listing would say "that folder is empty", which is a lie a user cannot
+    # tell from the truth.  Fail loud instead.  (The drive we present is the one
+    # AH=19h/the "current path" static already claim: C:.)
+    where, pattern = _split_spec(spec)
+    if where.upper().rstrip("\\") not in ("", DRIVE_LETTER + ":"):
+        raise Win16ApiGap(
+            f"DlgDirList: path spec {spec!r} names a directory, but the file "
+            f"model is flat (one directory, {root}) — it cannot be listed")
+
+    entries: list[str] = []
+    if not filetype & DDL_EXCLUSIVE:
+        match = (pattern or "*.*").upper()
+        entries += [p.name.upper() for p in root.iterdir()
+                    if p.is_file() and fnmatch.fnmatch(p.name.upper(), match)]
+    if filetype & DDL_DIRECTORY:
+        # No "[..]": the flat model's one directory IS the root, so there is
+        # nowhere to go up to.
+        entries += [f"[{p.name.upper()}]" for p in root.iterdir() if p.is_dir()]
+    if filetype & DDL_DRIVES:
+        entries += [f"[-{DRIVE_LETTER.lower()}-]"]
+
+    names = sorted(entries)
     ctrl = dlg.control(list_id)
     ctrl.items = names
-    ctrl.sel = 0 if names else -1
+    # NO selection: DlgDirList fills the box and stops — it never sends
+    # LB_SETCURSEL, so LB_GETCURSEL answers LB_ERR until a user clicks.  That is
+    # load-bearing, not a detail: SimAnt's SAVEASDLG reads LB_GETCURSEL on OK to
+    # ask "did the user pick a directory out of the list?", and a pre-selected
+    # item 0 answers YES forever — the dialog re-lists instead of saving and can
+    # never be dismissed.  Selecting the first row looks helpful and silently
+    # makes Save As impossible.
+    ctrl.sel = -1
     host = _host(ctx)
     if host is not None:
         host.update(dlg, ctrl)
     if static_id:                       # static shows the "current path"
         static = dlg.control(static_id)
-        static.text = "C:\\"
+        static.text = DRIVE_LETTER + ":\\"
         if host is not None:
             host.update(dlg, static)
     return 1 if names else 0
@@ -404,7 +496,8 @@ def install(api: ApiRegistry) -> None:
                     ctrl.limit = wparam
                 return 0
             if msg == CB_GETLBTEXTLEN:
-                return len(ctrl.items[wparam]) if 0 <= wparam < len(ctrl.items) else 0xFFFF
+                return (len(ctrl.items[wparam]) if 0 <= wparam < len(ctrl.items)
+                        else LB_ERR_LONG)
             if msg == CB_RESETCONTENT:
                 ctrl.items.clear()
                 ctrl.sel = -1
@@ -423,18 +516,18 @@ def install(api: ApiRegistry) -> None:
             if msg == CB_GETCOUNT:
                 return len(ctrl.items)
             if msg == CB_GETCURSEL:
-                return ctrl.sel if ctrl.sel >= 0 else 0xFFFF
+                return ctrl.sel if ctrl.sel >= 0 else LB_ERR_LONG
             if msg == CB_SETCURSEL:
                 ctrl.sel = wparam if wparam != 0xFFFF else -1
                 refresh()
-                return ctrl.sel & 0xFFFF
+                return ctrl.sel if ctrl.sel >= 0 else LB_ERR_LONG
             if msg == CB_GETLBTEXT:
                 if 0 <= wparam < len(ctrl.items):
                     text = ctrl.items[wparam].encode("latin-1")
                     ctx.mem.load((lparam >> 16) & 0xFFFF, lparam & 0xFFFF,
                                  text + b"\x00")
                     return len(text)
-                return 0xFFFF
+                return LB_ERR_LONG
             if msg in (CB_FINDSTRING, CB_SELECTSTRING):
                 prefix = ctx.read_string(lparam).decode("latin-1").upper()
                 for i, item in enumerate(ctrl.items):
@@ -443,7 +536,7 @@ def install(api: ApiRegistry) -> None:
                             ctrl.sel = i
                             refresh()
                         return i
-                return 0xFFFF
+                return LB_ERR_LONG
         elif ctrl.cls == "ListBox":
             # The list-box twin of the ComboBox item-list messages (same backing
             # store: ctrl.items + ctrl.sel).  SimAnt's SaveAs dialog fills the box
@@ -471,11 +564,11 @@ def install(api: ApiRegistry) -> None:
             if msg == LB_GETCOUNT:
                 return len(ctrl.items)
             if msg == LB_GETCURSEL:
-                return ctrl.sel if ctrl.sel >= 0 else LB_ERR
+                return ctrl.sel if ctrl.sel >= 0 else LB_ERR_LONG
             if msg == LB_SETCURSEL:
                 ctrl.sel = wparam if wparam != LB_ERR else -1
                 refresh()
-                return ctrl.sel if ctrl.sel >= 0 else LB_ERR
+                return ctrl.sel if ctrl.sel >= 0 else LB_ERR_LONG
             if msg == LB_GETSEL:                # single-select: 1 iff wparam is it
                 return 1 if wparam == ctrl.sel else 0
             if msg == LB_GETTEXT:
@@ -484,9 +577,9 @@ def install(api: ApiRegistry) -> None:
                     ctx.mem.load((lparam >> 16) & 0xFFFF, lparam & 0xFFFF,
                                  text + b"\x00")
                     return len(text)
-                return LB_ERR
+                return LB_ERR_LONG
             if msg == LB_GETTEXTLEN:
-                return len(ctrl.items[wparam]) if 0 <= wparam < len(ctrl.items) else LB_ERR
+                return len(ctrl.items[wparam]) if 0 <= wparam < len(ctrl.items) else LB_ERR_LONG
             if msg in (LB_FINDSTRING, LB_SELECTSTRING):
                 prefix = ctx.read_string(lparam).decode("latin-1").upper()
                 for i, item in enumerate(ctrl.items):
@@ -495,7 +588,7 @@ def install(api: ApiRegistry) -> None:
                             ctrl.sel = i
                             refresh()
                         return i
-                return LB_ERR
+                return LB_ERR_LONG
             if msg in (LB_GETTOPINDEX, LB_SETTOPINDEX):
                 return 0            # scroll position is host-managed
         elif ctrl.cls == "Edit":
@@ -513,11 +606,12 @@ def install(api: ApiRegistry) -> None:
     @api.register("USER", 100, args="word ptr word word word")
     def DlgDirList(ctx: CallContext) -> int:
         # (hdlg, path_spec, listbox_id, static_id, filetype) — fill the list box
-        # with files matching the spec from the game's directory (SimAnt's SaveAs
-        # dialog).  Directory/drive entries (the DDL_* filetype bits) are not
-        # modelled — the game directory is flat, same as DlgDirListComboBox.
+        # with a directory listing.  `filetype` decides what a listing IS; see
+        # _fill_dir_control.  SimAnt's _UpdateListBox asks twice, with
+        # DDL_EXCLUSIVE|DDL_DRIVES|DDL_DIRECTORY (the folders and drives) and
+        # with DDL_DRIVES|DDL_DIRECTORY (those PLUS the files matching its spec).
         return _fill_dir_control(ctx, ctx.args[0], ctx.args[1],
-                                 ctx.args[2], ctx.args[3])
+                                 ctx.args[2], ctx.args[3], ctx.args[4])
 
     @api.register("USER", 195, args="word ptr word word word")
     def DlgDirListComboBox(ctx: CallContext) -> int:
@@ -525,7 +619,7 @@ def install(api: ApiRegistry) -> None:
         # of DlgDirList.  Real USER rewrites the spec buffer to the filename part;
         # the spec already is one here.
         return _fill_dir_control(ctx, ctx.args[0], ctx.args[1],
-                                 ctx.args[2], ctx.args[3])
+                                 ctx.args[2], ctx.args[3], ctx.args[4])
 
     @api.register("USER", 99, args="word ptr word")
     def DlgDirSelect(ctx: CallContext) -> int:          # (hdlg, buf, listbox_id)
