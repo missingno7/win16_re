@@ -21,6 +21,7 @@ in the crash reporter is the one failure mode a fail-loud tool must not have).
 from __future__ import annotations
 
 import codecs
+import os
 import sys
 
 #: Typographic characters -> their ASCII ancestors.  Only what our own reports
@@ -48,14 +49,60 @@ def _handler(err: UnicodeError):
 codecs.register_error(ERROR_NAME, _handler)
 
 
+def console_encoding(stream, *, output_cp=None) -> str | None:
+    """The encoding a Windows CONSOLE will actually render `stream` as, or None.
+
+    The trap this closes: a stream's own `.encoding` is NOT what the console
+    draws.  PyPy reports `utf-8` for a console stdout while the console renders
+    codepage 852 — so encoding an em dash SUCCEEDS, the fallback below never
+    fires, and three UTF-8 bytes are drawn as three cp852 characters.  The
+    console's codepage is the only authority, and only the OS can be asked.
+
+    None means "the stream's own encoding is authoritative": not Windows, not a
+    console (redirected to a pipe/file, where UTF-8 is right and mojibake is the
+    consumer's problem), or the codepage cannot be read.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        if not stream.isatty():
+            return None
+    except Exception:  # noqa: BLE001 — a stream without isatty is not a console
+        return None
+    if output_cp is None:
+        try:
+            import ctypes
+            output_cp = ctypes.windll.kernel32.GetConsoleOutputCP()
+        except Exception:  # noqa: BLE001 — no kernel32/console: leave the stream alone
+            return None
+    if not output_cp:
+        return None
+    return "utf-8" if output_cp == 65001 else f"cp{output_cp}"
+
+
+def _same_codec(a: str | None, b: str | None) -> bool:
+    try:
+        return codecs.lookup(a).name == codecs.lookup(b).name
+    except (LookupError, TypeError):
+        return False
+
+
 def make_console_safe() -> None:
-    """Install the fallback on stdout/stderr, keeping their native encoding.
+    """Point stdout/stderr at the console's OWN codepage, with the fallback.
+
+    Reconfiguring the ENCODING is the load-bearing half: the fallback can only
+    fire on characters the target encoding cannot represent, so a stream left
+    on UTF-8 in front of a codepage console degrades nothing and emits mojibake.
 
     Idempotent and never fatal: a stream that cannot be reconfigured (already
     wrapped, replaced by a test harness, not a TextIO) is left as it is.
     """
     for stream in (sys.stdout, sys.stderr):
+        target = console_encoding(stream)
         try:
-            stream.reconfigure(errors=ERROR_NAME)
+            if target and not _same_codec(target, getattr(stream, "encoding", None)):
+                stream.reconfigure(encoding=target, errors=ERROR_NAME)
+            else:
+                stream.reconfigure(errors=ERROR_NAME)
         except (AttributeError, ValueError, OSError):
             pass
