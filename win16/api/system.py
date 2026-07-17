@@ -18,6 +18,16 @@ SW_SHOWNORMAL = 1
 INSTR_PER_MS = 1000
 
 
+def _tick_reached(now: int, due: int) -> bool:
+    """Has the 32-bit GetTickCount clock `now` reached `due`?
+
+    Both are mod-2**32, so a plain `>=` breaks across the ~49.7-day wrap (and
+    across any due time a driver computed as now+duration near the top of the
+    range).  Compare the SIGNED difference instead — the standard 32-bit
+    timer-comparison rule, correct for any pair less than 2**31 ms apart."""
+    return ((now - due) & 0xFFFFFFFF) < 0x8000_0000
+
+
 @dataclass
 class VFile:
     """An open file: reads come from disk (or the write overlay); writes stay
@@ -71,6 +81,11 @@ class Win16System:
     #   calls the proc instead of the wndproc (SimAnt's ~59fps sim tick — its
     #   wndproc does NOT handle WM_TIMER and hangs if sent it).
     clock_ms: int = 0                   # virtual message-time clock
+    scheduled_messages: list = field(default_factory=list)
+    #   Deferred posts: (due_ms, hwnd, msg, wparam, lparam), released into
+    #   msg_queue once the GetTickCount clock reaches due_ms — the
+    #   virtual-clock completion model for time-based device notifications
+    #   (see schedule_message).
     quit_posted: int | None = None      # PostQuitMessage exit code
     file_root: Path | None = None       # where game data files live
     files: dict[int, VFile] = field(default_factory=dict)      # handle -> VFile
@@ -141,6 +156,27 @@ class Win16System:
 
     huge_heap: object = None
 
+    def __setstate__(self, state: dict) -> None:
+        """Restore a pickled system (win16/vmsnap.py, the boot image), filling
+        in fields this class gained since the pickle was written.
+
+        A snapshot is a state format with a long life: saved machines, crash
+        dumps and generated boot images outlive any one version of this class.
+        Unpickling restores __dict__ verbatim, so a field added later would be
+        simply ABSENT and every existing snapshot would die on first use.  A
+        field's default is the right value for a state saved before the field
+        existed — nothing was pending because the concept did not exist — so
+        this fills defaults only, and never overrides a saved value."""
+        import dataclasses
+        self.__dict__.update(state)
+        for f in dataclasses.fields(self):
+            if f.name in state:
+                continue
+            if f.default_factory is not dataclasses.MISSING:     # type: ignore[misc]
+                setattr(self, f.name, f.default_factory())       # type: ignore[misc]
+            elif f.default is not dataclasses.MISSING:
+                setattr(self, f.name, f.default)
+
     def __post_init__(self) -> None:
         from collections import deque
         from .objects import HandleTable
@@ -185,6 +221,56 @@ class Win16System:
     def post_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> None:
         self.msg_queue.append((hwnd, msg, wparam, lparam, self.clock_ms, 0))
 
+    def schedule_message(self, due_ms: int, hwnd: int, msg: int,
+                         wparam: int, lparam: int) -> None:
+        """Post a message that becomes retrievable once the VIRTUAL clock
+        reaches `due_ms` — a deferred PostMessage on the GetTickCount timebase
+        (`tick_count()`: the wall clock interactively, the message-clock /
+        instruction floor headless).
+
+        This is how a device whose completion is a matter of ELAPSED TIME
+        notifies the program without a host callback: the driver that owns the
+        real work (audio output, say) computes when the work finishes in guest
+        time and schedules the notification, so the message lands at the same
+        virtual instant on live play, on replay, and headless with no device
+        present at all.  A host callback would make the arrival depend on host
+        scheduling and destroy replay determinism.
+
+        Same lazy model as an armed timer (`_due_timer`): nothing is delivered
+        until the program asks for a message, and the due test happens at the
+        ask against the clock the program itself reads."""
+        self.scheduled_messages.append(
+            (due_ms & 0xFFFFFFFF, hwnd, msg, wparam, lparam))
+
+    def _release_due_messages(self) -> None:
+        """Move every scheduled message whose due time has arrived into the
+        real queue, in (due, schedule-order) order — a stable, clock-only rule,
+        so the queue order is reproducible.  Called at every retrieval point."""
+        if not self.scheduled_messages:
+            return
+        now = self.tick_count()
+        due = [s for s in self.scheduled_messages if _tick_reached(now, s[0])]
+        if not due:
+            return
+        self.scheduled_messages = [s for s in self.scheduled_messages
+                                   if not _tick_reached(now, s[0])]
+        due.sort(key=lambda s: s[0])
+        for _due_ms, hwnd, msg, wparam, lparam in due:
+            self.post_message(hwnd, msg, wparam, lparam)
+
+    def cancel_scheduled_messages(self, hwnd: int, msg: int,
+                                  wparam: int | None = None) -> int:
+        """Drop every not-yet-due scheduled `msg` for `hwnd` (work a device
+        abandoned before it finished).  `wparam` narrows the cancel to one
+        sender — several devices can notify through the SAME window, so a
+        reset of one must not silence another.  Returns how many were dropped."""
+        keep = [s for s in self.scheduled_messages
+                if not (s[1] == hwnd and s[2] == msg
+                        and (wparam is None or s[3] == wparam))]
+        dropped = len(self.scheduled_messages) - len(keep)
+        self.scheduled_messages = keep
+        return dropped
+
     def peek_message(self, hwnd_filter: int, lo: int, hi: int, remove: bool):
         """Non-blocking queue scan for PeekMessage: the first posted message
         matching the hwnd filter (0 = any) and message range [lo, hi] (0,0 =
@@ -201,6 +287,7 @@ class Win16System:
             self.demo_driver.pump_peek()    # inject due arrivals into the queue
         if self.input_drainer is not None:
             self.input_drainer()            # make host input visible to the scan
+        self._release_due_messages()        # virtual-clock device completions
         for i, m in enumerate(self.msg_queue):
             if hwnd_filter and m[0] != hwnd_filter:
                 continue
@@ -446,6 +533,7 @@ class Win16System:
         """
         if self.quit_posted is not None:
             return None
+        self._release_due_messages()        # virtual-clock device completions
         if self.msg_queue:
             return self.msg_queue.popleft()
         for win in self.windows:
@@ -473,6 +561,17 @@ class Win16System:
             hwnd, timer_id = key
             proc = self.timer_procs.get(key, 0)                      # 0 = to wndproc
             return (hwnd, 0x0113, timer_id, proc, self.clock_ms, 0)  # WM_TIMER
+        if self.scheduled_messages:
+            # Idle with a device completion still pending: GetMessage BLOCKS
+            # until it arrives, so run the virtual clock forward to it (exactly
+            # what the timer branch above does for an armed timer) and deliver.
+            # Without this an otherwise-idle pump would raise "no messages"
+            # while a scheduled arrival sat in the future.
+            self.clock_ms = max(self.clock_ms,
+                                min(s[0] for s in self.scheduled_messages))
+            self._release_due_messages()
+            if self.msg_queue:
+                return self.msg_queue.popleft()
         raise RuntimeError(
             "GetMessage with an empty queue, no dirty window and no armed timer "
             "— an input driver must post messages")

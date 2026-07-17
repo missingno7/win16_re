@@ -26,9 +26,11 @@ def _sys(*, interactive=True, windows=(), queue=()):
         tick_recorder=None, interactive=interactive, clock_ms=1234,
         msg_queue=list(queue), windows=list(windows),
         timers={}, timer_due={}, timer_procs={},
+        scheduled_messages=[],
         _note_input=lambda m: None,
     )
     ns._due_timer = Win16System._due_timer.__get__(ns)     # the real one
+    ns._release_due_messages = Win16System._release_due_messages.__get__(ns)
     return ns
 
 
