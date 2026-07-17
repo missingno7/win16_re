@@ -12,6 +12,56 @@ from __future__ import annotations
 
 import io
 import os
+import struct
+
+
+def riff_with_consistent_size(data: bytes) -> bytes:
+    """A RIFF image whose parent size field covers its chunks.
+
+    Strict readers (Python's `wave`, SDL_mixer, ...) clamp every subchunk to
+    the parent RIFF size, so an image that under-declares it loses the tail of
+    its data — SimAnt's SFX builder writes `RIFF size = data chunk + header`,
+    omitting the "WAVE" tag and the "fmt " chunk, and a strict reader then
+    drops the last 28 bytes of every sound.  Windows' own MMIO reader finds
+    the chunks by walking and plays the whole thing, so correcting the field
+    is what reproduces the original playback, not a liberty taken with the
+    data: the SAMPLES are untouched.
+
+    Returns the image unchanged when the field is already consistent (or when
+    this is not a RIFF)."""
+    if len(data) < 12 or data[:4] != b"RIFF":
+        return data
+    declared = int.from_bytes(data[4:8], "little")
+    actual = len(data) - 8
+    if declared == actual:
+        return data
+    return data[:4] + struct.pack("<I", actual) + data[8:]
+
+
+def wrap_pcm_as_wav(pcm: bytes, *, rate: int, bits: int, channels: int) -> bytes:
+    """Wrap raw PCM samples in a RIFF/WAVE container.
+
+    The bridge from a wave-device buffer (raw samples + the format the program
+    declared) to anything that decodes files.  WAV's own conventions decide how
+    the samples are read: 8-bit is UNSIGNED (0x80 = silence), 9-bit and wider
+    are signed little-endian — which is exactly the convention a Windows wave
+    device applies to the same bytes, so no sample conversion happens here."""
+    if channels < 1:
+        raise ValueError(f"a wave format needs at least one channel, got {channels}")
+    if bits not in (8, 16):
+        raise ValueError(f"{bits}-bit PCM is not a WAV sample width (8 or 16)")
+    if rate < 1:
+        raise ValueError(f"invalid sample rate {rate}")
+    block_align = channels * bits // 8
+    byte_rate = rate * block_align
+    fmt_chunk = struct.pack("<HHIIHH", 1, channels, rate, byte_rate,
+                            block_align, bits)
+    body = (b"WAVE"
+            + b"fmt " + struct.pack("<I", len(fmt_chunk)) + fmt_chunk
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+    if len(pcm) & 1:                    # RIFF chunks are word-aligned
+        body += b"\x00"
+    return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
 class SquareWaveBackend:
@@ -92,7 +142,8 @@ class SquareWaveBackend:
             cache = self._wav_cache = {}
         snd = cache.get(key)
         if snd is None:
-            snd = self._pg.mixer.Sound(file=io.BytesIO(data))
+            snd = self._pg.mixer.Sound(
+                file=io.BytesIO(riff_with_consistent_size(data)))
             cache[key] = snd
         return snd
 
@@ -124,6 +175,36 @@ class SquareWaveBackend:
             live.append(snd)
             del live[:-8]
             snd.play()
+
+    def play_pcm(self, pcm: bytes, *, rate: int, bits: int,
+                 channels: int) -> None:
+        """Play one raw PCM buffer (the MMSYSTEM waveOutWrite path).
+
+        Pure SINK: the wave device's model — when the buffer finishes, what
+        waveOutGetPosition reports — lives on the virtual clock in
+        win16/api/mmsystem.py and never consults this.  Dropping every call
+        here changes nothing a program can observe.
+
+        The buffer arrives in the format the program DECLARED to waveOutOpen
+        (SimAnt: 4096 Hz mono 8-bit — a rate no host mixer opens natively), so
+        it is wrapped in a RIFF/WAVE image and handed to the existing decode
+        path, which resamples to the output device."""
+        if not self.ok or not pcm:
+            return
+        try:
+            wav = wrap_pcm_as_wav(pcm, rate=rate, bits=bits, channels=channels)
+        except ValueError as exc:
+            print(f"[audio] PCM buffer not playable: {exc}", flush=True)
+            return
+        self.play_wav(wav)
+
+    def stop_pcm(self) -> None:
+        """waveOutReset — cut off the wave buffers still sounding."""
+        live = getattr(self, "_sfx_live", None)
+        if self.ok and live:
+            for snd in live:
+                snd.stop()
+            live.clear()
 
     def stop_wav(self) -> None:
         """sndPlaySound(NULL) — stop the background music (SFX are one-shots
