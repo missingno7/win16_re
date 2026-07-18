@@ -31,8 +31,8 @@ resumable this way and fail loudly by name.
 from __future__ import annotations
 
 from win16.interactive import BoundaryParked
+from win16.machine import CALLBACK_RET_IP    # shared with the CPU-free host
 
-CALLBACK_RET_IP = 0xFFFE        # sentinel offset inside the thunk segment
 _CHUNK = 8192                   # steps between yield_check / max-step checks
 #   Small so the interactive driver's yield_check refreshes the wall clock often
 #   enough to pace a frame-timed callback (SimAnt's sim tick) to real time.
@@ -101,7 +101,18 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
     `max_steps` caps a runaway callback; pass None for no cap — correct for an
     INTERACTIVE, user-pausable callback (SimAnt's sim-tick TimerProc legitimately
     busy-waits on the real clock and on input, so a fixed cap kills a live wait).
+
+    A CPU-FREE host installs `cpu.win16_callback_dispatch` (see
+    `win16.cpuless.install_callback_dispatch`) and the call routes into the
+    recovered corpus instead of an interpreter — same args, same (AX, DX).  A
+    carrier with neither an interpreter nor a dispatcher falls through to
+    `cpu.run` below and raises there, which is the honest outcome: this host
+    cannot service the callback at all.
     """
+    dispatch = getattr(cpu, "win16_callback_dispatch", None)
+    if dispatch is not None:
+        return dispatch(seg, off, list(args))
+
     from dos_re.cpu import HaltExecution
 
     s = cpu.s

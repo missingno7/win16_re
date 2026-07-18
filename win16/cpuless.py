@@ -25,14 +25,21 @@ host has no ``cpu``.  This module closes that, generically:
   :meth:`ApiRegistry.invoke_values`.  ``intr`` applies the register bundle to
   the carrier and runs the machine's own INT surface.
 
-WHAT IS NOT HERE, deliberately.  A Win16 API that CALLS BACK into guest code —
-a window proc, a dialog proc, an enum proc, a timer proc, all of which the VM
-path services with ``win16.callback.call_far`` — cannot be serviced by a host
-that owns no execution engine.  Under the CPUless wall those callbacks must
-dispatch into the *recovered corpus* instead.  That seam is a real, named
-frontier item: reaching one raises :class:`CpuFreeExecutionAttempt` with the
-API and the callback target, so it shows up as a work item rather than as a
-silent wrong answer.
+* :meth:`Win16CpulessPlatform.callback` + :func:`install_callback_dispatch` —
+  the OTHER direction.  A Win16 API that calls back into guest code (a window
+  proc, a dialog proc, a timer proc) goes through ``win16.callback.call_far``,
+  which under the VM pushes a frame and runs the interpreter to a sentinel.  A
+  CPUless host has nothing to run, so it dispatches into the *recovered corpus*
+  instead: same pascal frame in memory (the body's ``[bp+6]`` is the original
+  compiler's and cannot be renegotiated), same ``(AX, DX)`` back.  Which CS:IP
+  maps to which recovered body is game knowledge, so it arrives as an injected
+  resolver rather than living here.
+
+  This is what lets anything ABOVE the message pump run without a CPU.  It is
+  OPT-IN: with no resolver installed, those APIs still raise
+  :class:`CpuFreeExecutionAttempt` naming the target, because a host that
+  quietly skipped a WndProc would be fabricating the game's behaviour instead
+  of reproducing it.
 """
 from __future__ import annotations
 
@@ -45,7 +52,8 @@ from dos_re.lift.standalone import FailLoudPlatform
 from dos_re.x86 import CPUState
 
 from .api.core import Win16ApiGap, api_name
-from .machine import BOOT_MANIFEST_SCHEMA, THUNK_SEG, Win16Machine
+from .machine import (BOOT_MANIFEST_SCHEMA, CALLBACK_RET_IP, THUNK_SEG,
+                      Win16Machine)
 
 
 class CpuFreeExecutionAttempt(RuntimeError):
@@ -175,6 +183,13 @@ class Win16CpulessPlatform(FailLoudPlatform):
         #: every farcall serviced this run, in order: (label, args) — the
         #: runner's evidence that the CPU-free API path really ran.
         self.farcalls: list[str] = []
+        #: (seg, off) -> recovered callable, or None if the corpus has no body
+        #: for that address.  Game-supplied: which CS:IP maps to which recovered
+        #: function is exactly the knowledge this layer must not hold.
+        self.callback_resolver = None
+        #: every guest callback dispatched this run, in order — the evidence
+        #: that host->guest re-entry really ran with no interpreter.
+        self.callbacks: list[str] = []
 
     # -- helpers ----------------------------------------------------------
 
@@ -283,6 +298,91 @@ class Win16CpulessPlatform(FailLoudPlatform):
         self.machine.interrupt(self.carrier, num & 0xFF)
         return self._bundle(regs)
 
+    # -- the callback seam: host -> guest, with no interpreter -------------
+
+    def callback(self, seg: int, off: int, args: list[int]) -> tuple[int, int]:
+        """Call GUEST code at ``seg:off`` with 16-bit pascal args — the CPU-free
+        twin of :func:`win16.callback.call_far`.
+
+        This is the mirror of :meth:`farcall`.  ``farcall`` is guest->host: the
+        body built a pascal frame and the host reads it.  This is host->guest:
+        the host builds the frame and the recovered body reads it.  Both keep
+        the SAME memory layout, because the recovered body's ``[bp+6]`` operand
+        is the original compiler's and cannot be renegotiated:
+
+            ss:sp ->  far return address (4 bytes)   <- sp on entry
+                      arg[n-1] .. arg[0]             <- pushed in pascal order
+
+        The body owns its own stack arithmetic: its epilogue's ``retf N`` pops
+        the return address *and* the arguments, so ``sp`` must come back to
+        where it started.  That is checked, not assumed — a mismatch means the
+        argument contract is wrong and is a defect, not a rounding error.
+
+        The far return address is a SENTINEL that is never executed.  Under the
+        CPU path it is the address the interpreter runs back to; here there is
+        nothing to run, and control returns by the Python call itself.  It is
+        pushed only so the frame offsets match.
+        """
+        resolve = self.callback_resolver
+        if resolve is None:
+            raise CpuFreeExecutionAttempt(
+                f"callback into guest code at {seg:04X}:{off:04X}, but no "
+                f"callback resolver is installed on this CPU-free host — "
+                f"install one (install_callback_dispatch) so the call can "
+                f"dispatch into the recovered corpus")
+        fn = resolve(seg, off)
+        if fn is None:
+            raise CpuFreeExecutionAttempt(
+                f"callback into guest code at {seg:04X}:{off:04X}: no recovered "
+                f"body is promoted for that address — the corpus cannot service "
+                f"this callback and there is no interpreter to fall back to")
+
+        s = self.carrier.s
+        mem = self.machine.mem
+        saved = {r: getattr(s, r) & 0xFFFF for r in
+                 ("cs", "ip", "sp", "ss", "bp", "ds", "es")}
+
+        def push(word: int) -> None:
+            s.sp = (s.sp - 2) & 0xFFFF
+            mem.ww(s.ss, s.sp, word & 0xFFFF)
+
+        for w in args:
+            push(w)
+        push(THUNK_SEG)                 # sentinel far return address, never run
+        push(CALLBACK_RET_IP)
+
+        regs = {r: getattr(s, r) & 0xFFFF for r in
+                ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es", "ss",
+                 "sp")}
+        regs["cs"], regs["ip"] = seg & 0xFFFF, off & 0xFFFF
+        out, _compat = self.call(fn, **self._accepted(fn, regs))
+        self._apply(out, 0)
+
+        if (s.sp & 0xFFFF) != saved["sp"]:
+            raise CpuFreeExecutionAttempt(
+                f"recovered callback {seg:04X}:{off:04X} returned with SP "
+                f"{s.sp & 0xFFFF:04X} != {saved['sp']:04X} — the body's pascal "
+                f"cleanup disagrees with the {len(args)} argument word(s) the "
+                f"host pushed")
+        ax, dx = s.ax & 0xFFFF, s.dx & 0xFFFF
+        s.cs, s.ip = saved["cs"], saved["ip"]
+        self.callbacks.append(f"{seg:04X}:{off:04X}{tuple(args)!r}")
+        return ax, dx
+
+    @staticmethod
+    def _accepted(fn, regs: dict) -> dict:
+        """Narrow a full register bundle to the parameters ``fn`` declares.
+
+        Every recovered body takes exactly the registers its own contract reads
+        (``dos_re``'s emitter derives that per function), so passing the whole
+        bundle is a ``TypeError``.  Asking the callable itself keeps this free of
+        any knowledge of how a particular corpus records its contracts."""
+        import inspect
+        params = inspect.signature(fn).parameters
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(regs)
+        return {k: v for k, v in regs.items() if k in params}
+
     # -- recovered-root invocation ----------------------------------------
 
     def call(self, recovered_fn, **regs):
@@ -300,3 +400,22 @@ class Win16CpulessPlatform(FailLoudPlatform):
             out, compat = recovered_fn(self.machine.mem, **regs)
         self.clock = self._entry + compat["cost"]
         return out, compat
+
+
+def install_callback_dispatch(platform: Win16CpulessPlatform, resolver) -> None:
+    """Let the Win16 API layer re-enter GUEST code on a CPU-free host.
+
+    ``resolver(seg, off)`` returns the recovered callable promoted for that
+    address, or ``None`` if the corpus has none.  Every API that calls back into
+    game code — ``DispatchMessage``/``SendMessage`` reaching a WndProc, a dialog
+    proc, a ``TimerProc`` — goes through :func:`win16.callback.call_far`, which
+    finds the dispatcher installed here and routes to
+    :meth:`Win16CpulessPlatform.callback` instead of an interpreter.  Nothing
+    else in the API layer changes: the call sites still see ``(AX, DX)``.
+
+    Installing this is what lets anything ABOVE the message pump run without a
+    CPU.  Without it those APIs raise ``CpuFreeExecutionAttempt`` — which stays
+    the default, because a host that silently skipped a WndProc would be
+    fabricating the game's behaviour rather than reproducing it."""
+    platform.callback_resolver = resolver
+    platform.carrier.win16_callback_dispatch = platform.callback

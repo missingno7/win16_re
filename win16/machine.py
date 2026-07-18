@@ -31,6 +31,14 @@ BOOT_MANIFEST_SCHEMA = "win16_vmless_boot_manifest/v1"
 THUNK_SEG = 0x0060          # import thunk slots live here (hooked CS:IP values)
 IMAGE_BASE_PARA = 0x0100    # first NE segment maps at this paragraph
 
+#: Sentinel far-return offset inside the thunk segment for a host->guest
+#: callback (WndProc / dialog proc / TimerProc).  Under the interpreter it is a
+#: real address the callback returns to (``win16.callback``); under a CPU-free
+#: host nothing runs it and it exists only so the pascal frame offsets match
+#: (``win16.cpuless``).  Both hosts must agree on it, so it lives here rather
+#: than in either one.
+CALLBACK_RET_IP = 0xFFFE
+
 # Win16 uses selector translation to lift the 1MB real-mode ceiling: the loaded
 # program's own segments stay in low real-mode memory (< 1MB); GlobalAlloc
 # blocks live above it as selectors mapping into the linear space
