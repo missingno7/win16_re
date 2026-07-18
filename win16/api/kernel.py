@@ -91,7 +91,11 @@ def install(api: ApiRegistry) -> None:
             f"FatalExit(code={ctx.args[0]:#x}) — the program panicked and asked "
             "KERNEL to break into the debugger / end the task")
 
-    @api.register_raw("KERNEL", 91)     # InitTask() — -register contract
+    # InitTask() — a MULTI-register result (no pascal arguments, callee pops 0).
+    # `ret="regs"` rather than a raw handler: raw means "owns its own return
+    # mechanics", which cost it any far-call contract at all; the result really
+    # is just wider than AX/DX, and that is what "regs" says.
+    @api.register("KERNEL", 91, ret="regs")
     def InitTask(ctx: CallContext) -> None:
         sys: Win16System = ctx.registry.services["system"]
         cpu = ctx.cpu
@@ -111,7 +115,6 @@ def install(api: ApiRegistry) -> None:
         cpu.s.di = sys.h_instance
         cpu.s.es = sys.ensure_psp()
         sys.booted = True
-        ret_far(cpu, 0)
 
     @api.register("KERNEL", 30, args="word")            # WaitEvent(hTask)
     def WaitEvent(ctx: CallContext) -> int:
@@ -606,7 +609,10 @@ def install(api: ApiRegistry) -> None:
     def GetVersion(ctx: CallContext) -> int:
         return WIN31_GETVERSION
 
-    @api.register_raw("KERNEL", 102)    # DOS3Call — INT 21h by far call
+    # DOS3Call — INT 21h reached by far call instead of by interrupt.  Register
+    # in, register out, no pascal arguments: exactly `plat.intr`'s shape, so it
+    # is a `ret="regs"` API and not a raw one.  Carry is part of the result.
+    @api.register("KERNEL", 102, ret="regs")
     def DOS3Call(ctx: CallContext) -> None:
         cpu = ctx.cpu
         ah = (cpu.s.ax >> 8) & 0xFF
@@ -616,7 +622,6 @@ def install(api: ApiRegistry) -> None:
                 f"DOS3Call AH={ah:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X} — "
                 f"DOS service not implemented")
         handler(ctx)
-        ret_far(cpu, 0)
 
 
 def _dos_get_version(ctx: CallContext) -> None:

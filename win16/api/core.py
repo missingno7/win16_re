@@ -26,6 +26,35 @@ class Win16ApiGap(RuntimeError):
     """The program called a Win16 API that has not been implemented yet."""
 
 
+class StackCursor:
+    """A sequential reader over the caller's argument block.
+
+    The pascal convention pushes left-to-right, so a fixed argument list can be
+    decoded positionally by :func:`read_pascal_args`.  A **cdecl** Win16 API
+    (``USER.420 wsprintf``) cannot: its arguments are pushed right-to-left and
+    there is no declared list at all past the format string, so the only way to
+    read them is to walk UP from the first one, pulling each as the format
+    directs.  That walk is the entire difference, and this is it.
+
+    It reads out of ``mem`` at ``ss:off`` and holds no CPU, so the same cursor
+    serves the interpreter and the CPU-free host — both publish the caller's
+    ``ss:sp`` on the object the handler sees as ``ctx.cpu``."""
+
+    def __init__(self, mem, ss: int, base: int) -> None:
+        self.mem = mem
+        self.ss = ss & 0xFFFF
+        self.off = base & 0xFFFF
+
+    def word(self) -> int:
+        v = self.mem.rw(self.ss, self.off)
+        self.off = (self.off + 2) & 0xFFFF
+        return v
+
+    def dword(self) -> int:
+        lo = self.word()
+        return lo | (self.word() << 16)
+
+
 @dataclass
 class CallContext:
     """What a handler sees: the CPU plus decoded pascal arguments."""
@@ -35,6 +64,9 @@ class CallContext:
     ordinal: int
     name: str
     args: tuple[int, ...] = ()
+    #: for a ``varargs`` (cdecl) API only: a :class:`StackCursor` positioned at
+    #: the caller's first argument.  ``None`` for every other API.
+    varargs: "StackCursor | None" = None
 
     @property
     def mem(self):
@@ -85,6 +117,16 @@ def ret_far(cpu, pop_bytes: int, ax: int | None = None, dx: int | None = None) -
         s.dx = dx & 0xFFFF
 
 
+#: register names an API may deliver a result in, in the order a delta is
+#: reported.  A ``ret="regs"`` API writes some subset of these directly.
+#:
+#: ``flags`` is in the list because for ``KERNEL.102 DOS3Call`` it is a genuine
+#: RESULT register: the INT 21h convention signals failure by setting carry,
+#: and a delta that dropped it would report a failed DOS call as a successful
+#: one on the CPU-free path.
+REGS_RESULT = ("ax", "bx", "cx", "dx", "si", "di", "bp", "ds", "es", "flags")
+
+
 @dataclass
 class ApiEntry:
     module: str
@@ -92,8 +134,15 @@ class ApiEntry:
     name: str
     handler: Callable[[CallContext], int | None] | None
     arg_sizes: list[int] | None     # None => raw handler owns the whole contract
-    ret: str = "word"               # "word" (AX), "long" (DX:AX), "void"
+    ret: str = "word"               # "word" (AX), "long" (DX:AX), "void", "regs"
     raw: bool = False
+    #: cdecl: the CALLER pops the arguments, so the callee-cleanup byte count is
+    #: genuinely 0 rather than undeclared.  Recorded because ``argbytes == 0``
+    #: alone cannot distinguish "cdecl" from "no arguments" (see
+    #: :func:`win16.lift.entry_argbytes`); it does not change the number.
+    caller_cleanup: bool = False
+    #: the handler reads further arguments itself, through ``ctx.varargs``.
+    varargs: bool = False
 
 
 class ApiRegistry:
@@ -123,7 +172,8 @@ class ApiRegistry:
 
     # -- registration -----------------------------------------------------
     def register(self, module: str, ordinal: int, name: str | None = None,
-                 args: str = "", ret: str = "word"):
+                 args: str = "", ret: str = "word", *,
+                 caller_cleanup: bool = False, varargs: bool = False):
         """Decorator: register a pascal-convention handler.
 
         `args` is the Wine-spec argument list, e.g. "word str long".  The
@@ -131,7 +181,15 @@ class ApiRegistry:
         far-returns popping the argument bytes.  `ret` declares the return
         contract: "word" puts the handler's int in AX (DX untouched), "long"
         puts it in DX:AX (DX set even when the high word is 0), "void" leaves
-        both registers alone.
+        both registers alone, and "regs" is the MULTI-register form — the
+        handler writes its result registers directly and the delta is the
+        result (:meth:`invoke_regs`).
+
+        `caller_cleanup` marks a cdecl API (the caller pops); `varargs` gives
+        the handler a :class:`StackCursor` at ``ctx.varargs`` to read arguments
+        the declared list does not cover.  Neither invents an argument count: a
+        cdecl API still declares the pascal argument list it cleans, which is
+        the empty one.
         """
         module = module.upper()
         known = ORDINAL_NAMES.get(module, {}).get(ordinal)
@@ -139,7 +197,7 @@ class ApiRegistry:
             name = known
         if known is not None and name != known:
             raise ValueError(f"{module}.{ordinal} is {known}, not {name}")
-        if ret not in ("word", "long", "void"):
+        if ret not in ("word", "long", "void", "regs"):
             raise ValueError(f"bad ret spec {ret!r}")
         sizes = [ARG_SIZES[a] for a in args.split()] if args else []
 
@@ -148,7 +206,9 @@ class ApiRegistry:
             if key in self.entries:
                 raise ValueError(f"duplicate registration for {api_name(module, ordinal)}")
             self.entries[key] = ApiEntry(module, ordinal, name or f"#{ordinal}",
-                                         fn, sizes, ret=ret)
+                                         fn, sizes, ret=ret,
+                                         caller_cleanup=caller_cleanup,
+                                         varargs=varargs)
             return fn
         return deco
 
@@ -245,23 +305,11 @@ class ApiRegistry:
         ``_invoke`` below is the thin CPU shim over this: it decodes the
         pascal args off ``ss:sp`` and applies ``ret_far`` to the result, so
         both paths run the SAME handler with the same contract."""
-        if entry.raw:
+        if entry.ret == "regs":
             raise ValueError(
-                f"{label}: a raw (-register) API owns its own register/stack "
-                f"return contract and has no args-in/result-out form")
-        ctx = CallContext(carrier, self, entry.module, entry.ordinal,
-                          entry.name, args)
-        self.call_log.append(f"{label}{args!r}")
-        # Publish this API frame for call_far's resumable-callback record
-        # (win16/callback.py): a callback dispatched by this handler needs the
-        # API's name + argbytes to complete the call if a snapshot parks inside
-        # it.  Saved/restored so nested dispatches stack.
-        prev_api = getattr(carrier, "win16_current_api", ("?", 0))
-        carrier.win16_current_api = (entry.name, sum(entry.arg_sizes or []))
-        try:
-            result = entry.handler(ctx)
-        finally:
-            carrier.win16_current_api = prev_api
+                f"{label}: a 'regs' API returns a MULTI-register bundle, which "
+                f"does not fit (ax, dx) — call invoke_regs instead")
+        result = self._run_handler(carrier, entry, label, args)
         ax = dx = None
         if entry.ret == "void":
             if result is not None:
@@ -274,15 +322,90 @@ class ApiRegistry:
             ax, dx = result & 0xFFFF, (result >> 16) & 0xFFFF
         return ax, dx
 
+    def invoke_regs(self, carrier, entry: ApiEntry, label: str,
+                    args: tuple[int, ...]) -> dict[str, int]:
+        """The CPU-FREE invocation path for a MULTI-register API.
+
+        A few Win16 APIs deliver their result in more registers than ``AX`` or
+        ``DX:AX``: ``KERNEL.91 InitTask`` returns a whole bundle (AX/BX/CX/DX/
+        SI/DI/ES), and ``KERNEL.102 DOS3Call`` is an INT 21h passthrough whose
+        result is whatever registers the DOS service wrote.  Neither fits
+        :meth:`invoke_values`' ``(ax, dx)``, and neither should be forced to —
+        so they get their own primitive rather than a widened one.  Every
+        existing API's ``(ax, dx)`` contract is therefore exactly what it was.
+
+        The handler writes the result registers on ``ctx.cpu.s`` directly, as it
+        always has; what is returned is the DELTA — ``{reg: value}`` for each of
+        :data:`REGS_RESULT` the handler changed.  Under the interpreter the
+        carrier IS the CPU so the writes have already landed and the delta is
+        redundant (applying it is a no-op); under a CPU-free host the delta is
+        the entire result, and the same handler produces both.
+
+        Return mechanics stay with the caller, exactly as in
+        :meth:`invoke_values`: nothing here performs a far return."""
+        if entry.ret != "regs":
+            raise ValueError(
+                f"{label}: not a 'regs' API (ret={entry.ret!r}) — its result "
+                f"is a value, so call invoke_values")
+        s = carrier.s
+        before = {r: getattr(s, r) & 0xFFFF for r in REGS_RESULT}
+        result = self._run_handler(carrier, entry, label, args)
+        if result is not None:
+            raise ValueError(
+                f"{label}: a 'regs' API writes its result registers and "
+                f"returns None, but it returned {result!r}")
+        return {r: getattr(s, r) & 0xFFFF for r in REGS_RESULT
+                if getattr(s, r) & 0xFFFF != before[r]}
+
+    def _run_handler(self, carrier, entry: ApiEntry, label: str,
+                     args: tuple[int, ...]):
+        """Build the CallContext and run the handler — the part every
+        invocation form shares.  Reads no stack and performs no return."""
+        if entry.raw:
+            raise ValueError(
+                f"{label}: a raw (-register) API owns its own register/stack "
+                f"return contract and has no args-in/result-out form")
+        cursor = None
+        if entry.varargs:
+            # The caller's argument block starts above the far return address,
+            # past whatever the declared pascal list already consumed.  Both
+            # invocation paths publish the caller's ss:sp on the carrier, so
+            # this is the same block in both.
+            cursor = StackCursor(carrier.mem, carrier.s.ss & 0xFFFF,
+                                 (carrier.s.sp + 4 + sum(entry.arg_sizes or []))
+                                 & 0xFFFF)
+        ctx = CallContext(carrier, self, entry.module, entry.ordinal,
+                          entry.name, args, varargs=cursor)
+        self.call_log.append(f"{label}{args!r}")
+        # Publish this API frame for call_far's resumable-callback record
+        # (win16/callback.py): a callback dispatched by this handler needs the
+        # API's name + argbytes to complete the call if a snapshot parks inside
+        # it.  Saved/restored so nested dispatches stack.
+        prev_api = getattr(carrier, "win16_current_api", ("?", 0))
+        carrier.win16_current_api = (entry.name, sum(entry.arg_sizes or []))
+        try:
+            return entry.handler(ctx)
+        finally:
+            carrier.win16_current_api = prev_api
+
     def _invoke(self, cpu, entry: ApiEntry, label: str) -> None:
         """Read pascal args, run the handler, and far-return with its result —
         shared by static-ordinal and by-name (GetProcAddress) dispatch.  The
-        CPU shim over :meth:`invoke_values`."""
+        CPU shim over :meth:`invoke_values` / :meth:`invoke_regs`."""
         if entry.raw:
             self.call_log.append(label)
             entry.handler(CallContext(cpu, self, entry.module, entry.ordinal, entry.name))
             return
         args = read_pascal_args(cpu, entry.arg_sizes or [])
+        if entry.ret == "regs":
+            # The handler wrote the result registers on cpu.s itself, so
+            # applying the delta here is a no-op — it is applied anyway rather
+            # than skipped, so this path and the CPU-free one stay the same
+            # sequence of steps and cannot drift apart.
+            for reg, val in self.invoke_regs(cpu, entry, label, args).items():
+                setattr(cpu.s, reg, val & 0xFFFF)
+            ret_far(cpu, sum(entry.arg_sizes or []))
+            return
         ax, dx = self.invoke_values(cpu, entry, label, args)
         ret_far(cpu, sum(entry.arg_sizes or []), ax=ax, dx=dx)
 

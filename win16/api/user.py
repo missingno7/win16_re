@@ -1371,23 +1371,20 @@ def install(api: ApiRegistry) -> None:
             sys.call_wndproc(win, 0x000F, 0, 0)         # WM_PAINT
         return 1
 
-    @api.register_raw("USER", 420)                      # wsprintf — CDECL varargs
-    def wsprintf(ctx: CallContext) -> None:
-        from .core import ret_far
-        cpu = ctx.cpu
-        ss, sp = cpu.s.ss & 0xFFFF, cpu.s.sp & 0xFFFF
-        cursor = sp + 4                                 # above the far return
-        def next_word():
-            nonlocal cursor
-            v = cpu.mem.rw(ss, cursor & 0xFFFF)
-            cursor += 2
-            return v
-        out_ptr = next_word() | (next_word() << 16)
-        fmt_ptr = next_word() | (next_word() << 16)
+    # wsprintf — CDECL varargs.  The declared pascal argument list is EMPTY and
+    # that is the truth, not a placeholder: the caller pops, so the callee-
+    # cleanup byte count really is 0.  Everything past that is read through
+    # ctx.varargs, a cursor over the caller's argument block — which is what a
+    # variadic C function does and what no fixed `args=` string can express.
+    @api.register("USER", 420, ret="word", caller_cleanup=True, varargs=True)
+    def wsprintf(ctx: CallContext) -> int:
+        cur = ctx.varargs
+        out_ptr = cur.dword()
+        fmt_ptr = cur.dword()
         fmt = ctx.read_string(fmt_ptr)
-        text = _wsprintf_format(ctx, fmt, next_word)
+        text = _wsprintf_format(ctx, fmt, cur.word)
         ctx.mem.load((out_ptr >> 16) & 0xFFFF, out_ptr & 0xFFFF, text + b"\x00")
-        ret_far(cpu, 0, ax=len(text))                   # CDECL: caller pops args
+        return len(text)
 
     @api.register("USER", 79, args="ptr ptr ptr")       # IntersectRect(dst, a, b)
     def IntersectRect(ctx: CallContext) -> int:

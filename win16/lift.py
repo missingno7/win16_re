@@ -40,8 +40,8 @@ from typing import Mapping
 # CPU8086 at import time and this is a build-time module with no VM in it.
 from .machine import THUNK_SEG  # noqa: F401  (re-exported: boundary segment)
 
-__all__ = ["THUNK_SEG", "SkippedSlot", "plat_farcall_contracts",
-           "plat_farcalls_document"]
+__all__ = ["THUNK_SEG", "SkippedSlot", "entry_argbytes",
+           "plat_farcall_contracts", "plat_farcalls_document"]
 
 #: Virtual-instruction cost the interpreter charges for one Win16 API
 #: dispatch.  The API surface installs a plain replacement hook per thunk slot
@@ -69,6 +69,29 @@ class SkippedSlot:
     key: str            #: ``"MODULE.ordinal"``
     off: int            #: thunk-segment offset of the slot
     reason: str
+
+
+def entry_argbytes(entry) -> int | None:
+    """The pascal callee-cleanup byte count for one :class:`ApiEntry`, or
+    ``None`` when the entry declares no argument list and therefore has no
+    derivable contract (a raw ``-register`` API, which owns its own return
+    mechanics).  ``None`` is the refusal, never ``0`` — a genuine zero-argument
+    API and an undeclared one must not be spelled the same way.
+
+    A cdecl API (``caller_cleanup``, e.g. ``USER.420 wsprintf``) declares an
+    EMPTY pascal argument list, so this is legitimately ``0``: the callee pops
+    nothing because the caller does.  The distinction between "cdecl, pops 0"
+    and "pascal, no arguments" does not change the number, and the number is
+    all a far-call contract carries; ``entry.caller_cleanup`` records which one
+    it is for a reader that needs to know.
+
+    The single Win16 fact behind every contract this module produces, factored
+    out so the static import table (:func:`plat_farcall_contracts`) and a
+    dynamically-minted far pointer (:mod:`win16.farptr`) can never disagree
+    about what a given API's cleanup is."""
+    if entry is None or entry.arg_sizes is None:
+        return None
+    return sum(entry.arg_sizes)
 
 
 def _normalize(key) -> tuple[str, int]:
@@ -125,11 +148,12 @@ def plat_farcall_contracts(
         if entry is None:
             skipped.append(SkippedSlot(key, int(off), "unimplemented"))
             continue
-        if entry.arg_sizes is None:
+        argbytes = entry_argbytes(entry)
+        if argbytes is None:
             skipped.append(SkippedSlot(key, int(off), "raw-api"))
             continue
         contracts[f"{thunk_seg & 0xFFFF:04X}:{int(off) & 0xFFFF:04X}"] = {
-            "argbytes": sum(entry.arg_sizes),
+            "argbytes": argbytes,
             "cost": cost,
             "name": key,
         }

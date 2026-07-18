@@ -38,6 +38,20 @@ What is fenced:
   ``plat.farcall`` platform effect with the pascal callee-cleanup produced by
   :mod:`win16.lift` off the real API registry — the fact producer and the
   emitter that consumes it, checked against each other.
+* **far-pointer PROVENANCE** (:mod:`win16.farptr`) — the dynamic half of the
+  boundary.  ``GetProcAddress`` / ``MakeProcInstance`` hand the program a far
+  pointer it stores and later calls through, and a promoter that sees only
+  ``call far [bp-4]`` refuses.  win16 minted the pointer, so win16 can say what
+  it denotes; the fixtures pin the denotations, the evidence-file shape the
+  consumer reads, and the refusals that must SURVIVE (a NULL, an unbound thunk,
+  a guest address — none of which may acquire an invented contract).
+* **the raw-API values forms** — a raw ``-register`` API declares no argument
+  list, so no far-call contract is derivable, so every far call to it refuses.
+  ``USER.420 wsprintf`` (cdecl varargs), ``KERNEL.102 DOS3Call`` (INT 21h
+  passthrough) and ``KERNEL.91 InitTask`` (a multi-register result) each get an
+  args-in/result-out form, and each is differentialled: the REAL handler run
+  down both the interpreter's stack-and-``ret_far`` shim and the CPU-free path,
+  over identical memory.  ``WIN87EM.1 __fpMath`` deliberately keeps refusing.
 
 Every behavioural claim is a DIFFERENTIAL: the composed CPUless body is exec'd
 and its whole register file plus its stack memory are diffed against stepping
@@ -372,11 +386,20 @@ def test_a_biased_frame_pointer_that_is_not_constant_still_refuses() -> None:
 def _thunk_registry_and_slots():
     """A synthetic import-thunk table over the REAL API registry: three slots,
     one ordinary pascal API, one raw API, one unimplemented ordinal.  The
-    ordinals are Windows facts, not any program's."""
+    ordinals are Windows facts, not any program's.
+
+    The raw example is ``WIN87EM.1 __fpMath``, which is the one API in the
+    surface that is DELIBERATELY still raw: it is the x87 emulator entry, and
+    the FP frontier is unbuilt by design (``win16/fpu.py`` is grown against a
+    real frontier, not speculatively).  It was ``KERNEL.91 InitTask`` until
+    InitTask got the ``ret="regs"`` values form and therefore a contract — the
+    assertion is unchanged, it just has to point at an API that is still raw to
+    keep testing what it says it tests.
+    """
     reg = build_registry(winflags=WINFLAGS_NO_FPU)
     slots = {
         "USER.1": 0x0000,        # MessageBox  — pascal, arg_sizes [2,4,4,2]
-        "KERNEL.91": 0x0004,     # InitTask    — a RAW handler (no arg_sizes)
+        "WIN87EM.1": 0x0004,     # __fpMath    — a RAW handler (no arg_sizes)
         "KERNEL.9999": 0x0008,   # not implemented at all
     }
     return reg, slots
@@ -403,7 +426,7 @@ def test_plat_farcall_contracts_refuses_to_guess() -> None:
     reg, slots = _thunk_registry_and_slots()
     _contracts, skipped = plat_farcall_contracts(THUNK_SEG, slots, reg)
     assert {(s.key, s.reason) for s in skipped} == {
-        ("KERNEL.91", "raw-api"),
+        ("WIN87EM.1", "raw-api"),
         ("KERNEL.9999", "unimplemented"),
     }
     assert {s.off for s in skipped} == {0x0004, 0x0008}
@@ -575,3 +598,512 @@ def test_the_thunk_segment_is_the_one_win16_actually_loads_into() -> None:
     restate it, and it is the segment the machine really installs thunks at."""
     from win16.machine import THUNK_SEG as MACHINE_THUNK_SEG
     assert THUNK_SEG == MACHINE_THUNK_SEG
+
+
+# ============================================================================
+# FAR-POINTER PROVENANCE — what a dynamically-obtained FARPROC denotes
+# ============================================================================
+#
+# The static `call far THUNK_SEG:slot` above is the easy half of the Win16
+# boundary.  The hard half is dynamic linking: GetProcAddress / MakeProcInstance
+# hand the program a far pointer, it stores it, and later it calls THROUGH the
+# variable.  A promoter sees `call far [bp-4]`, cannot name the target, and
+# refuses.  win16 minted that pointer and knows what it is; these fixtures pin
+# that it can say so, and say it in the shape the consumer reads.
+
+from win16.api.core import ApiRegistry                             # noqa: E402
+from win16.farptr import (API_THUNK, GUEST, NULL, PROC_THUNK,      # noqa: E402
+                          UNBOUND_THUNK, FarPointerLog,
+                          indirect_farcall_document)
+from win16.lift import entry_argbytes                              # noqa: E402
+
+
+class _FakeCpu:
+    """The minimum a registry needs to mint thunks and run a handler: memory,
+    registers, the hook tables.  It executes nothing — the CPU-free carrier's
+    shape, written locally so these fixtures depend on no boot image."""
+
+    def __init__(self, mem=None, **regs):
+        self.mem = mem if mem is not None else Memory()
+        self.s = CPUState(**regs)
+        self.replacement_hooks: dict = {}
+        self.hook_names: dict = {}
+        self.instruction_count = 0
+        self.win16_current_api = ("?", 0)
+
+
+def _installed_registry(*imports):
+    """A real API registry with `imports` resolved into thunk slots and
+    installed on a CPU-free carrier — the state a running Win16 program has."""
+    reg = build_registry(winflags=WINFLAGS_NO_FPU)
+    for module, ordinal in imports:
+        reg.resolve_import(module, ordinal)
+    cpu = _FakeCpu()
+    reg.install(cpu, THUNK_SEG)
+    return reg, cpu
+
+
+def _fp(seg: int, off: int) -> int:
+    return ((seg & 0xFFFF) << 16) | (off & 0xFFFF)
+
+
+# ------------------------------------------------------- describe() ---------
+
+def test_provenance_resolves_a_static_import_thunk_to_its_api_contract() -> None:
+    """The decisive case.  A stored FARPROC that points at an import slot is
+    the SAME call a static `call far` would have made, so it must resolve to
+    the API and carry the identical pascal cleanup the static producer derives
+    — one Win16 fact, reachable two ways, and it may never disagree with
+    itself."""
+    reg, _cpu = _installed_registry(("USER", 1), ("USER", 63))
+    log = FarPointerLog(reg)
+
+    slot = reg.slots[("USER", 63)]
+    fp = log.describe(_fp(THUNK_SEG, slot))
+    assert fp.kind == API_THUNK
+    assert fp.name == "USER.63"
+    assert fp.callable_by_platform
+    # not restated here: taken from the same producer the static path uses
+    static, _skipped = plat_farcall_contracts(THUNK_SEG, reg.slots, reg)
+    assert fp.argbytes == static[fp.key]["argbytes"] == 4
+
+
+def test_provenance_needs_no_instrumentation_for_a_thunk_target() -> None:
+    """describe() reads the registry's OWN tables, so a thunk target resolves
+    off a registry that was never armed.  That is why provenance costs the
+    production path nothing: the decisive lookup is after-the-fact."""
+    reg, _cpu = _installed_registry(("USER", 1))
+    unarmed = FarPointerLog(reg)                       # no arm() anywhere
+    assert not unarmed.mints
+    assert unarmed.describe(
+        _fp(THUNK_SEG, reg.slots[("USER", 1)])).kind == API_THUNK
+
+
+def test_provenance_resolves_a_runtime_minted_proc_thunk() -> None:
+    """A GetProcAddress-minted by-name proc is not in the import table, so no
+    static analysis could find it — but it dispatches identically and its
+    contract is just as derivable."""
+    reg, _cpu = _installed_registry(("USER", 1))
+    log = FarPointerLog(reg).arm()
+    module, name = next(iter(reg.named_procs))       # whatever the surface offers
+
+    value = reg.mint_proc_thunk(module, name)
+    assert value, "the surface must offer at least one by-name proc"
+    fp = log.describe(value)
+    assert fp.kind == PROC_THUNK
+    assert fp.name == f"{module}.{name}"
+    assert fp.origin == "GetProcAddress"
+    assert fp.argbytes == entry_argbytes(reg.named_procs[(module, name)])
+    assert log.mints[-1].value == value
+
+
+def test_provenance_records_makeprocinstance_without_changing_it() -> None:
+    """MakeProcInstance hands back the program's OWN far pointer unchanged (one
+    instance, fixed DGROUP).  Recording must be transparent: the guest sees the
+    identical value, and the pointer resolves as GUEST code with NO invented
+    contract — promoting a call to it means promoting that function."""
+    reg, cpu = _installed_registry(("KERNEL", 51))
+    entry = reg.entries[("KERNEL", 51)]
+    proc = _fp(0x1234, 0x5678)
+
+    with FarPointerLog(reg) as log:
+        ax, dx = reg.invoke_values(cpu, entry, "KERNEL.51", (proc, 0x0100))
+    assert (dx << 16 | ax) == proc, "MakeProcInstance must pass the proc through"
+
+    fp = log.describe(proc)
+    assert fp.kind == GUEST
+    assert fp.origin == "MakeProcInstance"
+    assert fp.argbytes is None and fp.name is None
+    assert not fp.callable_by_platform
+
+
+def test_provenance_refuses_to_guess_a_null_or_unbound_pointer() -> None:
+    """The two honest frontier answers.  NULL is what GetProcAddress returns
+    for a proc we do not implement (a program that stores and calls it is
+    calling address zero); an unbound thunk offset is a pointer into the
+    boundary segment that this registry did not mint.  Neither may acquire a
+    contract."""
+    reg, _cpu = _installed_registry(("USER", 1))
+    log = FarPointerLog(reg)
+
+    assert log.describe(0).kind == NULL
+    assert not log.describe(0).callable_by_platform
+    stray = log.describe(_fp(THUNK_SEG, 0x7FFC))
+    assert stray.kind == UNBOUND_THUNK
+    assert stray.argbytes is None
+    assert not stray.callable_by_platform
+
+
+def test_arming_is_reversible_and_leaves_the_registry_identical() -> None:
+    """Provenance must not perturb the production path.  After disarm the
+    registry holds the very same callables it held before — not equivalent
+    ones, the same objects."""
+    reg, _cpu = _installed_registry(("KERNEL", 51))
+    before_handler = reg.entries[("KERNEL", 51)].handler
+    assert "mint_proc_thunk" not in reg.__dict__     # the class method, unshadowed
+
+    log = FarPointerLog(reg).arm()
+    assert "mint_proc_thunk" in reg.__dict__                    # armed
+    assert reg.entries[("KERNEL", 51)].handler is not before_handler
+    log.disarm()
+
+    # not "an equivalent callable is installed" — the shadow is GONE and the
+    # handler is the original object, so the registry is what it was.
+    assert "mint_proc_thunk" not in reg.__dict__
+    assert reg.entries[("KERNEL", 51)].handler is before_handler
+
+
+# --------------------------------------------------- the evidence file ------
+
+_PROBE_SITE = "18C0:0BA0"          # a synthetic guest CS:IP, not any program's
+
+
+def _document_over(reg, targets):
+    log = FarPointerLog(reg)
+    return log, indirect_farcall_document(
+        log, [{"site": _PROBE_SITE, "targets": targets}], demo="synthetic")
+
+
+def test_indirect_document_carries_dos_res_dyn_evidence_shape() -> None:
+    """`dyn_evidence` is dos_re's existing closure-walk input — "CS:IP" site ->
+    list of target keys — and must arrive in exactly that shape, because the
+    consumer side is built against it."""
+    import json
+
+    reg, _cpu = _installed_registry(("USER", 1), ("USER", 63))
+    key = f"{THUNK_SEG:04X}:{reg.slots[('USER', 63)]:04X}"
+    _log, doc = _document_over(reg, {key: 7})
+
+    assert doc["dyn_evidence"] == {_PROBE_SITE: [key]}
+    assert doc["demo"] == "synthetic"
+    assert doc["thunk_seg"] == f"{THUNK_SEG:04X}"
+    assert doc["_notice"].startswith("GENERATED")
+    assert json.loads(json.dumps(doc)) == doc      # serializable as produced
+
+
+def test_indirect_document_contracts_match_the_static_producer_exactly() -> None:
+    """The contracts an indirect site gets are the SAME contracts the static
+    import table gets — same keys, same argbytes, same cost, same names.  An
+    indirect call to a thunk is not a weaker fact than a direct one."""
+    reg, _cpu = _installed_registry(("USER", 1), ("USER", 63))
+    keys = {f"{THUNK_SEG:04X}:{reg.slots[api]:04X}"
+            for api in (("USER", 1), ("USER", 63))}
+    _log, doc = _document_over(reg, {k: 1 for k in keys})
+
+    static, _skipped = plat_farcall_contracts(THUNK_SEG, reg.slots, reg)
+    assert doc["contracts"] == {k: static[k] for k in keys}
+    assert not doc["unresolved"], "both targets are contracted"
+    for row in doc["sites"][_PROBE_SITE]["targets"]:
+        assert row["kind"] == API_THUNK and row["count"] == 1
+
+
+def test_indirect_document_reports_what_it_cannot_close() -> None:
+    """A site whose target has no derivable contract stays on the frontier and
+    is REPORTED with its reason.  Shrinking the frontier by silence is the one
+    thing this channel must never do."""
+    reg, _cpu = _installed_registry(("USER", 1), ("WIN87EM", 1))
+    guest = "3A70:0142"
+    raw = f"{THUNK_SEG:04X}:{reg.slots[('WIN87EM', 1)]:04X}"
+    _log, doc = _document_over(reg, {guest: 3, "0000:0000": 1, raw: 2})
+
+    assert doc["contracts"] == {}
+    # the reason says what is MISSING, not what the target is: a raw API is
+    # reported with lift.SkippedSlot's own word for the same frontier, even
+    # though provenance knows perfectly well which API it is.
+    assert doc["unresolved"][_PROBE_SITE] == {
+        guest: GUEST, "0000:0000": NULL, raw: "raw-api"}
+    rows = {r["target"]: r for r in doc["sites"][_PROBE_SITE]["targets"]}
+    assert rows[raw]["name"] == "WIN87EM.1" and "argbytes" not in rows[raw]
+    assert doc["dyn_evidence"][_PROBE_SITE] == ["0000:0000", raw, guest]
+
+
+def test_indirect_document_accepts_both_probe_capture_spellings() -> None:
+    """The serialized list-of-rows form and the in-process mapping form are the
+    same capture written two ways; a caller must not have to reshape one."""
+    reg, _cpu = _installed_registry(("USER", 63))
+    key = f"{THUNK_SEG:04X}:{reg.slots[('USER', 63)]:04X}"
+    log = FarPointerLog(reg)
+
+    as_rows = indirect_farcall_document(log, [{"site": _PROBE_SITE,
+                                               "targets": {key: 2}}])
+    as_map = indirect_farcall_document(log, {_PROBE_SITE: {key: 2}})
+    as_bare = indirect_farcall_document(log, {_PROBE_SITE: [key]})
+    assert as_rows == as_map
+    assert as_bare["contracts"] == as_rows["contracts"]      # counts aside
+
+
+def test_the_indirect_far_call_site_is_still_refused_without_the_consumer(
+) -> None:
+    """The other half of the split, stated honestly.  Producing the evidence
+    does not by itself compose the call: dos_re still refuses an indirect far
+    call, and it SHOULD until its consumer side lands.  This fixture is the
+    join point — when composition arrives, an indirect site holding a contract
+    from the document above stops refusing, and this is where that is proven.
+    """
+    code = _asm(("call far [bp-4]", "ff5efc"), ("ret", "c3"))
+    with pytest.raises(Refusal, match="indirect-control-flow"):
+        check_promotable(_scan(code), plat_far_segs=frozenset({THUNK_SEG}))
+
+
+# ============================================================================
+# THE RAW-API VALUES FORMS — closing platform-farcall-contract-unknown
+# ============================================================================
+#
+# A raw (-register) API has no declared argument list, so no far-call contract
+# is derivable, so every far call to it refuses.  That is one seam, not four
+# problems: give the API an args-in/result-out form and the contract follows.
+# Each fixture below runs the REAL registry handler down BOTH paths — the
+# interpreter's stack-and-ret_far shim and the CPU-free values form — over
+# identical memory, and diffs the results.  A values form asserted only against
+# itself would prove nothing.
+
+def _thunk_call_bytes(slot: int, *pushes: int) -> bytes:
+    """A guest body that pushes `pushes` (in order) and far-calls a thunk slot.
+    Written with mov/push pairs so it stays 8086, and with no cleanup — who
+    pops is exactly what each convention fixture is measuring."""
+    body = []
+    for word in pushes:
+        body.append(("mov ax, imm",
+                     f"b8{word & 0xFF:02x}{(word >> 8) & 0xFF:02x}"))
+        body.append(("push ax", "50"))
+    body.append(("call far THUNK_SEG:slot",
+                 f"9a{slot & 0xFF:02x}{(slot >> 8) & 0xFF:02x}"
+                 f"{THUNK_SEG & 0xFF:02x}{THUNK_SEG >> 8:02x}"))
+    return _asm(*body)
+
+
+def _run_thunk_call(reg, code: bytes, mem: Memory, **regs) -> CPU8086:
+    """Run a guest body through CPU8086 with the real API dispatch installed,
+    stopping once the far call has returned past the end of the body."""
+    st = CPUState(cs=CS, ip=0, ss=SS, **regs)
+    st.sp = SP0
+    cpu = CPU8086(mem, st)
+    for k, b in enumerate(code):
+        mem.data[(CS << 4) + k] = b
+    reg.install(cpu, THUNK_SEG)
+    stop = len(code)
+    for _ in range(64):
+        if cpu.s.cs == CS and cpu.s.ip >= stop:
+            return cpu
+        cpu.step()
+    raise AssertionError("the thunk call did not return within the step budget")
+
+
+# --------------------------------------------------------- USER.420 --------
+
+_FMT_OFF = 0x2000
+_OUT_OFF = 0x2100
+_ARG_OFF = 0x2200
+
+
+def _wsprintf_memory() -> Memory:
+    mem = Memory()
+    mem.load(DS, _FMT_OFF, b"n=%d s=%s\x00")
+    mem.load(DS, _ARG_OFF, b"ok\x00")
+    return mem
+
+
+#: cdecl pushes RIGHT-to-LEFT, and each far pointer goes high word first so the
+#: dword reads back little-endian: wsprintf(out, fmt, 42, "ok")
+_WSPRINTF_PUSHES = (DS, _ARG_OFF, 42, DS, _FMT_OFF, DS, _OUT_OFF)
+_WSPRINTF_EXPECT = b"n=42 s=ok"
+
+
+def test_wsprintf_is_cdecl_and_the_callee_cleanup_is_genuinely_zero() -> None:
+    """wsprintf is variadic C: the CALLER pops.  So argbytes 0 is the truth,
+    not a placeholder — and it is now DECLARED, which is what turns
+    `platform-farcall-contract-unknown` into a composable call.
+    `caller_cleanup` records which kind of zero it is, since the number alone
+    cannot say."""
+    reg = build_registry(winflags=WINFLAGS_NO_FPU)
+    entry = reg.entries[("USER", 420)]
+    assert entry.raw is False and entry.varargs is True
+    assert entry.caller_cleanup is True
+    assert entry_argbytes(entry) == 0
+
+    contracts, skipped = plat_farcall_contracts(THUNK_SEG, {"USER.420": 0}, reg)
+    assert not skipped
+    assert contracts[f"{THUNK_SEG:04X}:0000"]["argbytes"] == 0
+
+
+def test_wsprintf_values_form_matches_the_interpreter() -> None:
+    """THE differential.  The same real handler, over the same stack image, run
+    through the interpreter's shim and through the CPU-free values form: the
+    formatted output and the returned length must agree, and the arguments must
+    be left for the CALLER to pop in both."""
+    reg, _ = _installed_registry(("USER", 420))
+    slot = reg.slots[("USER", 420)]
+    code = _thunk_call_bytes(slot, *_WSPRINTF_PUSHES)
+
+    # -- the interpreter path
+    m_cpu = _wsprintf_memory()
+    cpu = _run_thunk_call(reg, code, m_cpu, ds=DS)
+    assert cpu.s.ax == len(_WSPRINTF_EXPECT)
+    # cdecl: the callee popped nothing, so all pushed words are still there
+    assert cpu.s.sp & 0xFFFF == (SP0 - 2 * len(_WSPRINTF_PUSHES)) & 0xFFFF
+
+    # -- the CPU-free values path, over the identical frame the body built.
+    # sp points at the far return address, which is exactly where plat.farcall
+    # leaves it for a recovered body that pushed the same arguments.
+    m_val = Memory()
+    m_val.data[:] = m_cpu.data[:]
+    for off in range(len(_WSPRINTF_EXPECT) + 1):        # clear the output only
+        m_val.data[(DS << 4) + _OUT_OFF + off] = 0
+    carrier = _FakeCpu(m_val, ds=DS, ss=SS)
+    carrier.s.sp = (cpu.s.sp - 4) & 0xFFFF
+    ax, dx = reg.invoke_values(carrier, reg.entries[("USER", 420)],
+                               "USER.420", ())
+
+    assert (ax, dx) == (cpu.s.ax & 0xFFFF, None)
+    out = bytes(m_val.data[(DS << 4) + _OUT_OFF:
+                           (DS << 4) + _OUT_OFF + len(_WSPRINTF_EXPECT)])
+    assert out == _WSPRINTF_EXPECT
+    assert bytes(m_val.data) == bytes(m_cpu.data), \
+        "the two paths wrote different memory"
+
+
+# --------------------------------------------------------- KERNEL.102 -------
+
+def test_dos3call_values_form_matches_the_interpreter() -> None:
+    """DOS3Call is INT 21h by far call: registers in, registers out, no pascal
+    arguments.  Its values form is a REGISTER DELTA, which is exactly
+    `plat.intr`'s shape — so the CPU-free host can service it."""
+    reg, _ = _installed_registry(("KERNEL", 102))
+    slot = reg.slots[("KERNEL", 102)]
+    entry = reg.entries[("KERNEL", 102)]
+
+    inputs = dict(ax=0x3000, bx=0xFFFF, cx=0xFFFF)      # AH=30h: DOS GetVersion
+    cpu = _run_thunk_call(reg, _thunk_call_bytes(slot), Memory(), **inputs)
+    assert cpu.s.sp & 0xFFFF == SP0                     # no args, callee pops 0
+
+    carrier = _FakeCpu(Memory(), ss=SS, **inputs)
+    carrier.s.sp = SP0
+    delta = reg.invoke_regs(carrier, entry, "KERNEL.102", ())
+
+    assert delta == {"ax": 0x0005, "bx": 0x0000, "cx": 0x0000}
+    for name, val in delta.items():
+        assert getattr(cpu.s, name) & 0xFFFF == val, name
+    assert entry_argbytes(entry) == 0                   # a contract now exists
+    assert not plat_farcall_contracts(THUNK_SEG, {"KERNEL.102": 0}, reg)[1]
+
+
+def test_a_regs_api_reports_the_carry_flag_as_part_of_its_result() -> None:
+    """INT 21h signals failure by setting CARRY, so for a `regs` API the flags
+    register is a RESULT register.  A delta that dropped it would report a
+    failed DOS call as a successful one on the CPU-free path — where there is
+    no shared CPU for the handler's write to land on implicitly."""
+    reg = ApiRegistry()
+
+    @reg.register("KERNEL", 9998, name="#9998", ret="regs")
+    def _fails(ctx) -> None:
+        ctx.cpu.s.ax = 0x0002                       # ERROR_FILE_NOT_FOUND
+        ctx.cpu.s.flags |= 0x0001                   # CF: the call failed
+
+    carrier = _FakeCpu(Memory(), ax=0, flags=0)
+    delta = reg.invoke_regs(carrier, reg.entries[("KERNEL", 9998)],
+                            "KERNEL.9998", ())
+    assert delta == {"ax": 0x0002, "flags": 0x0001}
+
+
+# --------------------------------------------------------- KERNEL.91 -------
+
+class _FakeExeHeader:
+    stack_size = 0x2000
+
+
+class _FakeExe:
+    header = _FakeExeHeader()
+
+
+class _FakeMachine:
+    exe = _FakeExe()
+
+
+class _FakeSystem:
+    """The synthetic slice of Win16System that InitTask reads.  Hand-written:
+    no boot image, no EXE, no game."""
+    h_instance = 0x0800
+    h_prev_instance = 0
+    cmd_show = 10
+    booted = False
+    machine = _FakeMachine()
+
+    def stack_bounds(self):
+        return 0x1000, 0x0200
+
+    def ensure_psp(self):
+        return 0x0700
+
+
+def test_inittask_values_form_returns_the_whole_register_bundle() -> None:
+    """InitTask's result does not fit (AX, DX): it is AX/BX/CX/DX/SI/DI/ES at
+    once.  That is why it was raw, and why it cost every far call to it a
+    contract.  `ret="regs"` is the widening — and the interpreter path must
+    still land on exactly the same registers."""
+    reg, _ = _installed_registry(("KERNEL", 91))
+    reg.services["system"] = _FakeSystem()
+    slot = reg.slots[("KERNEL", 91)]
+    entry = reg.entries[("KERNEL", 91)]
+
+    cpu = _run_thunk_call(reg, _thunk_call_bytes(slot), Memory(), ds=0x0800)
+    assert cpu.s.sp & 0xFFFF == SP0                 # callee popped 0
+
+    reg.services["system"] = _FakeSystem()          # a fresh, unbooted system
+    carrier = _FakeCpu(Memory(), ss=SS, ds=0x0800)
+    carrier.s.sp = SP0
+    delta = reg.invoke_regs(carrier, entry, "KERNEL.91", ())
+
+    assert delta == {"ax": 1, "bx": 0x81, "cx": 0x2000, "dx": 10,
+                     "di": 0x0800, "es": 0x0700}
+    for name, val in delta.items():
+        assert getattr(cpu.s, name) & 0xFFFF == val, name
+    assert entry_argbytes(entry) == 0
+
+
+def test_the_regs_and_values_primitives_refuse_each_others_apis() -> None:
+    """The seam stated as a rule.  invoke_values' (ax, dx) contract is
+    UNCHANGED for every API that had one — a `regs` API cannot sneak through it
+    and get its wider result silently truncated, and a value-returning API
+    cannot be asked for a delta."""
+    reg = build_registry(winflags=WINFLAGS_NO_FPU)
+    carrier = _FakeCpu(Memory())
+
+    with pytest.raises(ValueError, match="invoke_regs instead"):
+        reg.invoke_values(carrier, reg.entries[("KERNEL", 91)], "KERNEL.91", ())
+    with pytest.raises(ValueError, match="call invoke_values"):
+        reg.invoke_regs(carrier, reg.entries[("USER", 1)], "USER.1", ())
+
+
+def test_invoke_values_still_returns_ax_dx_for_an_ordinary_api() -> None:
+    """The regression fence on the primitive the CPU path's `_invoke` is a thin
+    shim over.  A plain word API and a plain long API must return exactly the
+    2-tuple they always did — this is what keeps the byte-exact production gate
+    untouched by everything above."""
+    reg = build_registry(winflags=WINFLAGS_NO_FPU)
+    carrier = _FakeCpu(Memory())
+
+    word = reg.invoke_values(carrier, reg.entries[("KERNEL", 52)],
+                             "KERNEL.52", (0x12345678,))       # FreeProcInstance
+    assert word == (1, None)
+
+    long_ = reg.invoke_values(carrier, reg.entries[("KERNEL", 3)],
+                              "KERNEL.3", ())                  # GetVersion
+    assert isinstance(long_, tuple) and len(long_) == 2
+    assert all(isinstance(v, int) for v in long_)
+
+
+def test_win87em_is_the_one_api_deliberately_left_raw() -> None:
+    """__fpMath is the x87 emulator entry.  It is NOT given a values form here:
+    win16/fpu.py is unbuilt by design (grown against a real FP frontier, not
+    speculatively), so inventing a contract for its dispatch-on-BX protocol
+    would be guessing.  It keeps refusing, and that refusal is the honest
+    frontier item — pinned here so it stays a decision rather than an
+    oversight."""
+    reg = build_registry(winflags=WINFLAGS_NO_FPU)
+    entry = reg.entries[("WIN87EM", 1)]
+    assert entry.raw is True
+    assert entry_argbytes(entry) is None
+
+    _contracts, skipped = plat_farcall_contracts(THUNK_SEG, {"WIN87EM.1": 0},
+                                                 reg)
+    assert [(s.key, s.reason) for s in skipped] == [("WIN87EM.1", "raw-api")]
