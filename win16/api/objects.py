@@ -159,7 +159,16 @@ class Surface:
     """Top-down RGB pixel buffer, 3 bytes per pixel.
 
     `version` increments on every mutation — hosts use it to redraw only
-    when pixels actually changed (flicker-free presentation)."""
+    when pixels actually changed (flicker-free presentation).
+
+    ORDERING CONTRACT: `touch()` PUBLISHES a frame, so a drawing primitive
+    calls it once its pixels are final, never before.  Hosts read surfaces
+    concurrently with the code that draws them (a CPU worker thread draws, a
+    GUI thread composites), and a primitive here is a Python loop the reader
+    can interleave with: a bump issued first would let the reader copy a
+    half-drawn buffer, observe an UNCHANGED version around the copy, and — with
+    no later bump — keep displaying that torn frame.  Enforced by
+    tests/test_surface_version_order.py."""
     w: int
     h: int
     pixels: bytearray = field(default_factory=bytearray)
@@ -266,7 +275,6 @@ def blit(dst: Surface, dx: int, dy: int, src: Surface, sx: int, sy: int,
     h = min(h, dst.h - dy, src.h - sy)
     if w <= 0 or h <= 0:
         return
-    dst.touch()
     # A window/bitmap scrolled by BitBlt-ing itself shifted (src is dst, regions
     # overlap) must not read a row it has already overwritten — the classic
     # memmove-vs-memcpy trap.  Read every row from a pristine snapshot of the
@@ -293,6 +301,12 @@ def blit(dst: Surface, dx: int, dy: int, src: Surface, sx: int, sy: int,
             dst.pixels[doff:doff + n] = bytes(b ^ 0xFF for b in chunk)
         else:
             raise NotImplementedError(f"BitBlt rop {rop:#010x}")
+    # Publish LAST: `version` announces "these pixels are final".  A host reads
+    # surfaces concurrently with the code that draws them, so a bump issued
+    # before this row loop would let it latch a half-copied frame and, with no
+    # further bump to follow, keep showing it (see tests/
+    # test_surface_version_order.py).
+    dst.touch()
 
 
 @dataclass

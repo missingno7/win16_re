@@ -37,11 +37,11 @@ def _fill_rect(dst: Surface, x: int, y: int, w: int, h: int,
     x1, y1 = min(x + w, dst.w), min(y + h, dst.h)
     if x0 >= x1 or y0 >= y1:
         return
-    dst.touch()
     row = bytes(rgb) * (x1 - x0)
     for yy in range(y0, y1):
         off = (yy * dst.w + x0) * 3
         dst.pixels[off:off + len(row)] = row
+    dst.touch()             # publish LAST (see tests/test_surface_version_order)
 
 
 def _read_points(ctx, ptr: int, n: int) -> list[tuple[int, int]]:
@@ -85,7 +85,6 @@ def _fill_polygon(dst: Surface, pts: list[tuple[int, int]],
     ys = [p[1] for p in pts]
     y_lo, y_hi = max(0, min(ys)), min(dst.h - 1, max(ys))
     col = bytes(rgb)
-    dst.touch()
     for y in range(y_lo, y_hi + 1):
         yc = y + 0.5
         xs = []
@@ -101,6 +100,7 @@ def _fill_polygon(dst: Surface, pts: list[tuple[int, int]],
             if xa <= xb:
                 o = (y * dst.w + xa) * 3
                 dst.pixels[o:o + (xb - xa + 1) * 3] = col * (xb - xa + 1)
+    dst.touch()             # publish LAST (see tests/test_surface_version_order)
 
 
 _STOCK_BRUSH_RGB = {
@@ -626,7 +626,6 @@ def install(api: ApiRegistry) -> None:
         # Fixed 8x13 cell (the metrics contract); the 8x8 glyph sits 2 rows
         # below the cell top.  Presentation-layer approximation of the real
         # Windows raster fonts.
-        dst.touch()
         for i, ch in enumerate(text):
             cx = x + i * 8
             if dc.bk_mode == 2:                          # OPAQUE
@@ -639,6 +638,7 @@ def install(api: ApiRegistry) -> None:
                         if 0 <= px < dst.w and 0 <= py < dst.h:
                             o = (py * dst.w + px) * 3
                             dst.pixels[o:o + 3] = bytes(fg)
+        dst.touch()         # publish LAST (see tests/test_surface_version_order)
         return 1
 
     def _font_metrics(dc):
@@ -700,7 +700,6 @@ def install(api: ApiRegistry) -> None:
         # Nearest-neighbour sampling (COLORONCOLOR semantics).  The GDI
         # default mode is BLACKONWHITE (AND-combining dropped pixels) — if
         # radar pixel evidence ever disagrees, honour dc.stretch_mode here.
-        dst.touch()
         for row in range(dh):
             syy = sy + row * sh // dh
             if not (0 <= dy + row < dst.h and 0 <= syy < src.h):
@@ -712,6 +711,7 @@ def install(api: ApiRegistry) -> None:
                     soff = (syy * src.w + sxx) * 3
                     dst.pixels[doff + col * 3:doff + col * 3 + 3] = \
                         src.pixels[soff:soff + 3]
+        dst.touch()         # publish LAST (see tests/test_surface_version_order)
         return 1
 
     @api.register("GDI", 80, args="word s_word")        # GetDeviceCaps(hdc, index)
