@@ -229,26 +229,39 @@ class ApiRegistry:
         raise Win16ApiGap(
             f"{label} called from {ret_cs:04X}:{ret_ip:04X} — not implemented")
 
-    def _invoke(self, cpu, entry: ApiEntry, label: str) -> None:
-        """Read pascal args, run the handler, and far-return with its result —
-        shared by static-ordinal and by-name (GetProcAddress) dispatch."""
+    def invoke_values(self, carrier, entry: ApiEntry, label: str,
+                      args: tuple[int, ...]) -> tuple[int | None, int | None]:
+        """The CPU-FREE invocation path: **explicit args in, explicit result
+        out**, as ``(ax, dx)`` (either may be ``None`` for a ``void`` API).
+
+        Reads nothing off an emulated stack and performs no return mechanics,
+        so a caller that has no CPU — the CPUless standalone runtime, where a
+        recovered body reaches Win16 through ``plat.farcall`` — can service an
+        API by handing over the argument VALUES.  ``carrier`` is whatever
+        object the handlers see as ``ctx.cpu``: under the VM the real CPU8086,
+        under the CPUless runtime a memory + register carrier that executes
+        nothing (:class:`win16.cpuless.CpuFreeCarrier`).
+
+        ``_invoke`` below is the thin CPU shim over this: it decodes the
+        pascal args off ``ss:sp`` and applies ``ret_far`` to the result, so
+        both paths run the SAME handler with the same contract."""
         if entry.raw:
-            self.call_log.append(label)
-            entry.handler(CallContext(cpu, self, entry.module, entry.ordinal, entry.name))
-            return
-        args = read_pascal_args(cpu, entry.arg_sizes or [])
-        ctx = CallContext(cpu, self, entry.module, entry.ordinal, entry.name, args)
+            raise ValueError(
+                f"{label}: a raw (-register) API owns its own register/stack "
+                f"return contract and has no args-in/result-out form")
+        ctx = CallContext(carrier, self, entry.module, entry.ordinal,
+                          entry.name, args)
         self.call_log.append(f"{label}{args!r}")
         # Publish this API frame for call_far's resumable-callback record
         # (win16/callback.py): a callback dispatched by this handler needs the
         # API's name + argbytes to complete the call if a snapshot parks inside
         # it.  Saved/restored so nested dispatches stack.
-        prev_api = getattr(cpu, "win16_current_api", ("?", 0))
-        cpu.win16_current_api = (entry.name, sum(entry.arg_sizes or []))
+        prev_api = getattr(carrier, "win16_current_api", ("?", 0))
+        carrier.win16_current_api = (entry.name, sum(entry.arg_sizes or []))
         try:
             result = entry.handler(ctx)
         finally:
-            cpu.win16_current_api = prev_api
+            carrier.win16_current_api = prev_api
         ax = dx = None
         if entry.ret == "void":
             if result is not None:
@@ -259,6 +272,18 @@ class ApiRegistry:
             ax = result & 0xFFFF
         else:  # long
             ax, dx = result & 0xFFFF, (result >> 16) & 0xFFFF
+        return ax, dx
+
+    def _invoke(self, cpu, entry: ApiEntry, label: str) -> None:
+        """Read pascal args, run the handler, and far-return with its result —
+        shared by static-ordinal and by-name (GetProcAddress) dispatch.  The
+        CPU shim over :meth:`invoke_values`."""
+        if entry.raw:
+            self.call_log.append(label)
+            entry.handler(CallContext(cpu, self, entry.module, entry.ordinal, entry.name))
+            return
+        args = read_pascal_args(cpu, entry.arg_sizes or [])
+        ax, dx = self.invoke_values(cpu, entry, label, args)
         ret_far(cpu, sum(entry.arg_sizes or []), ax=ax, dx=dx)
 
     def _make_dispatch(self, module: str, ordinal: int):

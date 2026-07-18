@@ -284,7 +284,7 @@ def _decode_dir_entry(text: str) -> tuple[str, bool]:
 def _call_proc(ctx: CallContext, dlg: Dialog, msg: int, wparam: int,
                lparam: int) -> int:
     from win16.callback import call_far
-    from win16.loader import THUNK_SEG
+    from win16.machine import THUNK_SEG
     sys_ = _sys(ctx)
     seg, off = dlg.proc
     # Same callback policy as call_wndproc: the SYSTEM's budget (None under

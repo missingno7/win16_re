@@ -155,7 +155,10 @@ def restore_machine_state(machine, snap: Path, meta: dict) -> None:
     Performs NO digest check: each caller owns its own integrity gate
     (load_snapshot the game-observable digest; the boot loader the
     manifest's post-poison memory hash)."""
-    from dos_re.cpu import CPUState
+    # dos_re.x86, not dos_re.cpu: CPUState is a register VALUE record living
+    # in the ISA leaf, so this restore path stays importable under the CPUless
+    # import wall (the CPU-free boot in win16.cpuless calls it too).
+    from dos_re.x86 import CPUState
     mem_image = (snap / "memory.bin").read_bytes()
     if len(mem_image) != len(machine.mem.data):
         raise SnapshotError("memory image size mismatch")
@@ -170,7 +173,7 @@ def restore_machine_state(machine, snap: Path, meta: dict) -> None:
     # Pre-frame snapshots (no key) get an empty list — their parked callback
     # returning raises loudly instead of executing thunk memory as code.
     from win16.callback import _install_return_hook
-    from win16.loader import THUNK_SEG
+    from win16.machine import THUNK_SEG
     machine.cpu.win16_orphan_frames = list(meta.get("callback_frames", []))
     _install_return_hook(machine.cpu, THUNK_SEG)
 

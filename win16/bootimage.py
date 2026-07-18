@@ -52,11 +52,10 @@ from pathlib import Path
 from dos_re.bootimage import coalesce, instruction_ranges, sha256_file
 from dos_re.independence import VMlessViolation
 
-from .loader import THUNK_SEG, Win16Machine
+from .machine import (          # CPU-free: never the loader
+    BOOT_MANIFEST_SCHEMA, THUNK_SEG, Win16Machine)
 from .ne import NEExecutable
 from .vmsnap import restore_machine_state, save_snapshot
-
-BOOT_MANIFEST_SCHEMA = "win16_vmless_boot_manifest/v1"
 
 
 def strip_program(exe: NEExecutable) -> NEExecutable:

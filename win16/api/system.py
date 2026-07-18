@@ -181,7 +181,7 @@ class Win16System:
         from collections import deque
         from .objects import HandleTable
         from win16.hugeheap import HugeHeap
-        from win16.loader import GLOBAL_LIN_START, WIN16_MEM_SIZE
+        from win16.machine import GLOBAL_LIN_START, WIN16_MEM_SIZE
         self.machine.api.services["system"] = self
         if not self.module_dos_path:
             self.module_dos_path = "C:\\" + self.machine.exe.path.name.upper()
@@ -208,7 +208,7 @@ class Win16System:
         a click) — a fixed cap would kill that live wait as a "runaway".
         Headless/replay keeps the cap and catches genuine hangs."""
         from win16.callback import call_far
-        from win16.loader import THUNK_SEG
+        from win16.machine import THUNK_SEG
         seg, off = window.wndclass.wndproc
         ax, dx = call_far(self.machine.cpu, THUNK_SEG, seg, off,
                           [window.handle, msg,

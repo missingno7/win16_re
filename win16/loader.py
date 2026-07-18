@@ -13,81 +13,26 @@ serviced by the machine's interrupt handler.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from dos_re.cpu import CPU8086, CPUState
 from dos_re.memory import Memory
 
 from .api.core import ApiRegistry, Win16ApiGap
+from .machine import (          # the CPU-carrier-free record + memory map
+    GLOBAL_LIN_START, IMAGE_BASE_PARA, LoaderError, THUNK_SEG,
+    WIN16_MEM_SIZE, Win16Machine,
+)
 from .ne import (
     ADDR_FARADDR32, ADDR_LOBYTE, ADDR_OFFSET16, ADDR_SEGMENT16,
     NEExecutable, Segment,
     TARGET_IMPORTNAME, TARGET_IMPORTORDINAL, TARGET_INTERNALREF, TARGET_OSFIXUP,
 )
 
-THUNK_SEG = 0x0060          # import thunk slots live here (hooked CS:IP values)
-IMAGE_BASE_PARA = 0x0100    # first NE segment maps at this paragraph
-
-# Win16 uses selector translation to lift the 1MB real-mode ceiling: the loaded
-# program's own segments stay in low real-mode memory (< 1MB); GlobalAlloc
-# blocks live above it as selectors mapping into the linear space
-# [GLOBAL_LIN_START, WIN16_MEM_SIZE).  The gap below GLOBAL_LIN_START avoids the
-# dos_re EGA shadow region at 0x100000 (unused by Win16 but reserved).
-WIN16_MEM_SIZE = 0x400000       # 4 MB
-GLOBAL_LIN_START = 0x140000     # global heap starts here (after EGA shadow)
-
-
-class LoaderError(RuntimeError):
-    pass
-
-
-@dataclass
-class Win16Machine:
-    exe: NEExecutable
-    cpu: CPU8086
-    mem: Memory
-    api: ApiRegistry
-    seg_bases: list[int]                    # 1-based NE segment -> paragraph base
-    free_para: int                          # bump allocator frontier (paragraphs)
-    osfixups: list[tuple[int, int, int]] = field(default_factory=list)  # (seg, off, kind)
-
-    def seg_base(self, ne_segment: int) -> int:
-        return self.seg_bases[ne_segment]
-
-    def alloc_paragraphs(self, paras: int) -> int:
-        """Allocate a paragraph-aligned block; returns its segment value."""
-        base = self.free_para
-        if (base + paras) << 4 > self.mem.size:
-            raise LoaderError("out of VM memory")
-        self.free_para += paras
-        return base
-
-    def interrupt(self, cpu: CPU8086, num: int) -> None:
-        if num == 0x21:
-            # Windows services INT 21h for apps — the same DOS surface as
-            # KERNEL's DOS3Call (SimAnt's C runtime startup calls DOS raw).
-            from .api.core import CallContext
-            from .api.kernel import DOS_SERVICES
-            ah = (cpu.s.ax >> 8) & 0xFF
-            handler = DOS_SERVICES.get(ah)
-            if handler is None:
-                raise Win16ApiGap(
-                    f"INT 21h AH={ah:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X} — "
-                    f"DOS service not implemented")
-            handler(CallContext(cpu, self.api, "DOS", num,
-                                f"int21_{ah:02X}", args=()))
-            return
-        if num == 0x2F:
-            # DOS multiplex.  SimAnt probes AH=45h subfunctions for a companion
-            # TSR/driver that is not present in this VM.  With no handler
-            # installed, the default IVT handler is an IRET that leaves the
-            # registers as-is — an honest "no such service", which lets the game
-            # take its no-TSR fallback path.  (No faking: the service genuinely
-            # is not there.)  CF is left clear.
-            return
-        raise Win16ApiGap(
-            f"INT {num:02X}h at {cpu.s.cs:04X}:{cpu.s.ip:04X} — no Win16 service installed")
+__all__ = [
+    "GLOBAL_LIN_START", "IMAGE_BASE_PARA", "LoaderError", "THUNK_SEG",
+    "WIN16_MEM_SIZE", "Win16Machine", "load_ne",
+]
 
 
 def load_ne(exe: NEExecutable, api: ApiRegistry, *,

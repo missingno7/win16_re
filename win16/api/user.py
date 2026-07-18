@@ -1057,7 +1057,7 @@ def install(api: ApiRegistry) -> None:
         # sim tick depends on it (its wndproc hangs on WM_TIMER).
         if msg == 0x0113 and lparam:
             from win16.callback import call_far
-            from win16.loader import THUNK_SEG
+            from win16.machine import THUNK_SEG
             dwtime = sys.tick_count()
             seg, off = (lparam >> 16) & 0xFFFF, lparam & 0xFFFF
             ax, dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
@@ -1266,7 +1266,7 @@ def install(api: ApiRegistry) -> None:
         sys = _sys(ctx)
         hwnd, proc, lparam = ctx.args
         from win16.callback import call_far
-        from win16.loader import THUNK_SEG
+        from win16.machine import THUNK_SEG
         seg, off = (proc >> 16) & 0xFFFF, proc & 0xFFFF
         for child in _z_children(sys, hwnd):
             ax, _dx = call_far(ctx.cpu, THUNK_SEG, seg, off,
