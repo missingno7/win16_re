@@ -1469,6 +1469,18 @@ def install(api: ApiRegistry) -> None:
             (sys.clock_ms, caption, text, mtype))
         from win16.msgbox import default_result
         host = ctx.registry.services.get("messagebox_host")
+        driver = getattr(sys, "demo_driver", None)
+        if driver is not None:
+            # Replay: a message box is a user DECISION that steers control flow
+            # ("save the current file?" -> No goes to Open, Yes goes to SaveAs
+            # first), so the recorded button wins over the default.  A demo
+            # recorded before boxes were captured has no answer here and
+            # returns None, which means "decide it as if there were no demo" —
+            # so those replay exactly as they always did.
+            recorded = driver.next_messagebox_result(caption)
+            if recorded is not None:
+                return recorded & 0xFFFF
+            return default_result(mtype)
         if host is None:
             # Headless: auto-dismiss on the DEFAULT button (IDOK / IDYES / ...)
             # so the game takes the affirmative path a bare "OK" stub used to
@@ -1482,7 +1494,12 @@ def install(api: ApiRegistry) -> None:
         while not box.done.is_set():
             if not sys.pump_modal(paint=True):
                 box.done.wait(0.01)
-        return box.result & 0xFFFF
+        result = box.result & 0xFFFF
+        recorder = ctx.registry.services.get("demo_recorder")
+        if recorder is not None:
+            recorder.messagebox_result(
+                caption, result, sys.machine.cpu.instruction_count)
+        return result
 
     @api.register("USER", 171, args="word str word long")
     def WinHelp(ctx: CallContext) -> int:                # (hwnd, file, cmd, data)

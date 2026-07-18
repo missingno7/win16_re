@@ -187,3 +187,51 @@ def test_pre_v4_demo_is_rejected(tmp_path):
         '{"t": "m", "v": [1, 15, 0, 0, 5, 0]}\n', encoding="ascii")
     with pytest.raises(ValueError, match="pre-v4"):
         DemoDriver(path)
+
+
+# --- message-box results: a user DECISION that steers control flow ---------
+
+def test_messagebox_results_replay_in_order(tmp_path):
+    """The recorded button, not the default one.  A "save the current file?"
+    answered No goes on to Open; answered Yes it saves first — so replaying the
+    default silently takes the other branch and diverges somewhere later."""
+    path = tmp_path / "box.jsonl"
+    rec = DemoRecorder(path, "GAME.EXE")
+    rec.messagebox_result("SimAnt Load", 7, instr=10)      # IDNO
+    rec.messagebox_result("SimAnt Quit", 6, instr=20)      # IDYES
+    rec.close()
+    d = DemoDriver(path)
+    assert d.next_messagebox_result("SimAnt Load") == 7
+    assert d.next_messagebox_result("SimAnt Quit") == 6
+
+
+def test_a_demo_with_no_recorded_box_answers_none(tmp_path):
+    """The compatibility contract every demo recorded before boxes were
+    captured depends on — including the pinned byte-exact gate demo.  ``None``
+    means "decide it as if there were no demo", so those replay unchanged
+    rather than failing on a record that was never written."""
+    d = DemoDriver(_record(tmp_path))
+    assert d.next_messagebox_result("SimAnt Load") is None
+
+
+def test_messagebox_divergence_on_wrong_caption(tmp_path):
+    path = tmp_path / "box.jsonl"
+    rec = DemoRecorder(path, "GAME.EXE")
+    rec.messagebox_result("SimAnt Load", 7, instr=10)
+    rec.close()
+    d = DemoDriver(path)
+    with pytest.raises(DemoDivergence):
+        d.next_messagebox_result("Some Other Box")
+
+
+def test_exhausted_box_stream_falls_back_rather_than_raising(tmp_path):
+    """Running out of recorded answers is NOT divergence: a demo may legitimately
+    stop before a box the game shows later (an unexpected error box, say), and
+    the default is the honest answer there."""
+    path = tmp_path / "box.jsonl"
+    rec = DemoRecorder(path, "GAME.EXE")
+    rec.messagebox_result("SimAnt Load", 7, instr=10)
+    rec.close()
+    d = DemoDriver(path)
+    assert d.next_messagebox_result("SimAnt Load") == 7
+    assert d.next_messagebox_result("SimAnt Load") is None

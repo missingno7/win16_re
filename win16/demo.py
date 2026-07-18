@@ -108,6 +108,19 @@ class DemoRecorder:
         self._fh.flush()
         self.records += 1
 
+    def messagebox_result(self, caption: str, result: int, instr: int) -> None:
+        """Which BUTTON the user pressed on a modal message box.
+
+        A message box is a user decision that steers control flow — "save the
+        current file?" answered No goes on to Open, answered Yes goes to SaveAs
+        first — so it belongs in the demo for the same reason a dialog event
+        does.  Without it a replay silently takes the DEFAULT button's branch
+        and diverges somewhere later, at a point that looks unrelated."""
+        self._fh.write(json.dumps(
+            {"t": "m", "i": instr, "cap": caption, "r": int(result)}) + "\n")
+        self._fh.flush()
+        self.records += 1
+
     def quit(self, instr: int) -> None:
         self._fh.write(json.dumps({"t": "quit", "i": instr}) + "\n")
         self._fh.flush()
@@ -145,6 +158,8 @@ class DemoDriver:
         self._ei = 0                                    # next event index
         self._dialogs = [r for r in self.records if r["t"] == "d"]
         self._di = 0                                    # next dialog index
+        self._boxes = [r for r in self.records if r["t"] == "m"]
+        self._mi = 0                                    # next message-box index
 
         # Clock samples: every (instr, tick) we can reconstruct from — the "c"
         # samples plus each arrival's own tick (v[4]).  Sorted, deduped by instr.
@@ -268,3 +283,21 @@ class DemoDriver:
                 f"{rec['dlg']!r} next")
         self._di += 1
         return tuple(rec["v"])
+
+    def next_messagebox_result(self, caption: str):
+        """The recorded button for this message box, or ``None`` if the demo
+        carries no answer for it.
+
+        ``None`` means "decide it the way you would with no demo" — the
+        default-button result.  That is what every demo recorded before message
+        boxes were captured relies on, so those keep replaying bit-identically
+        instead of failing on a record that was never written."""
+        if self._mi >= len(self._boxes):
+            return None
+        rec = self._boxes[self._mi]
+        if rec["cap"] != caption:
+            raise DemoDivergence(
+                f"message box {caption!r} wanted a result but the demo has "
+                f"{rec['cap']!r} next")
+        self._mi += 1
+        return int(rec["r"])
