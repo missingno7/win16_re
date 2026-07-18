@@ -102,6 +102,15 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
     INTERACTIVE, user-pausable callback (SimAnt's sim-tick TimerProc legitimately
     busy-waits on the real clock and on input, so a fixed cap kills a live wait).
 
+    THE CAP IS A NO-PROGRESS DETECTOR, NOT A LENGTH LIMIT.  A callback may
+    legitimately RESIDE for an unbounded number of steps — a modal loop that
+    runs its own message pump keeps servicing input without ever far-returning,
+    and a recorded session proves it did return eventually.  So `yield_check`
+    may report progress by returning a truthy value, and the step budget is
+    RESET each time it does.  What remains capped is the thing actually worth
+    catching: `max_steps` with no external progress at all.  A host whose
+    yield_check reports nothing keeps the old fixed-budget behaviour exactly.
+
     A CPU-FREE host installs `cpu.win16_callback_dispatch` (see
     `win16.cpuless.install_callback_dispatch`) and the call routes into the
     recovered corpus instead of an interpreter — same args, same (AX, DX).  A
@@ -152,15 +161,15 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
                 # entry, so just refresh the wall clock the wait polls and
                 # keep stepping — the callback still far-returns through the
                 # sentinel exactly as before.
-                if yield_check is not None:
-                    yield_check()
+                if yield_check is not None and yield_check():
+                    steps = 0                   # external progress: rearm
                 continue
             if cpu.halted:
                 raise HaltExecution()
-            if yield_check is not None:
-                yield_check()
+            if yield_check is not None and yield_check():
+                steps = 0                       # external progress: rearm
         raise CallbackOverrun(
-            f"callback {seg:04X}:{off:04X} did not return within {max_steps} "
+            f"callback {seg:04X}:{off:04X} made no progress for {max_steps} "
             f"steps (at {s.cs:04X}:{s.ip:04X})")
     except _CallbackReturn:
         frames.pop()            # clean far-return to the sentinel — pop our frame

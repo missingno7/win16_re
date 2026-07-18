@@ -214,19 +214,34 @@ class DemoDriver:
             self.sys.msg_queue.append(m)
             self.sys._note_input(m)                     # polled state (keys/mouse)
 
-    def inject_due(self) -> None:
+    def inject_due(self) -> int:
         """Inject every arrival whose recorded instruction count has been
-        reached.  Called at pump touchpoints and inside long callbacks."""
+        reached.  Called at pump touchpoints and inside long callbacks.
+        Returns how many arrivals were injected."""
         cur = self._instr()
+        n = 0
         while self._ei < len(self._events) and self._events[self._ei]["i"] <= cur:
             self._apply_event(self._events[self._ei])
             self._ei += 1
+            n += 1
+        return n
 
-    def _on_yield(self) -> None:
+    def _on_yield(self) -> bool:
+        """Yield hook for `win16.callback.call_far`.  Returns True when the
+        RECORDED TIMELINE ADVANCED — an arrival was injected — which is this
+        replay's evidence that a long-running callback is still making
+        progress, not hung.  A modal loop with its own pump (a dialog the
+        player sat in) never far-returns while the player interacts with it,
+        so a fixed per-callback step budget would abort a faithful replay;
+        the recording itself proves the callback returned eventually.  With
+        no arrival for a whole budget the cap still fires, which is the case
+        actually worth reporting."""
+        progress = False
         if self._prev_yield is not None:
-            self._prev_yield()
+            progress = bool(self._prev_yield())
         if self.sys is not None:
-            self.inject_due()
+            progress = bool(self.inject_due()) or progress
+        return progress
 
     def _force_next(self):
         """A blocking GetMessage with nothing queued: deliver the next scheduled

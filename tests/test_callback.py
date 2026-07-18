@@ -159,3 +159,67 @@ def test_frame_preserved_when_vm_stops_mid_callback():
     with pytest.raises(_Stop):
         call_far(cpu, 0x60, 0x0100, 0x2440, [], max_steps=None)
     assert len(cpu.win16_callback_frames) == 1   # frame kept for the crash snapshot
+
+
+def test_yield_check_progress_rearms_the_budget():
+    """The cap is a NO-PROGRESS detector, not a length limit.  A modal loop
+    that runs its own message pump resides for an unbounded number of steps
+    while still servicing input; a host whose `yield_check` reports progress
+    (returns truthy) must not have such a callback aborted.  Found on a
+    recorded SimAnt session: a dialog the player sat in for 20M+ instructions,
+    steadily consuming recorded mouse input, tripped the fixed budget 11
+    instructions before the next recorded arrival."""
+    from win16.callback import call_far
+    cpu = _FakeCPU(return_after=50_000)          # far beyond the 10k budget
+
+    def yield_check():
+        return True                              # progress every chunk
+
+    ax, dx = call_far(cpu, 0x60, 0x0100, 0x2440, [], max_steps=10_000,
+                      yield_check=yield_check)
+    assert (ax, dx) == (0x1234, 0x5678)
+
+
+def test_yield_check_without_progress_still_overruns():
+    """The detector must keep firing for the case worth catching: a callback
+    burning the whole budget with no external progress at all."""
+    from win16.callback import CallbackOverrun, call_far
+    cpu = _FakeCPU(return_after=50_000)
+    calls = []
+
+    def yield_check():
+        calls.append(1)
+        return False                             # no progress, ever
+
+    with pytest.raises(CallbackOverrun, match="made no progress"):
+        call_far(cpu, 0x60, 0x0100, 0x2440, [], max_steps=10_000,
+                 yield_check=yield_check)
+    assert calls                                 # the hook really ran
+
+
+def test_demo_driver_yield_reports_arrival_progress(tmp_path):
+    """DemoDriver._on_yield is the replay's progress signal: truthy exactly
+    when the recorded timeline advanced (an arrival was injected)."""
+    import json
+    from win16.demo import DemoDriver
+
+    path = tmp_path / "d.jsonl"
+    recs = [{"kind": "win16-demo", "version": 4, "exe": "X.EXE",
+             "snapshot": None, "instruction": 0},
+            {"t": "i", "i": 100, "v": [1, 0x0200, 0, 0, 5, 0]},
+            {"t": "i", "i": 900, "v": [1, 0x0200, 0, 0, 9, 0]}]
+    path.write_text("\n".join(json.dumps(r) for r in recs), encoding="ascii")
+
+    driver = DemoDriver(path)
+    noted = []
+    cpu = SimpleNamespace(instruction_count=0)
+    driver.sys = SimpleNamespace(machine=SimpleNamespace(cpu=cpu),
+                                 msg_queue=[], _note_input=noted.append,
+                                 quit_posted=None)
+
+    assert driver._on_yield() is False           # nothing due yet
+    cpu.instruction_count = 500
+    assert driver._on_yield() is True            # first arrival injected
+    assert driver._on_yield() is False           # nothing new due
+    cpu.instruction_count = 1000
+    assert driver._on_yield() is True            # second arrival injected
