@@ -97,7 +97,8 @@ def test_finish_emits_static_import_compatible_identities():
         FunctionIdentity(IMAGE, "win16-para", "0200:0020").key]
     assert all(v.incomplete for v in visits.records())
 
-    ids = {(t.source_id, t.target_id, t.kind) for t in evidence.transfers}
+    ids = {(t.source_id, t.target_id, t.kind) for t in evidence.transfers
+           if t.kind != "callback"}            # the callback one is above
     site = ExecutionPointIdentity(IMAGE, "win16-para", "0100:0055").key
     assert ids == {
         (site, FunctionIdentity(IMAGE, "win16-para", "0200:0020").key,
