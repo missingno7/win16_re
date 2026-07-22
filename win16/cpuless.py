@@ -473,13 +473,27 @@ def load_recovered(package: str, key: str):
     return getattr(mod, name)
 
 
-def run_deep(fn, *args, stack_bytes: int = 512 * 1024 * 1024,
-             recursion: int = 200_000, **kwargs):
+#: The dos_re 2.0 defaults (from the deleted ``lift.standalone``): a 64 MB
+#: thread stack + a raised recursion limit so a BOUNDED tail-dispatch loop
+#: completes instead of dying on Python's frame limit.  64 MB is a value
+#: ``threading.stack_size`` accepts across platforms (256 MB+ is rejected on
+#: Windows: "size not valid").
+DEEP_STACK_BYTES = 64 * 1024 * 1024
+DEEP_RECURSION = 300_000
+
+
+def run_deep(fn, *args, stack_bytes: int = DEEP_STACK_BYTES,
+             recursion: int = DEEP_RECURSION, **kwargs):
     """Run ``fn`` on a thread with a large stack + raised recursion limit so a
     BOUNDED tail-dispatch loop completes instead of dying on Python's frame
     limit.  Result and exception propagate unchanged.  (The big stack is the
     load-bearing half: raising the recursion limit alone lets CPython run past
-    what the C stack holds, crashing the process instead of raising.)"""
+    what the C stack holds, crashing the process instead of raising.)
+
+    ``threading.stack_size`` rejects some sizes per platform; if the requested
+    size is invalid we fall back to the platform default rather than crash —
+    a shallow chain still completes, and a deep one fails loud with a clear
+    RecursionError instead of an opaque "size not valid"."""
     import sys
     import threading
 
@@ -492,13 +506,17 @@ def run_deep(fn, *args, stack_bytes: int = 512 * 1024 * 1024,
         except BaseException as exc:            # noqa: BLE001 — propagated verbatim
             box["error"] = exc
 
-    prev = threading.stack_size(stack_bytes)
+    try:
+        prev = threading.stack_size(stack_bytes)
+    except (ValueError, RuntimeError):
+        prev = None                             # platform rejected the size
     try:
         t = threading.Thread(target=_target)
         t.start()
         t.join()
     finally:
-        threading.stack_size(prev)
+        if prev is not None:
+            threading.stack_size(prev)
     if "error" in box:
         raise box["error"]
     return box.get("value")

@@ -26,8 +26,21 @@ from dos_re.x86 import CPUState
 
 from win16.api.core import ApiRegistry, read_pascal_args
 from win16.cpuless import (CpuFreeCarrier, CpuFreeExecutionAttempt,
-                           Win16CpulessPlatform)
+                           Win16CpulessPlatform, run_deep)
 from win16.machine import THUNK_SEG
+
+
+def test_run_deep_completes_and_survives_an_invalid_stack_size():
+    """The big-stack tail-dispatch runner: it completes with the default
+    (64 MB — a size threading.stack_size accepts across platforms), and an
+    invalid requested size falls back to the platform default instead of the
+    opaque 'size not valid' crash (regression: the 3.0 seam bridge shipped a
+    512 MB default that Windows rejects, breaking play_cpuless --entry)."""
+    assert run_deep(lambda a, b: a + b, 2, 3) == 5
+    assert run_deep(lambda a, b: a + b, 2, 3,
+                    stack_bytes=512 * 1024 * 1024) == 5   # invalid on Windows
+    with pytest.raises(ValueError, match="boom"):
+        run_deep(lambda: (_ for _ in ()).throw(ValueError("boom")))
 
 SS, SP = 0x2000, 0x1000
 
