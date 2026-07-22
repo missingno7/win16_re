@@ -152,6 +152,62 @@ class Win16ReplayRecorder:
         return self._ordinal
 
 
+class ArtifactRecorder:
+    """Record the interactive tap stream into a ReplayArtifact directory.
+
+    Exposes the recorder tap surface the interactive driver + dialog/message
+    engines already call (``arrival``/``clock_sample``/``dialog_event``/
+    ``messagebox_result``/``quit``) so the recording call sites are unchanged,
+    and a ``close()`` that finalizes the artifact.  The base continuation +
+    execution profile come from the host (the machine state + composition at
+    record start); this stays game-agnostic.
+    """
+
+    def __init__(self, out_dir, *, timeline_id, profile, base_state,
+                 start_instruction: int = 0, metadata=None):
+        self.path = Path(out_dir)
+        self._recording = ReplayRecording(
+            out_dir, timeline_id=timeline_id, profile=profile,
+            base_state=base_state, metadata=metadata)
+        self._rec = Win16ReplayRecorder(
+            self._recording, start_instruction=start_instruction)
+        self._last_instr = int(start_instruction)
+        self.artifact = None
+
+    # -- tap surface (delegates + tracks the last instruction) -------------
+
+    def arrival(self, msg, instr: int) -> None:
+        self._rec.arrival(msg, instr)
+        self._last_instr = int(instr)
+
+    def clock_sample(self, instr: int, ms: int, **kw) -> None:
+        self._rec.clock_sample(instr, ms, **kw)
+        if self._rec.records:
+            self._last_instr = max(self._last_instr, int(instr))
+
+    def dialog_event(self, dlg_name: str, event, instr: int) -> None:
+        self._rec.dialog_event(dlg_name, event, instr)
+        self._last_instr = int(instr)
+
+    def messagebox_result(self, caption: str, result: int, instr: int) -> None:
+        self._rec.messagebox_result(caption, result, instr)
+        self._last_instr = int(instr)
+
+    def quit(self, instr: int) -> None:
+        self._rec.quit(instr)
+        self._last_instr = int(instr)
+
+    @property
+    def records(self) -> int:
+        return self._rec.records
+
+    def close(self) -> ReplayArtifact:
+        """Finalize the timeline and write the immutable artifact."""
+        end = self._rec.final_mark(self._last_instr)
+        self.artifact = self._recording.finish(end)
+        return self.artifact
+
+
 class Win16ReplayInputDriver:
     """Apply a Win16 replay timeline to a running machine.
 

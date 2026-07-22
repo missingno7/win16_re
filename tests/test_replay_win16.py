@@ -15,9 +15,9 @@ import pytest
 
 from dos_re.replay import (ContinuationState, ReplayArtifact,
                            ReplayExecutionIdentity, ReplayRecording)
-from win16.replay import (GUEST_INSTRUCTION_COORDINATE, ReplayDivergence,
-                          ReplayExhausted, Win16ReplayRecorder,
-                          input_driver_for)
+from win16.replay import (ArtifactRecorder, GUEST_INSTRUCTION_COORDINATE,
+                          ReplayDivergence, ReplayExhausted,
+                          Win16ReplayRecorder, input_driver_for)
 
 # messages: (hwnd, msg, wparam, lparam, tick, pt)
 KEY_A = (330, 0x0100, 0x41, 0, 10, 0)              # WM_KEYDOWN 'A' @ tick 10
@@ -215,6 +215,30 @@ def test_every_ordinal_carries_an_instruction_coordinate(tmp_path):
     assert all(c.schema_id == GUEST_INSTRUCTION_COORDINATE
                for c in coords.values())
     assert coords[1].value == 100 and coords[3].value == 300
+
+
+def test_artifact_recorder_round_trips_through_the_input_driver(tmp_path):
+    """The interactive recorder's tap surface -> a ReplayArtifact -> the input
+    driver replays the same arrivals.  This is the record<->replay contract the
+    v4 DemoRecorder/DemoDriver pair used to hold, now on ReplayArtifact."""
+    rec = ArtifactRecorder(
+        tmp_path / "session", timeline_id="win16:session",
+        profile=_profile(), base_state=_base_state(), start_instruction=0)
+    rec.arrival(KEY_A, instr=100)
+    rec.clock_sample(200, 20, min_gap=0)
+    rec.arrival(CLICK, instr=300)
+    rec.quit(instr=400)
+    artifact = rec.close()
+    assert rec.records == 4
+
+    d = input_driver_for(artifact)
+    d.sys = _fake_sys()
+    d.sys.machine.cpu.instruction_count = 100
+    assert d.pump_get() == KEY_A
+    d.sys.machine.cpu.instruction_count = 305
+    assert d.pump_get() == CLICK
+    assert d.pump_get() is None and d.sys.quit_posted is True
+    assert d.tick_at(150) == 15                     # clock reproduced
 
 
 def test_clock_sample_rate_limit(tmp_path):
