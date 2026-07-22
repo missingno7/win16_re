@@ -1626,8 +1626,6 @@ def install(api: ApiRegistry) -> None:
         # larger clock_ms unchanged.
         sys = _sys(ctx)
         v = sys.tick_count()
-        if sys.tick_recorder is not None:       # clock sideband (tick demos)
-            sys.tick_recorder.clock(v)
         return v
 
     @api.register("USER", 17, args="ptr")               # GetCursorPos(lpPoint)

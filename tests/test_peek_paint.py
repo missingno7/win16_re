@@ -9,7 +9,7 @@ sit dirty forever with their surfaces never repainted — the "window does not
 refresh when resized" symptom, identical on the interpreted and the strict
 lifted runners (not a lifter bug; a presentation-layer gap).
 
-Headless/replay paths (interactive=False: demo replay, tick replay, verify)
+Headless/replay paths (interactive=False: demo replay, verify)
 keep the old fall-through — their instruction-keyed baselines were recorded
 without peek-time paints.
 """
@@ -22,8 +22,8 @@ WM_PAINT, WM_TIMER = 0x000F, 0x0113
 
 def _sys(*, interactive=True, windows=(), queue=()):
     ns = SimpleNamespace(
-        demo_driver=None, input_drainer=None, tick_driver=None,
-        tick_recorder=None, interactive=interactive, clock_ms=1234,
+        demo_driver=None, input_drainer=None,
+        interactive=interactive, clock_ms=1234,
         msg_queue=list(queue), windows=list(windows),
         timers={}, timer_due={}, timer_procs={},
         scheduled_messages=[],
@@ -84,7 +84,7 @@ def test_hidden_or_clean_windows_never_paint():
 
 
 def test_headless_replay_path_unchanged():
-    # interactive=False (demo/tick replay, verify): NO peek-time paint —
+    # interactive=False (demo replay, verify): NO peek-time paint —
     # the recorded instruction-keyed baselines depend on this.
     sysobj = _sys(interactive=False, windows=[_win()])
     assert peek(sysobj) is None

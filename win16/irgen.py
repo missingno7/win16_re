@@ -113,7 +113,7 @@ def toolchain_provenance() -> str:
 
 def build_ir(machine, entries: Iterable[NEPair], *,
              machine_factory: Callable[[], Any] | None = None,
-             keep_interpreted: Iterable[NEPair] = (),
+             environment_wait_entries: Iterable[NEPair] = (),
              boundary_heads: Iterable[NEPair] = (),
              dispatch_entries: Iterable[NEPair] = (),
              names: Mapping[NEPair, Mapping[str, Any]] | None = None,
@@ -132,7 +132,7 @@ def build_ir(machine, entries: Iterable[NEPair], *,
     ``ne_seg`` alias this layer adds.  ``symbols`` is the provenance
     descriptor of that symbol source (name + sha1), recorded when provided.
 
-    Fact lists (``keep_interpreted``/``boundary_heads``/``dispatch_entries``)
+    Fact lists (``environment_wait_entries``/``boundary_heads``/``dispatch_entries``)
     are NE pairs with dos_re's semantics.  Duplicate entries (a symbol table
     may alias one address) are scanned once.
     """
@@ -185,7 +185,8 @@ def build_ir(machine, entries: Iterable[NEPair], *,
         effect_tagger=make_effect_tagger(machine),
         provenance=provenance,
         notice=_NOTICE,
-        keep_interpreted={"%04X:%04X" % para(p) for p in keep_interpreted},
+        environment_wait_entries={
+            "%04X:%04X" % para(p) for p in environment_wait_entries},
         boundary_heads=frozenset(para(p) for p in boundary_heads),
         dispatch_entries=frozenset(para(p) for p in dispatch_entries),
         identity_for=identity_for,

@@ -19,8 +19,8 @@ MSG = 0x03BD            # MM_WOM_DONE, the first real user of this
 
 def _sys(now=1000, **kw):
     ns = SimpleNamespace(
-        demo_driver=None, input_drainer=None, tick_driver=None,
-        tick_recorder=None, interactive=True, clock_ms=now,
+        demo_driver=None, input_drainer=None,
+        interactive=True, clock_ms=now,
         msg_queue=deque(), windows=[], timers={}, timer_due={}, timer_procs={},
         scheduled_messages=[], quit_posted=None,
         _note_input=lambda m: None,

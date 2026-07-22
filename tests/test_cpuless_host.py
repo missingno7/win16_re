@@ -13,7 +13,7 @@ Game-free.  What is asserted here is the seam a CPUless port stands on:
   argbytes contract, and — the big one — a service that needs to EXECUTE guest
   code all raise instead of returning a plausible value;
 * the module graph of the CPU-free host is importable behind the CPUless
-  import wall (``dos_re.lift.standalone.install_import_guard``).
+  import wall (``dos_re.detachment_guard.install_import_guard``).
 """
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ def test_the_cpu_free_host_imports_behind_the_wall():
     import importlib
     import sys
 
-    from dos_re.lift.standalone import install_import_guard
+    from dos_re.detachment_guard import install_import_guard
 
     names = [m for m in sys.modules
              if m == "win16" or m.startswith(("win16.", "dos_re."))]

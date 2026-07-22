@@ -50,7 +50,7 @@ import pickle
 from pathlib import Path
 
 from dos_re.bootimage import coalesce, instruction_ranges, sha256_file
-from dos_re.independence import VMlessViolation
+from dos_re.independence import GeneratedGraphBootstrapError
 
 from .machine import (          # CPU-free: never the loader
     BOOT_MANIFEST_SCHEMA, THUNK_SEG, Win16Machine)
@@ -87,7 +87,7 @@ def build_boot_image(machine: Win16Machine, out_dir: str | Path, *,
     out = Path(out_dir)
     exe = machine.exe
     if not isinstance(exe, NEExecutable) or not exe.raw:
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             "build_boot_image needs a machine loaded from the real NE "
             "executable (the EXE is consumed at BUILD time only)")
 
@@ -112,7 +112,7 @@ def build_boot_image(machine: Win16Machine, out_dir: str | Path, *,
     overlap = poison_offsets & keep_offsets
     if overlap:
         first = ", ".join(hex(o) for o in sorted(overlap)[:8])
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             f"code_as_data range(s) overlap {len(overlap)} decoded "
             f"instruction byte(s) (first at {first}) — split the fact")
 
@@ -212,7 +212,7 @@ def load_boot_manifest(boot_dir: str | Path) -> dict:
     manifest = json.loads((Path(boot_dir) / "manifest.json")
                           .read_text(encoding="utf-8"))
     if manifest.get("schema") != BOOT_MANIFEST_SCHEMA:
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             f"unrecognized boot image schema in {boot_dir} "
             f"(want {BOOT_MANIFEST_SCHEMA!r}, got {manifest.get('schema')!r})")
     return manifest
@@ -240,26 +240,26 @@ def load_boot_image(boot_dir: str | Path, registry_factory, *,
     image = (boot / manifest["artifacts"]["memory"]).read_bytes()
     got = hashlib.sha256(image).hexdigest()
     if got != manifest["memory_sha256"]:
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             f"boot image memory hash mismatch: {got[:16]} != "
             f"{manifest['memory_sha256'][:16]} — image corrupted or stale")
 
     program = pickle.loads((boot / manifest["artifacts"]["program"]).read_bytes())
     if getattr(program, "raw", b""):
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             "boot image program identity carries raw executable bytes — "
             "not a data-only image")
 
     api = registry_factory()
     if api.slots:
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             "registry_factory returned a registry with import slots already "
             "assigned — slots must come from the manifest alone")
     for key, val in manifest["api_equates"].items():
         mod, ordn = key.rsplit(".", 1)
         have = api.equates.get((mod, int(ordn)))
         if have != val:
-            raise VMlessViolation(
+            raise GeneratedGraphBootstrapError(
                 f"API equate {key} mismatch: registry {have!r} != "
                 f"manifest {val!r} — the registry factory drifted from the "
                 f"one the image was built with")
@@ -301,18 +301,18 @@ def boot_vmless_machine(boot_dir: str | Path, registry_factory, *,
     start while any entry is configured for interpreted execution — that is
     the hard wall gate (an entry merely OUTSIDE the corpus is fine: reaching
     it raises).  Returns ``(machine, manifest, installed)``."""
-    from dos_re.lift.install import install_vmless_graph
+    from dos_re.lift.install import activate_generated_graph
 
     machine, manifest = load_boot_image(boot_dir, registry_factory,
                                         game_root=game_root)
     installed = {}
     if install_graph:
         if skip:
-            raise VMlessViolation(
-                "the VMless wall is not satisfied -- "
+            raise GeneratedGraphBootstrapError(
+                "the generated-graph wall is not satisfied -- "
                 f"{len(skip)} routine(s) configured for interpreted "
                 f"execution ({', '.join(sorted(skip))})")
-        installed = install_vmless_graph(machine.cpu, Path(lift_dir))
+        installed = activate_generated_graph(machine.cpu, Path(lift_dir))
     if arm_wall:
         # THE PHYSICAL WALL: interpretation is now impossible; any uncovered
         # address raises rather than falling back to the interpreter.

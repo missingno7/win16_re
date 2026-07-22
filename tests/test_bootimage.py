@@ -63,8 +63,8 @@ def test_strip_program_keeps_identity_drops_bytes(tmp_path):
 
 def test_manifest_schema_is_gated(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({"schema": "nope"}))
-    from dos_re.independence import VMlessViolation
-    with pytest.raises(VMlessViolation, match="schema"):
+    from dos_re.independence import GeneratedGraphBootstrapError
+    with pytest.raises(GeneratedGraphBootstrapError, match="schema"):
         load_boot_manifest(tmp_path)
 
 

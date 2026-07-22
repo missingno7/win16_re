@@ -101,9 +101,9 @@ def test_unnamed_thunk_slot_gets_the_slot_fallback_tag():
 
 
 def test_facts_are_ne_pairs_translated_to_paragraph_space():
-    doc = _build(keep_interpreted=[(2, 0x0020)])
+    doc = _build(environment_wait_entries=[(2, 0x0020)])
     assert doc["functions"]["0200:0020"]["platform_effect"] == "env_wait"
-    assert doc["facts_applied"]["keep_interpreted"] == ["0200:0020"]
+    assert doc["facts_applied"]["environment_wait_entries"] == ["0200:0020"]
 
 
 def test_duplicate_entries_scan_once_and_dump_is_deterministic():

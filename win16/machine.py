@@ -3,7 +3,7 @@
 Split out of :mod:`win16.loader` so a **CPUless** runtime can hold a Win16
 machine without importing the interpreter.  ``win16.loader`` imports
 ``dos_re.cpu`` at module level (it builds one), which the CPUless import wall
-(``dos_re.lift.standalone.install_import_guard``) forbids outright — so every
+(``dos_re.detachment_guard.install_import_guard``) forbids outright — so every
 consumer that needs only the *record* and the *memory map* takes them from
 here instead, and ``win16.loader`` re-exports them unchanged for the VM path.
 

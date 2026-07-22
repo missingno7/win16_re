@@ -1,10 +1,12 @@
 """The CPU-FREE Win16 host: boot a data-only image and service the Windows API
-for a **CPUless recovered corpus** (DOS_RE 2.0 stage 3, the standalone wall).
+for a **CPUless recovered corpus** (implementations with the ``generated-cpuless``
+recovery level, run without any CPU carrier).
 
-``dos_re.lift.standalone`` gives every port the same four things (the import
-wall, ``run_recovered``, ``FailLoudPlatform``, ``run_deep``).  What it cannot
-give a *Win16* port is the platform itself: a promoted body reaches Windows
-through ``plat.farcall(seg, off, regs, argbytes, cost)``, and win16's API layer
+Under dos_re 3.0 the import wall lives in ``dos_re.detachment_guard`` and a
+reached-but-unimplemented target raises ``dos_re.runtime_miss
+.RuntimeExecutionFrontier``.  What dos_re cannot give a *Win16* port is the
+platform itself: a promoted body reaches Windows through
+``plat.farcall(seg, off, regs, argbytes, cost)``, and win16's API layer
 was CPU-COUPLED — :meth:`ApiRegistry._invoke` read the pascal arguments off the
 emulated stack *via ``cpu``* and finished with ``ret_far(cpu, ...)``.  A CPUless
 host has no ``cpu``.  This module closes that, generically:
@@ -48,7 +50,8 @@ import json
 import pickle
 from pathlib import Path
 
-from dos_re.lift.standalone import FailLoudPlatform
+from dos_re.lift.platform import UnsupportedPlatformEffect
+from dos_re.runtime_miss import RuntimeExecutionFrontier
 from dos_re.x86 import CPUState
 
 from .api.core import Win16ApiGap, api_name
@@ -109,14 +112,14 @@ def load_cpuless_image(boot_dir: str | Path, registry_factory, *,
     same integrity gates (schema, memory hash, EXE-free program identity, the
     registry-drift equate cross-check), but it imports neither ``win16.loader``
     nor ``dos_re.cpu``, so it runs behind the CPUless import wall."""
-    from dos_re.independence import VMlessViolation
+    from dos_re.independence import GeneratedGraphBootstrapError
     from dos_re.memory import Memory
     from .vmsnap import restore_machine_state
 
     boot = Path(boot_dir)
     manifest = json.loads((boot / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("schema") != BOOT_MANIFEST_SCHEMA:
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             f"unrecognized boot image schema in {boot} "
             f"(want {BOOT_MANIFEST_SCHEMA!r}, got {manifest.get('schema')!r})")
     meta = json.loads((boot / "state.json").read_text(encoding="utf-8"))
@@ -124,26 +127,26 @@ def load_cpuless_image(boot_dir: str | Path, registry_factory, *,
     image = (boot / manifest["artifacts"]["memory"]).read_bytes()
     got = hashlib.sha256(image).hexdigest()
     if got != manifest["memory_sha256"]:
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             f"boot image memory hash mismatch: {got[:16]} != "
             f"{manifest['memory_sha256'][:16]} — image corrupted or stale")
 
     program = pickle.loads((boot / manifest["artifacts"]["program"]).read_bytes())
     if getattr(program, "raw", b""):
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             "boot image program identity carries raw executable bytes — "
             "not a data-only image")
 
     api = registry_factory()
     if api.slots:
-        raise VMlessViolation(
+        raise GeneratedGraphBootstrapError(
             "registry_factory returned a registry with import slots already "
             "assigned — slots must come from the manifest alone")
     for key, val in manifest["api_equates"].items():
         mod, ordn = key.rsplit(".", 1)
         have = api.equates.get((mod, int(ordn)))
         if have != val:
-            raise VMlessViolation(
+            raise GeneratedGraphBootstrapError(
                 f"API equate {key} mismatch: registry {have!r} != "
                 f"manifest {val!r} — the registry factory drifted from the "
                 f"one the image was built with")
@@ -163,13 +166,29 @@ def load_cpuless_image(boot_dir: str | Path, registry_factory, *,
     return machine, manifest
 
 
-class Win16CpulessPlatform(FailLoudPlatform):
+class Win16CpulessPlatform:
     """The ``plat`` contract for a CPUless Win16 corpus.
 
-    Inherits ``FailLoudPlatform``'s honest defaults for ``inp``/``outp`` (a
-    Win16 program reaches hardware through the OS, so a port that hits one has
-    found something real) and implements the two effects SimAnt's corpus
+    Carries its own honest defaults for ``inp``/``outp``/``ivec`` (a Win16
+    program reaches hardware through the OS, so a corpus that hits one has
+    found something real — it raises ``UnsupportedPlatformEffect`` with a
+    witness, never a silent no-op) and implements the effects a Win16 corpus
     actually reaches: the import-thunk far-call and the raw INT surface."""
+
+    def inp(self, port, width, cost):
+        raise UnsupportedPlatformEffect(
+            f"IN from port {port & 0xFFFF:#06x} with no host platform "
+            f"implementation")
+
+    def outp(self, port, value, width, cost):
+        raise UnsupportedPlatformEffect(
+            f"OUT to port {port & 0xFFFF:#06x} with no host platform "
+            f"implementation")
+
+    def ivec(self, key, cost, regs):
+        # "Not mine": the caller raises its own frontier witness naming the
+        # vector — an unmodelled external handler stays LOUD.
+        return None
 
     def __init__(self, machine):
         self.machine = machine
@@ -419,3 +438,67 @@ def install_callback_dispatch(platform: Win16CpulessPlatform, resolver) -> None:
     fabricating the game's behaviour rather than reproducing it."""
     platform.callback_resolver = resolver
     platform.carrier.win16_callback_dispatch = platform.callback
+
+
+# --- TEMPORARY 3.0-migration bridge -----------------------------------------
+# dos_re 3.0 deleted ``dos_re.lift.standalone`` (its selection/loading helpers
+# became the declarative ImplementationCatalog).  The corpus-module naming and
+# loading below is the port-side residue a Win16 host still needs until the
+# catalog materializes callables at plan time (3.0 migration Phase 3, at which
+# point this section is REMOVED with its callers).
+
+def module_name(key: str) -> str:
+    """Recovered module basename for a ``'CS:IP'`` key: ``'1010:5F61'`` ->
+    ``'func_1010_5f61'`` (the dos_re emitter's naming convention)."""
+    cs, ip = key.split(":")
+    return f"func_{int(cs, 16):04x}_{int(ip, 16):04x}"
+
+
+def load_recovered(package: str, key: str):
+    """Import promoted recovered function ``key`` from corpus ``package``.
+
+    A missing module is a reached execution frontier: raise the 3.0 witness
+    (``RuntimeExecutionFrontier``) naming the target, never a fallback."""
+    import importlib
+
+    name = module_name(key)
+    try:
+        mod = importlib.import_module(f"{package}.{name}")
+    except ModuleNotFoundError as exc:
+        raise RuntimeExecutionFrontier(
+            target_address=key,
+            reason=f"no recovered module ({name}) in {package} — it (or a "
+                   f"recovered callee) is on the CPUless frontier; promote it "
+                   f"or bind an authored override") from exc
+    return getattr(mod, name)
+
+
+def run_deep(fn, *args, stack_bytes: int = 512 * 1024 * 1024,
+             recursion: int = 200_000, **kwargs):
+    """Run ``fn`` on a thread with a large stack + raised recursion limit so a
+    BOUNDED tail-dispatch loop completes instead of dying on Python's frame
+    limit.  Result and exception propagate unchanged.  (The big stack is the
+    load-bearing half: raising the recursion limit alone lets CPython run past
+    what the C stack holds, crashing the process instead of raising.)"""
+    import sys
+    import threading
+
+    box: dict = {}
+
+    def _target():
+        sys.setrecursionlimit(recursion)
+        try:
+            box["value"] = fn(*args, **kwargs)
+        except BaseException as exc:            # noqa: BLE001 — propagated verbatim
+            box["error"] = exc
+
+    prev = threading.stack_size(stack_bytes)
+    try:
+        t = threading.Thread(target=_target)
+        t.start()
+        t.join()
+    finally:
+        threading.stack_size(prev)
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
