@@ -132,12 +132,21 @@ def _install_return_hook(cpu, thunk_seg: int) -> None:
 
 
 def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
-             *, max_steps: int | None = 20_000_000, yield_check=None
-             ) -> tuple[int, int]:
-    """Far-call seg:off with 16-bit pascal args; returns (AX, DX) at return.
+             *, max_steps: int | None = 20_000_000, yield_check=None,
+             caller_cleanup: bool = False) -> tuple[int, int]:
+    """Far-call seg:off with 16-bit args; returns (AX, DX) at return.
 
     `args` entries are 16-bit words, pushed in list order (pascal declaration
     order).  32-bit values must be pre-split into (hi, lo) word pairs.
+
+    Calling convention: by default PASCAL (the callee cleans its own args via
+    `retf N`, so SP returns to where it started) — every Win16 API entry and
+    every WndProc/dialog/timer callback.  ``caller_cleanup=True`` selects the C
+    (cdecl) convention, where the callee `retf`s WITHOUT popping and leaves the
+    args on the stack for the caller: this wrapper then pops them.  A game's own
+    routines are frequently cdecl (SimAnt's `_win_*`/`internal_*` are), so an
+    island that DELEGATES to an un-recovered guest routine calls it this way.
+
     `yield_check`, if given, is called between chunks (host pause / input).
     `max_steps` caps a runaway callback; pass None for no cap — correct for an
     INTERACTIVE, user-pausable callback (SimAnt's sim-tick TimerProc legitimately
@@ -230,9 +239,15 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
     # sentinel with no frame (OrphanReturnError).  Nothing catches these and
     # keeps running the VM, so the frame doesn't leak.
 
-    if (s.sp & 0xFFFF) != saved_sp:
+    # PASCAL: the callee's `retf N` already popped the args, so SP is back at
+    # saved_sp.  CDECL: the callee left the args on the stack (SP is short by
+    # their byte count) and we pop them here.
+    expected = (saved_sp - 2 * len(args)) & 0xFFFF if caller_cleanup else saved_sp
+    if (s.sp & 0xFFFF) != expected:
         raise CallbackOverrun(
             f"callback {seg:04X}:{off:04X} returned with SP {s.sp:04X} != "
-            f"{saved_sp:04X} (wrong argument pop?)")
+            f"{expected:04X} (wrong argument pop?)")
+    if caller_cleanup:
+        s.sp = (s.sp + 2 * len(args)) & 0xFFFF     # caller cleans: pop the args
     s.cs, s.ip = saved_cs, saved_ip
     return s.ax & 0xFFFF, s.dx & 0xFFFF

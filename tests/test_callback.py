@@ -49,6 +49,43 @@ def test_unbounded_callback_runs_to_completion():
     assert cpu.win16_callback_frames == []       # clean return pops our frame
 
 
+def test_cdecl_caller_cleanup_pops_the_args():
+    """A cdecl (C-convention) guest routine `retf`s WITHOUT popping its args,
+    leaving them on the stack for the caller — so with caller_cleanup=True the
+    routine returns with SP short by the arg bytes, and call_far pops them (no
+    spurious CallbackOverrun).  This is what lets an island delegate to an
+    un-recovered SimAnt routine (its _win_*/internal_* are cdecl)."""
+    from win16.callback import call_far
+
+    class _CdeclCPU(_FakeCPU):
+        # A cdecl callee leaves its args on the stack: SP ends 2*nargs short of
+        # where it started (saved_sp), not back at saved_sp.
+        def __init__(self, nargs):
+            super().__init__(return_after=1)
+            self._nargs = nargs
+
+        def run(self, n):
+            from win16.callback import _CallbackReturn
+            self.s.sp = (self._clean_sp - 2 * self._nargs) & 0xFFFF
+            raise _CallbackReturn()
+
+    cpu = _CdeclCPU(nargs=3)
+    ax, dx = call_far(cpu, 0x60, 0x0100, 0x2930, [0x11, 0x22, 0x33],
+                      max_steps=None, caller_cleanup=True)
+    assert (ax, dx) == (0x1234, 0x5678)
+    assert cpu.s.sp == cpu._clean_sp             # args popped -> SP fully restored
+    assert cpu.win16_callback_frames == []
+
+    # A pascal call of the same fake (SP already restored) would MISmatch the
+    # cdecl expectation — prove the two conventions are distinct.
+    import pytest as _pytest
+    from win16.callback import CallbackOverrun
+    cpu2 = _CdeclCPU(nargs=2)
+    with _pytest.raises(CallbackOverrun):
+        call_far(cpu2, 0x60, 0x0100, 0x2930, [0x11, 0x22], max_steps=None,
+                 caller_cleanup=False)          # pascal: expects SP==saved_sp
+
+
 def test_callback_stack_resumable_and_capture_refusal():
     """A base captured inside a callback whose API has Python-side post-work
     (UpdateWindow's WM_PAINT — the owner's slow-drawing recording) is NOT
