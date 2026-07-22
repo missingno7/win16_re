@@ -233,6 +233,21 @@ class Win16ReplayInputDriver:
         """Timeline position: events applied so far, in ordinal order."""
         return self.applied
 
+    def seek(self, ordinal: int) -> None:
+        """Position the timeline cursors as if the first ``ordinal`` events
+        were already applied (a restored continuation carries the machine
+        state; this carries the input-stream state)."""
+        if not 0 <= ordinal <= len(self.events):
+            raise ReplayError(
+                f"seek ordinal {ordinal} outside the timeline "
+                f"(0..{len(self.events)})")
+        consumed = {e.point.ordinal for e in self.events[:ordinal]}
+        self._ei = sum(1 for e in self._events if e.point.ordinal in consumed)
+        self._di = sum(1 for e in self._dialogs if e.point.ordinal in consumed)
+        self._mi = sum(1 for e in self._boxes if e.point.ordinal in consumed)
+        self.applied = ordinal
+        self.ended = False
+
     # -- GetTickCount reproduction ----------------------------------------
 
     def tick_at(self, instr: int) -> int:
