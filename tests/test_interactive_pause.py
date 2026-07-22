@@ -57,3 +57,42 @@ def test_pause_parks_at_instruction_boundary_without_getmessage():
     finally:
         drv.stop()
         t.join(timeout=1.0)
+
+
+def test_ready_gate_defers_the_park_until_a_resumable_boundary():
+    """A recorder gates the park on ``ready`` — the CPU must NOT park at a
+    boundary the gate rejects (inside a non-resumable callback), and must park
+    at the first boundary the gate accepts (the top-level / resumable one).
+    This is the fix for a base captured mid-UpdateWindow that failed deep into
+    replay with OrphanReturnError."""
+    drv = _driver()
+    resumable = {"ok": False}
+    spun = {"n": 0}
+
+    def worker():
+        while drv.running:
+            drv.check_pause()
+            spun["n"] += 1
+            time.sleep(0.0005)
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        # Request a pause that only accepts a resumable boundary; the gate says
+        # NO for now (simulating: parked inside UpdateWindow's WM_PAINT).
+        parked = drv.pause_at_boundary(timeout=0.4,
+                                       ready=lambda: resumable["ok"])
+        assert not parked, "parked at a non-resumable boundary"
+        moved = spun["n"]
+        time.sleep(0.03)
+        assert spun["n"] > moved, "worker wrongly blocked while gate said no"
+        # The paint finishes: the boundary is now resumable.
+        resumable["ok"] = True
+        assert drv.paused.wait(2.0), "did not park once the gate accepted"
+        frozen = spun["n"]
+        time.sleep(0.03)
+        assert spun["n"] == frozen, "kept running after the resumable park"
+        drv.resume()
+    finally:
+        drv.stop()
+        t.join(timeout=1.0)

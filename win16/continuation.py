@@ -30,8 +30,15 @@ CONTINUATION_SCHEMA = "win16-re-continuation-v1"
 
 def capture_continuation(machine, *, event_cursor: int,
                          note: str = "", game: str = "") -> ContinuationState:
-    """Capture the machine as a profile-private replay continuation."""
+    """Capture the machine as a profile-private replay continuation.
+
+    Two capture refusals guard resumability, both loud AT CAPTURE rather than
+    deep into replay: a modal DialogBox/MessageBox (nested Python loop), and a
+    non-resumable callback frame in flight (an API with Python-side post-work,
+    e.g. UpdateWindow's WM_PAINT) — see win16.callback.refuse_unresumable_capture."""
+    from win16.callback import refuse_unresumable_capture
     refuse_modal_dialog(machine)
+    refuse_unresumable_capture(machine.cpu)
     sysobj = machine.api.services["system"]
     return ContinuationState(
         schema_id=CONTINUATION_SCHEMA,

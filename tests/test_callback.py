@@ -49,6 +49,44 @@ def test_unbounded_callback_runs_to_completion():
     assert cpu.win16_callback_frames == []       # clean return pops our frame
 
 
+def test_callback_stack_resumable_and_capture_refusal():
+    """A base captured inside a callback whose API has Python-side post-work
+    (UpdateWindow's WM_PAINT — the owner's slow-drawing recording) is NOT
+    resumable, and the capture guard must refuse it loudly BY NAME rather than
+    letting it fail millions of instructions into replay (OrphanReturnError)."""
+    from win16.callback import (UnresumableCaptureError,
+                                callback_stack_resumable,
+                                refuse_unresumable_capture)
+
+    class _CPU:
+        pass
+
+    cpu = _CPU()
+    # No frames pending: a top-level boundary is resumable.
+    assert callback_stack_resumable(cpu)
+    refuse_unresumable_capture(cpu)                 # no raise
+
+    # A DispatchMessage/SendMessage callback (result passes through) IS
+    # resumable — these are the pass-through APIs.
+    cpu.win16_callback_frames = [{"api": "DispatchMessage", "argbytes": 4}]
+    assert callback_stack_resumable(cpu)
+    refuse_unresumable_capture(cpu)
+
+    # An UpdateWindow callback in flight: NOT resumable, refused by name.
+    cpu.win16_callback_frames = [{"api": "DispatchMessage", "argbytes": 4},
+                                 {"api": "UpdateWindow", "argbytes": 2}]
+    assert not callback_stack_resumable(cpu)
+    with pytest.raises(UnresumableCaptureError, match="UpdateWindow"):
+        refuse_unresumable_capture(cpu)
+
+    # An orphan frame (owed by a prior resume) counts too.
+    cpu.win16_callback_frames = []
+    cpu.win16_orphan_frames = [{"api": "UpdateWindow", "argbytes": 2}]
+    assert not callback_stack_resumable(cpu)
+    with pytest.raises(UnresumableCaptureError):
+        refuse_unresumable_capture(cpu)
+
+
 def test_boundary_park_inside_callback_is_a_yield_not_a_stop():
     """A fact-declared wait loop that parks INSIDE a WndProc/TimerProc
     callback (win16.interactive boundary parks, lifted graph) must be caught

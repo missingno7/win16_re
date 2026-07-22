@@ -192,7 +192,7 @@ class InteractiveDriver:
             self._cond.notify()
         self._resume.set()                  # release a parked CPU thread
 
-    def pause_at_boundary(self, timeout: float = 3.0) -> bool:
+    def pause_at_boundary(self, timeout: float = 3.0, *, ready=None) -> bool:
         """Ask the CPU thread to park at its next quiescent point — either a
         GetMessage boundary OR an instruction-chunk boundary (see check_pause).
         The latter lets a snapshot be taken while the game BUSY-POLLS via
@@ -201,7 +201,19 @@ class InteractiveDriver:
         An instruction boundary is as valid a snapshot point as a message one:
         no Python handler loop is open between top-level CPU steps.  (A modal
         DialogBox/MessageBox IS a nested Python loop — save_snapshot still
-        refuses those, and the CPU won't reach these checks inside one anyway.)"""
+        refuses those, and the CPU won't reach these checks inside one anyway.)
+
+        ``ready`` is an optional ``Callable[[], bool]`` gate: when given, the
+        CPU parks ONLY at a boundary where ``ready()`` is True.  A chunk
+        boundary reached via call_far can sit inside a NESTED callback whose
+        dispatching API has Python-side post-work (e.g. UpdateWindow's WM_PAINT)
+        — a base captured there is not resume-safe (win16.callback
+        .OrphanReturnError deep into replay).  A recorder passes
+        ``ready=lambda: callback_stack_resumable(cpu)`` so the park lands only
+        at a top-level / resumable boundary.  ``None`` = park anywhere (the
+        prior behaviour; correct for a directory snapshot that records the
+        in-flight frame)."""
+        self._pause_ready = ready
         self._pause_requested = True
         with self._cond:
             self._cond.notify()
@@ -209,8 +221,16 @@ class InteractiveDriver:
 
     def resume(self) -> None:
         self._pause_requested = False
+        self._pause_ready = None
         self.paused.clear()
         self._resume.set()
+
+    def _should_park(self) -> bool:
+        """A pause is honoured here only if no ``ready`` gate is set or it is
+        satisfied — so a recorder can refuse to park inside a non-resumable
+        nested callback and wait for the next top-level boundary instead."""
+        ready = getattr(self, "_pause_ready", None)
+        return ready is None or bool(ready())
 
     # -- CPU thread side ---------------------------------------------------
     def _park(self) -> None:
@@ -235,7 +255,7 @@ class InteractiveDriver:
         recorder = self._recorder()
         if recorder is not None:
             recorder.clock_sample(self._instr(), now)
-        if self._pause_requested:
+        if self._pause_requested and self._should_park():
             self._park()
 
     def _instr(self) -> int:
@@ -269,7 +289,7 @@ class InteractiveDriver:
 
     def _next(self, sysobj):
         while True:
-            if self._pause_requested:
+            if self._pause_requested and self._should_park():
                 self._park()
             self._drain_input()
             if not self.running or sysobj.quit_posted is not None:

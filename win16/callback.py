@@ -52,6 +52,47 @@ class OrphanReturnError(RuntimeError):
     continuation cannot be reconstructed VM-side."""
 
 
+class UnresumableCaptureError(RuntimeError):
+    """A base/snapshot was captured while parked inside a callback whose
+    dispatching API has Python-side post-work — so it could never resume.
+    Raised AT CAPTURE (loud, by name) rather than letting the artifact fail
+    deep into replay with OrphanReturnError."""
+
+
+def _pending_frames(cpu):
+    """Every callback frame a resumed machine still owes: the orphans a prior
+    resume has not replayed yet, plus the live call_far chain parked now."""
+    return (list(getattr(cpu, "win16_orphan_frames", []))
+            + list(getattr(cpu, "win16_callback_frames", [])))
+
+
+def callback_stack_resumable(cpu) -> bool:
+    """True when a base captured NOW could be deterministically resumed: every
+    pending callback frame is one whose API returns the callback's result
+    verbatim (``_ORPHAN_RESUMABLE``).  A frame dispatched from an API with
+    Python-side post-work (UpdateWindow's region validation, a paint that
+    validates its update rect, …) cannot be reconstructed VM-side, so a base
+    captured inside it is NOT resumable.  A recorder uses this as the
+    ``pause_at_boundary(ready=…)`` gate so it parks only at a resumable
+    boundary."""
+    return all(fr["api"] in _ORPHAN_RESUMABLE for fr in _pending_frames(cpu))
+
+
+def refuse_unresumable_capture(cpu) -> None:
+    """Capture guard: raise :class:`UnresumableCaptureError` if the machine is
+    parked inside a non-resumable callback, naming the offending API(s).  The
+    honest, loud-at-capture counterpart to the OrphanReturnError a bad base
+    would otherwise raise millions of instructions into replay."""
+    bad = sorted({fr["api"] for fr in _pending_frames(cpu)
+                  if fr["api"] not in _ORPHAN_RESUMABLE})
+    if bad:
+        raise UnresumableCaptureError(
+            f"cannot capture a resumable base: parked inside callback(s) "
+            f"dispatched from {bad}, whose API has Python-side post-work "
+            f"(only {sorted(_ORPHAN_RESUMABLE)} are resume-safe).  Park at a "
+            f"top-level boundary and retry.")
+
+
 class _CallbackReturn(Exception):
     """Raised by the sentinel hook when a callback far-returns; caught by the
     innermost active call_far (correct even when callbacks nest)."""
