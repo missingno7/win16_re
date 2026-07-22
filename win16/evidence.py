@@ -94,7 +94,7 @@ class Win16EvidenceProbe:
     """
 
     __slots__ = ("entries", "sites", "ordinal", "counts", "first_ord",
-                 "dyn", "pending")
+                 "dyn", "pending", "callbacks")
 
     def __init__(self, entries: frozenset[tuple[int, int]],
                  sites: frozenset[tuple[int, int]],
@@ -110,6 +110,21 @@ class Win16EvidenceProbe:
         #: where target is a guest (cs, ip) tuple or an API hook-name string.
         self.dyn: dict[tuple[int, int], dict[Any, list[int]]] = {}
         self.pending: tuple[int, int] | None = None
+        #: (api hook name, target (cs, ip)) -> [count, first_ord, last_ord] —
+        #: host->guest callback dispatches (install as
+        #: ``cpu.win16_callback_observer`` via :meth:`record_callback`).
+        self.callbacks: dict[tuple[str, tuple[int, int]], list[int]] = {}
+
+    def record_callback(self, api_name: str, seg: int, off: int) -> None:
+        """``cpu.win16_callback_observer``: an API dispatched into guest code."""
+        key = (str(api_name), (seg, off))
+        cur = self.ordinal()
+        rec = self.callbacks.get(key)
+        if rec is None:
+            self.callbacks[key] = [1, cur, cur]
+        else:
+            rec[0] += 1
+            rec[2] = cur
 
     def _bind(self, target) -> None:
         tgts = self.dyn.setdefault(self.pending, {})
@@ -165,8 +180,13 @@ def finish(probe: Win16EvidenceProbe, *, image: ImageIdentity,
            profile: ReplayExecutionIdentity,
            site_kinds: Mapping[tuple[int, int], str],
            provenance: Mapping[str, Any],
-           ) -> tuple[ReplayExecutionEvidence, EntryOnlyVisits]:
-    """Materialize the probe's raw observations as identity-keyed evidence."""
+           ) -> tuple[ReplayExecutionEvidence, EntryOnlyVisits, tuple[str, ...]]:
+    """Materialize the probe's raw observations as identity-keyed evidence.
+
+    Returns ``(evidence, visits, callback_entries)`` — the third element is
+    the observed host->guest callback TARGETS (WndProcs, dialog procs, timer
+    procs) as function identities: the additional coverage ROOTS a Win16
+    program has beyond its executable entry point."""
     program = image.program
 
     def fid(cs: int, ip: int) -> str:
@@ -204,7 +224,20 @@ def finish(probe: Win16EvidenceProbe, *, image: ImageIdentity,
             transfers.append(ObservedTransfer(
                 source, target_id, kind, count, point(first), point(last)))
 
+    callback_entries: set[str] = set()
+    for (api_name, target), (count, first, last) in probe.callbacks.items():
+        source = BoundaryIdentity(program, "platform-effect",
+                                  f"api:{api_name}").key \
+            if not api_name.startswith(("api:", "proc:")) \
+            else BoundaryIdentity(program, "platform-effect", api_name).key
+        target_id = (fid(*target) if target in probe.entries
+                     else pid(*target))
+        if target in probe.entries:
+            callback_entries.add(target_id)
+        transfers.append(ObservedTransfer(
+            source, target_id, "callback", count, point(first), point(last)))
+
     evidence = ReplayExecutionEvidence(
         profile.identity_digest, tuple(transfers),
         provenance=dict(provenance))
-    return evidence, EntryOnlyVisits(visits)
+    return evidence, EntryOnlyVisits(visits), tuple(sorted(callback_entries))

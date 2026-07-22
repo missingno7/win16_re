@@ -77,10 +77,18 @@ def test_finish_emits_static_import_compatible_identities():
     p.record_interpreted_instruction((0x100, 0x55))     # site ->
     p.record_hook_unverified((0x60, 0x8), "api:USER.1:MessageBeep")
 
-    evidence, visits = finish(
+    p.record_callback("DispatchMessage", 0x200, 0x20)   # a WndProc dispatch
+    evidence, visits, roots = finish(
         p, image=IMAGE, address_space="win16-para", timeline_id="t",
         profile=_profile(), site_kinds={(0x100, 0x55): "call_ind"},
         provenance={"observer": "test"})
+    # The callback target is a known function entry -> it is a coverage ROOT,
+    # and the dispatch lands as a "callback" transfer from the API boundary.
+    assert roots == (FunctionIdentity(IMAGE, "win16-para", "0200:0020").key,)
+    cb = [t for t in evidence.transfers if t.kind == "callback"]
+    assert len(cb) == 1 and cb[0].source == BoundaryIdentity(
+        ProgramIdentity("game:1.0"), "platform-effect",
+        "api:DispatchMessage").key
 
     # BOTH functions were entered: 0100:0010 directly, and 0200:0020 as the
     # dispatch target (its execution is an entry observation like any other).

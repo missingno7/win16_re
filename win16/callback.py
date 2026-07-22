@@ -118,6 +118,15 @@ def call_far(cpu, thunk_seg: int, seg: int, off: int, args: list[int],
     `cpu.run` below and raises there, which is the honest outcome: this host
     cannot service the callback at all.
     """
+    observer = getattr(cpu, "win16_callback_observer", None)
+    if observer is not None:
+        # Evidence seam: which API dispatched into which guest entry.  The
+        # host->guest transfers the static IR cannot see (WndProc, dialog
+        # proc, TimerProc registrations resolve at runtime) — recorded as
+        # replay execution evidence and as the callback ROOTS of coverage.
+        api_name, _argbytes = getattr(cpu, "win16_current_api", ("?", 0))
+        observer(api_name, seg & 0xFFFF, off & 0xFFFF)
+
     dispatch = getattr(cpu, "win16_callback_dispatch", None)
     if dispatch is not None:
         return dispatch(seg, off, list(args))
