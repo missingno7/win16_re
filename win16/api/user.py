@@ -1849,6 +1849,10 @@ def install(api: ApiRegistry) -> None:
     def BeginPaint(ctx: CallContext) -> int:
         sys = _sys(ctx)
         win = sys.handles.require(ctx.args[0], Window)
+        # Open a paint session: the primitives up to EndPaint (erase + XOR
+        # highlights + tile blit) build ONE frame; the host presents it once at
+        # EndPaint, not on each intermediate (that is the nest-view blink).
+        win.surface.begin_paint()
         hdc = sys.new_dc(window=win)
         # Real USER: rcPaint = the update region's box; the background is
         # erased ONLY when an invalidation requested it (RDW_ERASE pending);
@@ -1890,13 +1894,16 @@ def install(api: ApiRegistry) -> None:
         seg, off = (ctx.args[1] >> 16) & 0xFFFF, ctx.args[1] & 0xFFFF
         sys.handles.remove(ctx.mem.rw(seg, off))         # the BeginPaint DC
         win = sys.handles.get(ctx.args[0])
-        clip = getattr(win, "_paint_clip", None) if isinstance(win, Window) else None
-        if clip is not None:
-            # Apply the BeginPaint clip: keep the painted pixels inside the
-            # update region, restore everything outside it.
-            win._paint_clip = None
-            rects, before = clip
-            _apply_paint_clip(win.surface, rects, before)
+        if isinstance(win, Window):
+            clip = getattr(win, "_paint_clip", None)
+            if clip is not None:
+                # Apply the BeginPaint clip: keep the painted pixels inside the
+                # update region, restore everything outside it.
+                win._paint_clip = None
+                rects, before = clip
+                _apply_paint_clip(win.surface, rects, before)
+            # The frame is now complete (clip applied): publish it for the host.
+            win.surface.end_paint()
         return 1
 
     @api.register("USER", 66, args="word")              # GetDC(hwnd)

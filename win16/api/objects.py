@@ -158,21 +158,36 @@ class Icon:
 class Surface:
     """Top-down RGB pixel buffer, 3 bytes per pixel.
 
-    `version` increments on every mutation — hosts use it to redraw only
-    when pixels actually changed (flicker-free presentation).
+    `version` increments on every mutation — the fine-grained consistency
+    counter a reader uses to detect that pixels changed under it (tearing
+    avoidance).  `present_version` is the coarser FRAME counter a host presents
+    on: it advances only at frame boundaries, never on the intermediate
+    primitives of a multi-step paint.
 
-    ORDERING CONTRACT: `touch()` PUBLISHES a frame, so a drawing primitive
-    calls it once its pixels are final, never before.  Hosts read surfaces
-    concurrently with the code that draws them (a CPU worker thread draws, a
-    GUI thread composites), and a primitive here is a Python loop the reader
-    can interleave with: a bump issued first would let the reader copy a
-    half-drawn buffer, observe an UNCHANGED version around the copy, and — with
-    no later bump — keep displaying that torn frame.  Enforced by
+    WHY TWO COUNTERS.  A single WM_PAINT is many primitives — SimAnt's nest
+    view runs BeginPaint -> [InvertRect x4 (erase old highlights), FillRect,
+    SetDIBitsToDevice (blit tiles), InvertRect x4 (draw new highlights)] ->
+    EndPaint.  Each primitive touch()es, so presenting on `version` shows the
+    half-built, mid-XOR intermediates and the highlight regions FLICKER (the
+    "black nest blinking").  Only the state at EndPaint is a complete frame.
+    So `touch()` bumps `present_version` only OUTSIDE a paint session (a direct
+    draw is its own complete frame); inside BeginPaint..EndPaint the frame is
+    published once, by end_paint().
+
+    ORDERING CONTRACT: `touch()` PUBLISHES, so a drawing primitive calls it
+    once its pixels are final, never before.  Hosts read surfaces concurrently
+    with the code that draws them (a CPU worker thread draws, a GUI thread
+    composites), and a primitive here is a Python loop the reader can interleave
+    with: a bump issued first would let the reader copy a half-drawn buffer,
+    observe an UNCHANGED version around the copy, and — with no later bump —
+    keep displaying that torn frame.  Enforced by
     tests/test_surface_version_order.py."""
     w: int
     h: int
     pixels: bytearray = field(default_factory=bytearray)
     version: int = 0
+    present_version: int = 0
+    painting: int = 0                    # active BeginPaint depth
 
     def __post_init__(self) -> None:
         if not self.pixels:
@@ -180,6 +195,21 @@ class Surface:
 
     def touch(self) -> None:
         self.version += 1
+        if self.painting == 0:           # a draw outside a paint IS a full frame
+            self.present_version += 1
+
+    def begin_paint(self) -> None:
+        """Enter a paint session: primitives until end_paint() build ONE frame
+        and must not be presented individually."""
+        self.painting += 1
+
+    def end_paint(self) -> None:
+        """Close a paint session; the outermost close publishes the complete
+        frame for presentation."""
+        if self.painting > 0:
+            self.painting -= 1
+        if self.painting == 0:
+            self.present_version += 1
 
     def fill(self, rgb: tuple[int, int, int]) -> None:
         self.pixels[:] = bytes(rgb) * (self.w * self.h)

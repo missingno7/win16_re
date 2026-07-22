@@ -136,9 +136,12 @@ def own_windows(sysobj) -> list:
 
 
 def tree_version(sysobj, window) -> int:
-    """Sum of surface versions over `window` and its visible descendants — a
-    change-detect key so a host redraws the composite when any child repaints."""
-    total = window.surface.version
+    """Sum of surface PRESENT versions over `window` and its visible
+    descendants — the frame-boundary change-detect key a host redraws on.  Uses
+    ``present_version`` (advances only at a complete frame) rather than the
+    per-primitive ``version``, so the host never presents the half-built
+    intermediates of a multi-step BeginPaint..EndPaint (the nest-view blink)."""
+    total = window.surface.present_version
     for child in child_windows(sysobj, window.handle):
         total += tree_version(sysobj, child)
     return total
