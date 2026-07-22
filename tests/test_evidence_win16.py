@@ -86,7 +86,7 @@ def test_finish_emits_static_import_compatible_identities():
     # and the dispatch lands as a "callback" transfer from the API boundary.
     assert roots == (FunctionIdentity(IMAGE, "win16-para", "0200:0020").key,)
     cb = [t for t in evidence.transfers if t.kind == "callback"]
-    assert len(cb) == 1 and cb[0].source == BoundaryIdentity(
+    assert len(cb) == 1 and cb[0].source_id == BoundaryIdentity(
         ProgramIdentity("game:1.0"), "platform-effect",
         "api:DispatchMessage").key
 
