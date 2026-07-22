@@ -71,25 +71,27 @@ def snapshot_game(snap_dir: str | Path) -> str:
     return meta.get("game", "")
 
 
-def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
-                  game: str = "") -> Path:
+def refuse_modal_dialog(machine) -> None:
+    """The ONE capture refusal: a modal DialogBox/MessageBox runs a nested
+    Python message loop, so its call-stack state is not on the resumable
+    path."""
     from win16.api.dialogs import Dialog
-    out = Path(out_dir)
     sysobj = machine.api.services["system"]
     if any(isinstance(o, Dialog) for o in sysobj.handles._objects.values()):
         raise SnapshotError("cannot snapshot while a modal dialog is open")
-    out.mkdir(parents=True, exist_ok=True)
 
-    (out / "memory.bin").write_bytes(bytes(machine.mem.data))
 
+def machine_meta(machine, *, note: str = "", game: str = "") -> dict:
+    """The serializable machine state record shared by directory snapshots
+    and replay continuation captures (everything except the two byte
+    payloads: the memory image and the pickled OS graph)."""
     # Callback frames pending completion: orphans a resumed machine still owes
     # (outermost first) plus the live call_far chain parked right now — a
     # resumed snapshot must replay each of these returns at the sentinel
     # (win16/callback.py: _return_hook).
     pending_frames = (list(getattr(machine.cpu, "win16_orphan_frames", []))
                       + list(getattr(machine.cpu, "win16_callback_frames", [])))
-
-    meta = {
+    return {
         "kind": "win16-snapshot",
         "version": 3,
         "note": note,
@@ -108,23 +110,37 @@ def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
         # them a resumed snapshot loses every dynamically-loaded DLL and
         # GetProcAddress returns NULL — a stored FARPROC then far-calls NULL.
         "libraries": dict(machine.api.services.get("libraries", {})),
-        "digest": digest(machine),
     }
-    (out / "state.json").write_text(json.dumps(meta, indent=1))
 
-    # Detach the live host wiring before pickling: message_source, input_drainer
-    # and yield_check are bound methods of the interactive driver, which holds a
-    # threading.Condition (an RLock) that cannot be pickled.  They are re-attached
-    # by whoever resumes the snapshot.
+
+def pickle_system(sysobj) -> bytes:
+    """Pickle the OS object graph with the live host wiring detached:
+    message_source, input_drainer and yield_check are bound methods of the
+    interactive driver, which holds a threading.Condition (an RLock) that
+    cannot be pickled.  They are re-attached by whoever resumes."""
     _HOST_ATTRS = ("machine", "message_source", "input_drainer", "yield_check")
     saved = {a: getattr(sysobj, a, None) for a in _HOST_ATTRS}
     for a in _HOST_ATTRS:
         setattr(sysobj, a, None)
     try:
-        (out / "system.pickle").write_bytes(pickle.dumps(sysobj))
+        return pickle.dumps(sysobj)
     finally:
         for a, v in saved.items():
             setattr(sysobj, a, v)
+
+
+def save_snapshot(machine, out_dir: str | Path, *, note: str = "",
+                  game: str = "") -> Path:
+    out = Path(out_dir)
+    refuse_modal_dialog(machine)
+    out.mkdir(parents=True, exist_ok=True)
+
+    (out / "memory.bin").write_bytes(bytes(machine.mem.data))
+    meta = machine_meta(machine, note=note, game=game)
+    meta["digest"] = digest(machine)
+    (out / "state.json").write_text(json.dumps(meta, indent=1))
+    sysobj = machine.api.services["system"]
+    (out / "system.pickle").write_bytes(pickle_system(sysobj))
     return out
 
 
@@ -150,16 +166,25 @@ def load_snapshot(snap_dir: str | Path, machine_factory):
 
 def restore_machine_state(machine, snap: Path, meta: dict) -> None:
     """Overlay a snapshot's memory + CPU state + OS object graph onto a
-    constructed machine — the shared body of :func:`load_snapshot` and the
-    EXE-free boot-image load path (``win16.bootimage``, dos_re_2.0 §1a').
-    Performs NO digest check: each caller owns its own integrity gate
-    (load_snapshot the game-observable digest; the boot loader the
-    manifest's post-poison memory hash)."""
+    constructed machine — the shared body of :func:`load_snapshot`, the
+    EXE-free boot-image load path (``win16.bootimage``) and the replay
+    continuation codec (``win16.continuation``).  Performs NO digest check:
+    each caller owns its own integrity gate (load_snapshot the
+    game-observable digest; the boot loader the manifest's post-poison
+    memory hash; replay restore the artifact's page hashes)."""
+    restore_machine_payload(machine, meta,
+                            (snap / "memory.bin").read_bytes(),
+                            (snap / "system.pickle").read_bytes())
+
+
+def restore_machine_payload(machine, meta: dict, mem_image: bytes,
+                            system_pickle: bytes) -> None:
+    """The in-memory body of :func:`restore_machine_state` (the replay
+    continuation codec holds both payloads as artifact regions, not files)."""
     # dos_re.x86, not dos_re.cpu: CPUState is a register VALUE record living
     # in the ISA leaf, so this restore path stays importable under the CPUless
     # import wall (the CPU-free boot in win16.cpuless calls it too).
     from dos_re.x86 import CPUState
-    mem_image = (snap / "memory.bin").read_bytes()
     if len(mem_image) != len(machine.mem.data):
         raise SnapshotError("memory image size mismatch")
     machine.mem.data[:] = mem_image
@@ -177,7 +202,7 @@ def restore_machine_state(machine, snap: Path, meta: dict) -> None:
     machine.cpu.win16_orphan_frames = list(meta.get("callback_frames", []))
     _install_return_hook(machine.cpu, THUNK_SEG)
 
-    sysobj = pickle.loads((snap / "system.pickle").read_bytes())
+    sysobj = pickle.loads(system_pickle)
     sysobj.machine = machine
     machine.api.services["system"] = sysobj
     # `interactive` is HOST wiring like message_source/input_drainer: a live
