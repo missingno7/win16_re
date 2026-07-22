@@ -85,11 +85,27 @@ directly — win16_re must never fork or re-implement them:
   event stream is portable, its continuations are profile-local.  This is the
   3.0 formulation of the old "demos are hook-config-specific" rule.
 
+## Implementation status (what has landed)
+
+The mapping above is realized in code:
+
+| Layer | Module(s) | State |
+|---|---|---|
+| Replay format | `win16/replay.py` (channels, coordinate schema, recorder, input driver, `ArtifactRecorder`), `win16/continuation.py` (`ContinuationState` codec) | DONE; the v4 gate demo converts byte-identically (`scripts/demo2replay.py`) |
+| Execution evidence | `win16/evidence.py` (function-visit + dispatch/callback observation probe) | DONE; feeds `dos_re/tools/atlas.py ingest-replay` |
+| Verification driver | `win16/replay_driver.py` (`ReplayDriver` + `win16-re-observable-v1` projection contract) | DONE; `verify_interval` proves oracle ≡ detached candidate |
+| Catalog + plan | `simant/execution.py` (game-side), `dos_re.execution` | DONE; islands are authored-faithful, generated corpora are catalog entries, one `ExecutionPlan` per profile |
+| One player | `scripts/play.py` / `scripts/replay.py` `--profile {development,detached}` | DONE; `boot_detached` is the single canonical detached construction |
+
 ## Migration bridges (temporary, marked in code)
 
 - `win16.cpuless.module_name/load_recovered/run_deep` — corpus loading residue
   from the deleted `dos_re.lift.standalone`; removed when the
-  ImplementationCatalog materializes callables at plan time (Phase 3).
-- `win16.demo` (v4 JSONL) survives only until the ReplayArtifact layer lands
-  (Phase 1) and is then deleted with its reader; old recordings are converted
-  once or re-recorded (dos_re 3.0 itself retains no legacy replay reader).
+  ImplementationCatalog materializes callables at plan time.
+- `win16.demo` (v4 JSONL) is now READ-ONLY residue: the v4 recorder is
+  retired (recording is `ArtifactRecorder`), and the v4 reader (`DemoDriver`)
+  survives only until the byte-exact analysis scripts
+  (`checkpoints`/`liftverify`/`verifyislands`/`adaptverify`) migrate to
+  `input_driver_for(ReplayArtifact)` — which has the identical interface.
+  dos_re 3.0 itself retains no legacy replay reader; old recordings convert
+  once or are re-recorded.
